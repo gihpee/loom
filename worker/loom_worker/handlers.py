@@ -1,0 +1,248 @@
+"""Command handlers: pure executors of orchestrator commands.
+
+Each handler returns an Ack (and optionally extra WorkerMessages to send).
+No placement/routing decisions are made here.
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+import threading
+from typing import Callable, List, Optional
+
+from loom_worker.backends import make_backend
+from loom_worker.proto import gateway_pb2, worker_control_pb2
+from loom_worker.state import PipelineRole, ShardSpec, ShardState, ShardStatus, WorkerState
+from loom_worker.watchdog import QuotaWatchdog
+
+logger = logging.getLogger("loom_worker.handlers")
+
+
+class CommandHandlers:
+    def __init__(
+        self,
+        state: WorkerState,
+        *,
+        send: Callable[[gateway_pb2.WorkerMessage], None],
+        backend_kwargs: Optional[dict] = None,
+        device: str = "cpu",
+        watchdog_poll_s: float = 2.0,
+        relay_url: str = "",
+        rss_overhead_bytes: Optional[int] = None,
+    ) -> None:
+        self.state = state
+        self.send = send
+        self.backend_kwargs = backend_kwargs or {}
+        self.device = device
+        # Loopback URL the stage subprocess posts inter-stage messages to.
+        self.relay_url = relay_url
+        # Host-memory headroom for the runtime when enforcing an RSS limit.
+        self.rss_overhead_bytes = (
+            rss_overhead_bytes
+            if rss_overhead_bytes is not None
+            else int(float(os.environ.get("LOOM_RSS_OVERHEAD_MB", "2048")) * 1024 * 1024)
+        )
+        self.watchdog_poll_s = watchdog_poll_s
+        self._watchdogs: dict[str, QuotaWatchdog] = {}
+
+    # --- helpers -----------------------------------------------------------
+    def _ack(self, command_id: str, ok: bool, error: str = "") -> gateway_pb2.WorkerMessage:
+        return gateway_pb2.WorkerMessage(
+            ack=worker_control_pb2.Ack(command_id=command_id, ok=ok, error=error)
+        )
+
+    # --- command handlers --------------------------------------------------
+    def load_shard(self, req: worker_control_pb2.LoadShardRequest) -> gateway_pb2.WorkerMessage:
+        command_id = req.meta.command_id
+        topo = req.topology
+        role = PipelineRole(
+            pipeline_id=topo.pipeline_id,
+            stage_index=topo.stage_index,
+            num_stages=max(1, topo.num_stages),
+            is_first=topo.is_first if topo.num_stages else True,
+            is_last=topo.is_last if topo.num_stages else True,
+        )
+        spec = ShardSpec(
+            model_id=req.model_id,
+            start_layer=req.start_layer,
+            end_layer=req.end_layer,
+            backend_type=req.backend_type,
+            weights_uri=req.weights_uri,
+            vram_quota_bytes=req.vram_quota_bytes,
+            role=role,
+        )
+        existing = self.state.get(req.model_id)
+        if existing is not None and existing.status in (ShardStatus.LOADED, ShardStatus.SERVING):
+            return self._ack(command_id, True)  # idempotent
+        if existing is not None:
+            # Replacing a FAILED/STOPPED shard: release its leftovers first.
+            self._teardown(req.model_id, existing, to_status=ShardStatus.STOPPED)
+        try:
+            backend_kwargs = dict(self.backend_kwargs.get(spec.backend_type, {}))
+            if spec.backend_type == "shard":
+                # The stage needs to know its place in the pipeline and where to
+                # hand off activations (the agent's loopback relay).
+                backend_kwargs.setdefault("device", self.device)
+                backend_kwargs["topology"] = {
+                    "pipeline_id": role.pipeline_id,
+                    "stage_index": role.stage_index,
+                    "num_stages": role.num_stages,
+                    "is_first": role.is_first,
+                    "is_last": role.is_last,
+                }
+                backend_kwargs["relay_url"] = self.relay_url or ""
+            backend = make_backend(
+                spec.backend_type,
+                model_id=spec.model_id,
+                weights_uri=spec.weights_uri,
+                start_layer=spec.start_layer,
+                end_layer=spec.end_layer,
+                vram_quota_bytes=spec.vram_quota_bytes,
+                **backend_kwargs,
+            )
+            shard = ShardState(spec=spec, backend=backend, status=ShardStatus.LOADING)
+            self.state.put(spec.model_id, shard)
+            backend.prepare()
+            shard.status = ShardStatus.LOADED
+            return self._ack(command_id, True)
+        except Exception as exc:  # report, never crash the agent
+            logger.exception("LoadShard failed for %s", req.model_id)
+            self.state.put(
+                spec.model_id,
+                ShardState(spec=spec, status=ShardStatus.FAILED, error=str(exc)),
+            )
+            return self._ack(command_id, False, str(exc))
+
+    def start_serving(self, req: worker_control_pb2.ModelRequest) -> gateway_pb2.WorkerMessage:
+        command_id = req.meta.command_id
+        shard = self.state.get(req.model_id)
+        if shard is None or shard.backend is None:
+            return self._ack(command_id, False, f"model {req.model_id} is not loaded")
+        if shard.status == ShardStatus.SERVING:
+            # Idempotent — but re-announce the endpoint: the orchestrator may
+            # have restarted and lost its endpoint table.
+            self.send(
+                gateway_pb2.WorkerMessage(
+                    serving_endpoint=gateway_pb2.ServingEndpoint(
+                        model_id=req.model_id,
+                        local_port=shard.backend.port,
+                        command_id=command_id,
+                    )
+                )
+            )
+            return self._ack(command_id, True)
+
+        def _serve() -> None:
+            backend = shard.backend
+            try:
+                backend.start()
+                watchdog = QuotaWatchdog(
+                    get_pid=backend.pid,
+                    quota_bytes=shard.spec.vram_quota_bytes,
+                    on_kill=lambda reason: self._on_watchdog_kill(req.model_id, reason),
+                    device=self.device,
+                    poll_interval_s=self.watchdog_poll_s,
+                    rss_overhead_bytes=self.rss_overhead_bytes,
+                )
+                watchdog.start()
+                self._watchdogs[req.model_id] = watchdog
+                if not backend.wait_healthy():
+                    shard.status = ShardStatus.FAILED
+                    shard.error = "backend failed health check"
+                    self.send(self._ack(command_id, False, shard.error))
+                    return
+                shard.status = ShardStatus.SERVING
+                # Loopback only: the orchestrator reaches the backend through
+                # the data-plane tunnel, so no host is advertised.
+                shard.endpoint_url = f"http://127.0.0.1:{backend.port}"
+                self.send(self._ack(command_id, True))
+                self.send(
+                    gateway_pb2.WorkerMessage(
+                        serving_endpoint=gateway_pb2.ServingEndpoint(
+                            model_id=req.model_id,
+                            local_port=backend.port,
+                            command_id=command_id,
+                        )
+                    )
+                )
+            except Exception as exc:
+                logger.exception("StartServing failed for %s", req.model_id)
+                shard.status = ShardStatus.FAILED
+                shard.error = str(exc)
+                self.send(self._ack(command_id, False, str(exc)))
+
+        # Serve-start can be slow (model load); run it off the dispatch thread.
+        threading.Thread(target=_serve, name=f"serve-{req.model_id}", daemon=True).start()
+        return None  # ack is sent asynchronously by _serve
+
+    def stop_serving(self, req: worker_control_pb2.ModelRequest) -> gateway_pb2.WorkerMessage:
+        command_id = req.meta.command_id
+        shard = self.state.get(req.model_id)
+        if shard is None:
+            return self._ack(command_id, True)  # idempotent
+        self._teardown(req.model_id, shard, to_status=ShardStatus.STOPPED)
+        return self._ack(command_id, True)
+
+    def unload_shard(self, req: worker_control_pb2.UnloadShardRequest) -> gateway_pb2.WorkerMessage:
+        command_id = req.meta.command_id
+        shard = self.state.pop(req.model_id)
+        if shard is not None:
+            self._teardown(req.model_id, shard, to_status=ShardStatus.STOPPED)
+        return self._ack(command_id, True)
+
+    def set_quota(self, req: worker_control_pb2.QuotaRequest) -> gateway_pb2.WorkerMessage:
+        command_id = req.meta.command_id
+        shard = self.state.get(req.model_id)
+        if shard is None:
+            return self._ack(command_id, False, f"model {req.model_id} is not loaded")
+        shard.spec.vram_quota_bytes = req.vram_quota_bytes
+        watchdog = self._watchdogs.get(req.model_id)
+        if watchdog is not None:
+            watchdog.set_quota(req.vram_quota_bytes)
+        return self._ack(command_id, True)
+
+    def telemetry_report(self) -> gateway_pb2.WorkerMessage:
+        shards = []
+        for model_id, shard in self.state.snapshot().items():
+            port = shard.backend.port if shard.backend is not None else 0
+            shards.append(
+                worker_control_pb2.ShardTelemetry(
+                    model_id=model_id,
+                    start_layer=shard.spec.start_layer,
+                    end_layer=shard.spec.end_layer,
+                    current_requests=0,  # v0: request counting lands with metrics
+                    healthy=shard.status == ShardStatus.SERVING,
+                    status=shard.status.value,
+                    local_port=port if shard.status == ShardStatus.SERVING else 0,
+                    pipeline_id=shard.spec.role.pipeline_id,
+                    stage_index=shard.spec.role.stage_index,
+                    num_stages=shard.spec.role.num_stages,
+                )
+            )
+        return gateway_pb2.WorkerMessage(
+            telemetry=worker_control_pb2.TelemetryReport(
+                node_id=self.state.node_id, shards=shards
+            )
+        )
+
+    # --- internals ---------------------------------------------------------
+    def _teardown(self, model_id: str, shard: ShardState, *, to_status: ShardStatus) -> None:
+        watchdog = self._watchdogs.pop(model_id, None)
+        if watchdog is not None:
+            watchdog.stop()
+        if shard.backend is not None:
+            try:
+                shard.backend.stop()
+            except Exception:
+                logger.exception("backend stop failed for %s", model_id)
+        shard.status = to_status
+        shard.endpoint_url = None
+
+    def _on_watchdog_kill(self, model_id: str, reason: str) -> None:
+        logger.error("watchdog: %s", reason)
+        shard = self.state.get(model_id)
+        if shard is not None:
+            shard.status = ShardStatus.FAILED
+            shard.error = reason
+            shard.endpoint_url = None

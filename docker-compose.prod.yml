@@ -1,0 +1,72 @@
+# Loom orchestrator for real deployments (no workers here — GPU owners attach
+# themselves with `docker run gihpee/loomworker --key ...`).
+#
+#   LOOM_PUBLIC_ADDR=<your-host-or-ip>:9000 docker compose -f docker-compose.prod.yml up -d --build
+#   curl -sX POST localhost:8000/admin/keys -H 'X-Loom-Admin-Token: ...' -d '{"label":"gpu-box-1"}'
+#
+# LOOM_PUBLIC_ADDR is mandatory: it is embedded into every issued join key, so
+# the worker learns where to dial from the key alone.
+
+services:
+  orchestrator:
+    build:
+      context: .
+      dockerfile: docker/orchestrator.Dockerfile
+    restart: unless-stopped
+    environment:
+      LOOM_MODEL_CATALOG: /app/configs/${LOOM_CATALOG:-catalog-qwen3-8b.json}
+      LOOM_GRPC_PORT: "9000"
+      LOOM_HTTP_PORT: "8000"
+      # Leave empty to auto-detect (host IP, or the bundled tunnel below).
+      # Set it explicitly when you have a domain / public IP / VPN address.
+      LOOM_PUBLIC_ADDR: ${LOOM_PUBLIC_ADDR:-}
+      # Join keys survive restarts here.
+      LOOM_KEYSTORE_PATH: /data/keys.json
+      LOOM_ADMIN_TOKEN: ${LOOM_ADMIN_TOKEN:?set LOOM_ADMIN_TOKEN}
+      LOOM_REBALANCE_S: "60"
+      LOOM_HEARTBEAT_TIMEOUT_S: "45"
+    ports:
+      - "8000:8000"   # OpenAI-compatible client API + admin UI
+      - "9000:9000"   # control plane + data-plane tunnel (workers dial in)
+    volumes:
+      - loom-data:/data
+    depends_on:
+      - redis
+      - postgres
+
+  # Optional public entry point for hosts WITHOUT a public IP.
+  # A worker behind NAT can only dial out, so something must be reachable:
+  #   docker compose -f docker-compose.prod.yml --profile tunnel up -d
+  # The orchestrator queries the tunnel's local API and embeds the public
+  # host:port into every join key automatically.
+  ngrok:
+    image: ngrok/ngrok:latest
+    profiles: ["tunnel"]
+    restart: unless-stopped
+    command: ["tcp", "orchestrator:9000", "--log", "stdout"]
+    environment:
+      NGROK_AUTHTOKEN: ${NGROK_AUTHTOKEN:?set NGROK_AUTHTOKEN (free account at ngrok.com)}
+    depends_on:
+      - orchestrator
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    volumes:
+      - loom-redis:/data
+
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: loom
+      POSTGRES_USER: loom
+      POSTGRES_PASSWORD: ${LOOM_PG_PASSWORD:?set LOOM_PG_PASSWORD}
+    volumes:
+      - loom-pg:/var/lib/postgresql/data
+      - ./src/loom/perfmap/schema.sql:/docker-entrypoint-initdb.d/schema.sql:ro
+
+volumes:
+  loom-data:
+  loom-redis:
+  loom-pg:

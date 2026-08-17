@@ -1,0 +1,40 @@
+[project]
+name = "loom"
+version = "0.0.1"
+description = "Loom — multi-model LLM inference marketplace. Planning core adapted from Parallax."
+requires-python = ">=3.11"
+dependencies = [
+    "grpcio>=1.60",
+    "protobuf>=4.25",
+    "fastapi>=0.110",
+    "uvicorn>=0.29",
+    "httpx>=0.27",
+]
+
+[project.optional-dependencies]
+redis = ["redis>=5.0"]
+# Pinned deliberately: protobuf gencode must stay OLD enough to load under the
+# protobuf runtime shipped in backend images (e.g. vllm/vllm-openai has 6.x).
+# A runtime may be newer than the gencode, never older.
+grpc-tools = ["grpcio-tools==1.71.0"]
+
+[dependency-groups]
+# psutil is a loom-worker dependency; the e2e tests import the worker package in-process.
+dev = [
+    "pytest>=8.0",
+    "grpcio-tools==1.71.0",
+    "psutil>=5.9",
+    "torch>=2.2",
+    "transformers>=4.44",
+    "safetensors>=0.4",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/loom"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

@@ -1,0 +1,30 @@
+{
+  "models": [
+    {
+      "model_id": "tiny-shard",
+      "weights_uri": "/models/tiny",
+      "backend_type": "shard",
+      "priority": 1,
+      "demand_qps": 1,
+      "price_willing": 1,
+      "target_pipelines": 1,
+      "model_info": {
+        "model_name": "tiny-llama-test",
+        "mlx_model_name": "tiny-llama-test",
+        "head_size": 16,
+        "hidden_dim": 64,
+        "intermediate_dim": 128,
+        "num_attention_heads": 4,
+        "num_kv_heads": 2,
+        "vocab_size": 256,
+        "num_layers": 6,
+        "ffn_num_projections": 3,
+        "tie_embedding": false,
+        "param_bytes_per_element": 4,
+        "mlx_param_bytes_per_element": 4,
+        "cache_bytes_per_element": 4,
+        "embedding_bytes_per_element": 4
+      }
+    }
+  ]
+}

@@ -1,0 +1,31 @@
+{
+  "models": [
+    {
+      "model_id": "qwen3-8b",
+      "weights_uri": "Qwen/Qwen3-8B",
+      "backend_type": "vllm",
+      "priority": 5,
+      "demand_qps": 10,
+      "price_willing": 1,
+      "target_pipelines": 1,
+      "slo_p95_ttft_ms": 5000,
+      "model_info": {
+        "model_name": "Qwen/Qwen3-8B",
+        "mlx_model_name": "mlx-community/Qwen3-8B-bf16",
+        "head_size": 128,
+        "hidden_dim": 4096,
+        "intermediate_dim": 12288,
+        "num_attention_heads": 32,
+        "num_kv_heads": 8,
+        "vocab_size": 151936,
+        "num_layers": 36,
+        "ffn_num_projections": 3,
+        "tie_embedding": false,
+        "param_bytes_per_element": 2,
+        "mlx_param_bytes_per_element": 2,
+        "cache_bytes_per_element": 2,
+        "embedding_bytes_per_element": 2
+      }
+    }
+  ]
+}

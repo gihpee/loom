@@ -1,0 +1,66 @@
+# Loom development / demo stack (no GPU required — echo backends).
+#
+#   docker compose up --build -d
+#   curl -s localhost:8000/v1/models
+#   open http://localhost:8000/admin/ui
+#
+# Workers here attach with a dev master token instead of an issued join key
+# (LOOM_NODE_TOKEN). For a real deployment use docker-compose.prod.yml plus
+# `docker run gihpee/loomworker --key loom_...` on each GPU machine.
+
+services:
+  orchestrator:
+    build:
+      context: .
+      dockerfile: docker/orchestrator.Dockerfile
+    environment:
+      LOOM_MODEL_CATALOG: /app/configs/${LOOM_MODEL_CATALOG_NAME:-catalog-demo.json}
+      LOOM_GRPC_PORT: "9000"
+      LOOM_HTTP_PORT: "8000"
+      LOOM_PUBLIC_ADDR: ${LOOM_PUBLIC_ADDR:-orchestrator:9000}
+      LOOM_NODE_TOKEN: ${LOOM_NODE_TOKEN:-dev-token}
+      LOOM_ADMIN_TOKEN: ${LOOM_ADMIN_TOKEN:-}
+      LOOM_KEYSTORE_PATH: /data/keys.json
+      LOOM_REBALANCE_S: "30"
+    ports:
+      - "8000:8000"   # OpenAI-compatible client API + admin UI
+      - "9000:9000"   # control plane + data-plane tunnel (workers dial in)
+    volumes:
+      - loom-data:/data
+    depends_on:
+      - redis
+      - postgres
+
+  worker:
+    build:
+      context: ./worker
+    environment:
+      # Dev shortcut: master token instead of an issued join key.
+      LOOM_KEY: ${LOOM_NODE_TOKEN:-dev-token}
+      LOOM_ORCH_ADDR: orchestrator:9000
+      LOOM_NODE_TOKEN: ${LOOM_NODE_TOKEN:-dev-token}
+      # Hardware is auto-detected; these override it for the CPU demo so the
+      # pool holds exactly two demo models (~1.9 GB each) and a third one
+      # triggers the eviction demo.
+      LOOM_DEVICE: cpu
+      LOOM_MEMORY_GB: "4"
+      LOOM_TFLOPS_FP16: "10"
+      LOOM_REGION: ${LOOM_REGION:-default}
+    depends_on:
+      - orchestrator
+    # Scale the pool: docker compose up -d --scale worker=3
+
+  redis:
+    image: redis:7-alpine
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: loom
+      POSTGRES_USER: loom
+      POSTGRES_PASSWORD: ${LOOM_PG_PASSWORD:-loom-dev}
+    volumes:
+      - ./src/loom/perfmap/schema.sql:/docker-entrypoint-initdb.d/schema.sql:ro
+
+volumes:
+  loom-data:

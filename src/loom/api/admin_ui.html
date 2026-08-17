@@ -1,0 +1,336 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Loom Admin</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root { --bg:#0f1115; --panel:#171a21; --line:#2a2f3a; --fg:#d7dce4; --dim:#8b93a1;
+          --ok:#4cc38a; --warn:#e5c454; --bad:#e5636e; --acc:#6ea8fe; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg);
+         font:14px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; }
+  header { display:flex; gap:16px; align-items:center; padding:10px 16px;
+           border-bottom:1px solid var(--line); flex-wrap:wrap; }
+  header h1 { font-size:15px; margin:0 12px 0 0; color:var(--acc); }
+  nav button { background:none; border:1px solid transparent; color:var(--dim);
+               padding:6px 10px; cursor:pointer; font:inherit; border-radius:6px; }
+  nav button.active { color:var(--fg); border-color:var(--line); background:var(--panel); }
+  #token { background:var(--panel); border:1px solid var(--line); color:var(--fg);
+           padding:5px 8px; border-radius:6px; width:150px; font:inherit; }
+  main { padding:16px; max-width:1200px; }
+  table { border-collapse:collapse; width:100%; margin:8px 0 20px; }
+  th, td { border:1px solid var(--line); padding:5px 9px; text-align:left; vertical-align:top; }
+  th { color:var(--dim); font-weight:normal; background:var(--panel); }
+  .ok { color:var(--ok); } .warn { color:var(--warn); } .bad { color:var(--bad); }
+  .dim { color:var(--dim); } .acc { color:var(--acc); }
+  h2 { font-size:13px; color:var(--dim); text-transform:uppercase; letter-spacing:.08em; }
+  select, textarea, input[type=text] { background:var(--panel); border:1px solid var(--line);
+           color:var(--fg); padding:6px 8px; border-radius:6px; font:inherit; }
+  textarea { width:100%; min-height:70px; }
+  button.action { background:var(--acc); color:#0b0d10; border:none; padding:7px 14px;
+                  border-radius:6px; cursor:pointer; font:inherit; font-weight:600; }
+  button.danger { background:var(--bad); }
+  pre { background:var(--panel); border:1px solid var(--line); border-radius:6px;
+        padding:10px; white-space:pre-wrap; word-break:break-word; }
+  .muted { color:var(--dim); font-size:12px; }
+  #err { color:var(--bad); margin-left:auto; }
+</style>
+</head>
+<body>
+<header>
+  <h1>loom admin</h1>
+  <nav id="tabs"></nav>
+  <span class="muted">token:</span>
+  <input id="token" type="password" placeholder="admin token">
+  <span class="muted" id="refreshed"></span>
+  <span id="err"></span>
+</header>
+<main id="view"></main>
+<script>
+const TABS = ["Nodes","Models","Keys","Perf-map","SLO / Rebalance","Console"];
+let active = localStorage.getItem("loom_tab") || "Nodes";
+let perfModel = null;
+const $ = s => document.querySelector(s);
+
+const tokenInput = $("#token");
+tokenInput.value = localStorage.getItem("loom_admin_token") || "";
+tokenInput.onchange = () => { localStorage.setItem("loom_admin_token", tokenInput.value); refresh(); };
+
+function headers(extra) {
+  const h = Object.assign({"Content-Type":"application/json"}, extra || {});
+  if (tokenInput.value) h["X-Loom-Admin-Token"] = tokenInput.value;
+  return h;
+}
+async function api(path, opts) {
+  const r = await fetch(path, Object.assign({headers: headers()}, opts || {}));
+  const body = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(body.error ? body.error.message : r.status);
+  return body;
+}
+function esc(s) { return String(s).replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c])); }
+function statusCls(s) {
+  return {serving:"ok", loading:"warn", loaded:"warn", failed:"bad", stopped:"dim", unknown:"dim"}[s] || "dim";
+}
+function table(headersArr, rows) {
+  return `<table><tr>${headersArr.map(h=>`<th>${h}</th>`).join("")}</tr>` +
+    rows.map(r=>`<tr>${r.map(c=>`<td>${c}</td>`).join("")}</tr>`).join("") + `</table>`;
+}
+
+// ------------------------------------------------------------------ tabs
+function renderTabs() {
+  $("#tabs").innerHTML = TABS.map(t =>
+    `<button class="${t===active?"active":""}" onclick="setTab('${t}')">${t}</button>`).join("");
+}
+function setTab(t) { active = t; localStorage.setItem("loom_tab", t); renderTabs(); refresh(); }
+
+// ------------------------------------------------------------------ views
+async function viewNodes() {
+  const data = await api("/admin/nodes");
+  const rows = Object.entries(data.nodes).map(([nid, n]) => {
+    const shards = n.shards.length
+      ? n.shards.map(s => `<span class="${statusCls(s.status)}">${esc(s.model_id)}</span>` +
+          ` <span class="dim">[${s.layers[0]},${s.layers[1]}) ${s.vram_quota_gb}G ` +
+          `req=${s.current_requests}${s.latency_ms?` τ=${s.latency_ms}ms`:""} ${s.status}</span>`).join("<br>")
+      : `<span class="dim">—</span>`;
+    return [
+      esc(nid),
+      `${esc(n.device)} <span class="dim">${esc(n.gpu_name||"")} x${n.num_gpus||1}</span>`,
+      esc(n.region),
+      `${n.vram_declared_gb} GB <span class="dim">of ${n.vram_total_gb} · ${esc(n.detected_by||"")}</span>`,
+      n.tflops_fp16,
+      n.price === null ? `<span class="dim">n/a (ph.4)</span>` : n.price,
+      (n.connected ? `<span class="ok">ctrl</span>` : `<span class="bad">ctrl</span>`) + " / " +
+        (n.tunnel ? `<span class="ok">tunnel</span>` : `<span class="bad">tunnel</span>`),
+      n.last_heartbeat_s_ago === null ? `<span class="dim">—</span>`
+        : (n.last_heartbeat_s_ago < 10 ? `<span class="ok">${n.last_heartbeat_s_ago}s ago</span>`
+                                       : `<span class="warn">${n.last_heartbeat_s_ago}s ago</span>`),
+      shards,
+    ];
+  });
+  return `<h2>Registered workers</h2>` +
+    table(["node","device","region","VRAM decl.","TFLOPs","price","link","heartbeat","shards (status)"], rows);
+}
+
+async function viewModels() {
+  const data = await api("/admin/models_view");
+  const rows = Object.entries(data.models).map(([mid, m]) => {
+    const place = m.placement.length
+      ? m.placement.map((p, i) => `<span class="dim">stage ${i}</span> ${esc(p.node_id)} ` +
+          `<span class="dim">[${p.layers[0]},${p.layers[1]}) ${p.vram_quota_gb}G</span> ` +
+          `<span class="${statusCls(p.status)}">${p.status}</span>`).join("<br>")
+      : (m.unscheduled ? `<span class="bad">unscheduled — не хватает ёмкости пула</span>` : `<span class="dim">—</span>`);
+    const stages = m.placement.length > 1 ? ` <span class="acc">${m.placement.length} стадии</span>` : "";
+    return [
+      esc(mid) + (m.unscheduled ? ` <span class="bad">●</span>` : "") + stages,
+      `${m.priority} / ${m.demand_qps} / ${m.price_willing}<br><span class="dim">score ${m.score}</span>`,
+      `${m.k_actual} / ${m.k_target}`,
+      `${m.num_layers}L · ${esc(m.backend_type)}`,
+      place,
+      m.endpoints.map(e => `${esc(e.url)} <span class="dim">inflight=${e.inflight}</span>`).join("<br>") || `<span class="dim">—</span>`,
+      `<button class="action danger" onclick="removeModel('${esc(mid)}')">remove</button>`,
+    ];
+  });
+  return `<h2>Развернуть модель (архитектура определяется автоматически)</h2>
+    <p><input id="m-repo" type="text" placeholder="HuggingFace repo, напр. Qwen/Qwen3-32B" style="width:320px">
+       <select id="m-backend">
+         <option value="shard">shard — можно резать по слоям между узлами</option>
+         <option value="vllm">vllm — быстрее, но модель должна влезть на одну карту</option>
+       </select>
+       prio <input id="m-prio" type="text" value="1" style="width:50px">
+       реплик <input id="m-k" type="text" value="1" style="width:50px">
+       <button class="action" onclick="deployModel()">deploy</button></p>
+    <pre id="m-out" class="muted">${esc(lastDeploy)}</pre>
+    <h2>Каталог + раскладка Phase-1</h2>` +
+    table(["model","prio/qps/price","k (act/target)","shape","placement (стадии пайплайна)","endpoints",""], rows);
+}
+let lastDeploy = "— укажите HF-имя модели и нажмите deploy —";
+async function deployModel() {
+  const repo = $("#m-repo").value.trim();
+  if (!repo) { lastDeploy = "укажите repo"; $("#m-out").textContent = lastDeploy; return; }
+  lastDeploy = "resolving " + repo + " …";
+  $("#m-out").textContent = lastDeploy;
+  try {
+    const r = await api("/admin/models/from_hf", {method:"POST", body: JSON.stringify({
+      repo,
+      backend_type: $("#m-backend").value,
+      priority: parseFloat($("#m-prio").value) || 1,
+      target_pipelines: parseInt($("#m-k").value, 10) || 1,
+    })});
+    const d = r.detected, s = r.sizing;
+    lastDeploy =
+      `added: ${r.added}\n` +
+      `detected: ${d.num_layers} слоёв, hidden ${d.hidden_dim}, kv_heads ${d.num_kv_heads}, ` +
+      `${d.dtype_bytes} байт/параметр${d.architectures ? " (" + d.architectures.join(",") + ")" : ""}\n` +
+      `веса ~${s.weights_gb} GB · слоёв на карту: ` +
+      Object.entries(s.layers_per_card).map(([k,v]) => `${k}=${v}`).join(", ") +
+      ` (param_mem_ratio ${s.param_mem_ratio})`;
+    refresh();
+  } catch (e) { lastDeploy = "error: " + e.message; $("#m-out").textContent = lastDeploy; }
+}
+async function removeModel(id) {
+  try { await api("/admin/models/" + encodeURIComponent(id), {method:"DELETE"}); refresh(); }
+  catch (e) { $("#err").textContent = e.message; }
+}
+
+async function viewKeys() {
+  const conn = await api("/admin/connect");
+  const data = await api("/admin/keys");
+  const rows = (data.keys || []).map(k => [
+    esc(k.key_id),
+    esc(k.label || "—"),
+    esc(k.address),
+    k.max_nodes ? k.max_nodes : `<span class="dim">∞</span>`,
+    k.nodes.length ? k.nodes.map(esc).join("<br>") : `<span class="dim">unused</span>`,
+    k.revoked ? `<span class="bad">revoked</span>` : `<span class="ok">active</span>`,
+    k.revoked ? "" : `<button class="action danger" onclick="revokeKey('${esc(k.key_id)}')">revoke</button>`,
+  ]);
+  const warn = conn.warning
+    ? `<p class="bad">⚠ ${esc(conn.warning)}</p>`
+    : `<p class="ok">адрес доступен воркерам извне</p>`;
+  return `<h2>Адрес подключения воркеров</h2>
+    <p>воркеры звонят на <b>${esc(conn.dial_address)}</b>
+       <span class="dim">(определён автоматически: ${esc(conn.source)})</span></p>
+    ${warn}
+    <h2>Join keys — everything a GPU owner needs</h2>
+    <p><input id="k-label" type="text" placeholder="label, e.g. gpu-box-1">
+       <input id="k-max" type="text" placeholder="max nodes (blank = ∞)" style="width:170px">
+       <button class="action" onclick="issueKey()">issue key</button></p>
+    <pre id="k-out" class="muted">${esc(lastKey)}</pre>` +
+    table(["key id","label","dial address","max nodes","used by","state",""], rows);
+}
+let lastKey = "— issue a key, then run the printed command on the GPU machine —";
+let connCache = null;
+async function issueKey() {
+  const label = $("#k-label").value;
+  const maxNodes = parseInt($("#k-max").value, 10);
+  try {
+    const r = await api("/admin/keys", {method:"POST", body: JSON.stringify(
+      {label, max_nodes: Number.isFinite(maxNodes) ? maxNodes : 0})});
+    lastKey = "На GPU-машине выполнить ОДНУ команду:\n\n" +
+      "docker run -d --gpus all --restart unless-stopped gihpee/loomworker --key " + r.key +
+      "\n\n(адрес оркестратора " + r.address + " уже внутри ключа)";
+    refresh();
+  } catch (e) { lastKey = "error: " + e.message; $("#k-out").textContent = lastKey; }
+}
+async function revokeKey(id) {
+  try { await api("/admin/keys/" + id, {method:"DELETE"}); refresh(); }
+  catch (e) { $("#err").textContent = e.message; }
+}
+
+async function viewPerfmap() {
+  const models = await api("/admin/models_view");
+  const ids = Object.keys(models.models);
+  if (!ids.length) return `<p class="dim">no models</p>`;
+  if (!perfModel || !ids.includes(perfModel)) perfModel = ids[0];
+  const pm = await api("/admin/perfmap/" + encodeURIComponent(perfModel));
+  const sel = `<select onchange="perfModel=this.value;refresh()">` +
+    ids.map(i=>`<option ${i===perfModel?"selected":""}>${esc(i)}</option>`).join("") + `</select>`;
+
+  const tauRows = Object.entries(pm.tau_effective).map(([nid, t]) => {
+    const meas = pm.tau_measured[nid];
+    return [
+      esc(nid),
+      t.layers[0]===null ? `<span class="dim">—</span>` : `[${t.layers[0]}, ${t.layers[1]})`,
+      t.layer_latency_ms === null ? `<span class="bad">inf</span>` : `${t.layer_latency_ms} ms`,
+      `<span class="${t.source==="measured"?"ok":"warn"}">${t.source}</span>`,
+      meas ? `${meas.latency_ms ?? "—"} ms <span class="dim">(age ${meas.age_s}s, req=${meas.current_requests}, ${meas.healthy?"healthy":"unhealthy"})</span>` : `<span class="dim">no report</span>`,
+    ];
+  });
+  const nodes = Object.keys(pm.tau_effective);
+  const rhoRows = nodes.map(src => [esc(src), ...nodes.map(dst => {
+    if (src===dst) return `<span class="dim">0</span>`;
+    const v = pm.tau_effective[src].rtt_to[dst];
+    return v === undefined ? `<span class="dim">∞</span>` : `${v}`;
+  })]);
+  const route = pm.route_preview
+    ? `chain: <b>${pm.route_preview.path.map(esc).join(" → ") || "∅"}</b>` +
+      (pm.route_preview.est_latency_ms !== null ? ` <span class="dim">est ${pm.route_preview.est_latency_ms} ms</span>` : ` <span class="bad">no finite route</span>`)
+    : `<span class="dim">no scheduler instance</span>`;
+  return `<h2>Perf-map · model ${sel}</h2>
+    <p>Phase-2 route preview → ${route}</p>
+    <h2>τ — per-shard latency</h2>` +
+    table(["node","layers","effective τ (DP input)","source","measured (perf-map store)"], tauRows) +
+    `<h2>ρ — RTT matrix (ms)</h2>` +
+    (nodes.length ? table(["src \\ dst", ...nodes.map(esc)], rhoRows) : `<p class="dim">no nodes</p>`);
+}
+
+async function viewSlo() {
+  const st = await api("/admin/status");
+  const rows = Object.entries(st.models).map(([mid, m]) => {
+    const s = m.slo;
+    return [
+      esc(mid),
+      s && s.slo_p95_ttft_ms ? `${s.slo_p95_ttft_ms} ms` : `<span class="dim">no SLO</span>`,
+      s ? `${s.p95_ttft_ms} ms <span class="dim">(${s.samples} samples)</span>` : `<span class="dim">no traffic</span>`,
+      s ? `${(s.error_rate*100).toFixed(1)}%` : `<span class="dim">—</span>`,
+      s && s.boost > 1 ? `<span class="bad">BOOSTED ×${s.boost}</span>` : `<span class="ok">off</span>`,
+      m.endpoints.length ? `<span class="ok">serving</span>` : `<span class="bad">no capacity</span>`,
+    ];
+  });
+  return `<h2>SLO per model</h2>` +
+    table(["model","SLO p95 TTFT","current p95","error rate","boost","state"], rows) +
+    `<p><button class="action danger" onclick="forceRebalance()">force rebalance</button>
+     <span class="muted">runs the Resource Broker pass right now (same as the timer trigger)</span></p>
+     <pre id="rebalance-out" class="muted">${esc(lastRebalance)}</pre>
+     <p class="dim">unscheduled: ${st.unscheduled.length ? st.unscheduled.map(esc).join(", ") : "none"}</p>`;
+}
+let lastRebalance = "—";
+async function forceRebalance() {
+  lastRebalance = "running…";
+  $("#rebalance-out").textContent = lastRebalance;
+  try {
+    const r = await api("/admin/rebalance", {method:"POST"});
+    lastRebalance = new Date().toLocaleTimeString() + "\n" + JSON.stringify(r, null, 2);
+    refresh();
+  } catch (e) { lastRebalance = "error: " + e.message; $("#rebalance-out").textContent = lastRebalance; }
+}
+
+async function viewConsole() {
+  const models = await api("/v1/models");
+  const opts = models.data.map(m=>`<option>${esc(m.id)}</option>`).join("");
+  return `<h2>Test console → POST /v1/chat/completions</h2>
+    <p>model <select id="c-model">${opts}</select>
+       <label class="muted"><input type="checkbox" id="c-stream"> stream</label></p>
+    <textarea id="c-prompt" placeholder="prompt…">привет, loom</textarea>
+    <p><button class="action" onclick="sendChat()">send</button></p>
+    <pre id="c-out" class="muted">—</pre>`;
+}
+async function sendChat() {
+  const out = $("#c-out");
+  out.textContent = "…";
+  const body = {model: $("#c-model").value, stream: $("#c-stream").checked,
+                messages: [{role:"user", content: $("#c-prompt").value}]};
+  try {
+    const r = await fetch("/v1/chat/completions", {method:"POST", headers: headers(), body: JSON.stringify(body)});
+    if (body.stream) {
+      out.textContent = "";
+      const reader = r.body.getReader(); const dec = new TextDecoder();
+      while (true) { const {done, value} = await reader.read(); if (done) break;
+                     out.textContent += dec.decode(value); }
+    } else {
+      const j = await r.json();
+      out.textContent = r.ok && j.choices ? j.choices[0].message.content + "\n\n" + JSON.stringify(j.usage)
+                                          : JSON.stringify(j, null, 2);
+    }
+  } catch (e) { out.textContent = "error: " + e.message; }
+}
+
+// ------------------------------------------------------------------ refresh
+const VIEWS = {"Nodes":viewNodes, "Models":viewModels, "Keys":viewKeys,
+               "Perf-map":viewPerfmap, "SLO / Rebalance":viewSlo, "Console":viewConsole};
+let timer = null;
+async function refresh() {
+  clearTimeout(timer);
+  try {
+    $("#err").textContent = "";
+    $("#view").innerHTML = await VIEWS[active]();
+    $("#refreshed").textContent = "· " + new Date().toLocaleTimeString();
+  } catch (e) { $("#err").textContent = e.message; }
+  if (active !== "Console") timer = setTimeout(refresh, 3000);
+}
+renderTabs();
+refresh();
+</script>
+</body>
+</html>
