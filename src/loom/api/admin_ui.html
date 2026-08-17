@@ -70,7 +70,7 @@ async function api(path, opts) {
 }
 function esc(s) { return String(s).replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c])); }
 function statusCls(s) {
-  return {serving:"ok", loading:"warn", loaded:"warn", failed:"bad", stopped:"dim", unknown:"dim"}[s] || "dim";
+  return {serving:"ok", loading:"warn", loaded:"warn", starting:"warn", failed:"bad", stopped:"dim", unknown:"dim"}[s] || "dim";
 }
 function selectAll(el) {
   if (!el) return;
@@ -169,13 +169,17 @@ async function viewModels() {
           `<span class="dim">[${p.layers[0]},${p.layers[1]}) ${p.vram_quota_gb}G</span> ` +
           `<span class="${statusCls(p.status)}">${p.status}</span>`).join("<br>")
       : (m.unscheduled ? `<span class="bad">unscheduled — не хватает ёмкости пула</span>` : `<span class="dim">—</span>`);
+    // Why a model is not running: the last start error, verbatim from the worker.
+    const fails = (m.failures || []).map(f =>
+      `<div class="bad">✗ ${esc(f.node_id)}: ${esc(f.error)}` +
+      `<span class="dim"> (${f.age_s}s назад, повтор через ${f.retry_in_s}s)</span></div>`).join("");
     const stages = m.placement.length > 1 ? ` <span class="acc">${m.placement.length} стадии</span>` : "";
     return [
       esc(mid) + (m.unscheduled ? ` <span class="bad">●</span>` : "") + stages,
       `${m.priority} / ${m.demand_qps} / ${m.price_willing}<br><span class="dim">score ${m.score}</span>`,
       `${m.k_actual} / ${m.k_target}`,
       `${m.num_layers}L · ${esc(m.backend_type)}`,
-      place,
+      place + fails,
       m.endpoints.map(e => `${esc(e.url)} <span class="dim">inflight=${e.inflight}</span>`).join("<br>") || `<span class="dim">—</span>`,
       `<button class="action danger" onclick="removeModel('${esc(mid)}')">remove</button>`,
     ];

@@ -39,6 +39,7 @@ class QuotaWatchdog:
         device: str = "cpu",
         poll_interval_s: float = 2.0,
         rss_overhead_bytes: int = 0,
+        vram_overhead_bytes: int = 0,
     ) -> None:
         self._get_pid = get_pid
         self._quota = quota_bytes
@@ -49,6 +50,11 @@ class QuotaWatchdog:
         # RSS mode (cpu/mlx, or cuda without NVML) allow that fixed overhead on
         # top of the quota, otherwise every backend is killed on startup.
         self._rss_overhead = max(0, int(rss_overhead_bytes))
+        # Same idea for VRAM: the CUDA context, kernels and allocator
+        # fragmentation sit on top of the weights+KV the quota pays for. An
+        # engine told to use exactly its quota lands a few hundred MB above it,
+        # and killing it there would look like a random crash loop.
+        self._vram_overhead = max(0, int(vram_overhead_bytes))
         self._poll = poll_interval_s
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
@@ -123,7 +129,8 @@ class QuotaWatchdog:
             if pid is None or self._quota <= 0:
                 continue
             used, kind = self._measure(pid)
-            limit = self._quota if kind == "vram" else self._quota + self._rss_overhead
+            overhead = self._vram_overhead if kind == "vram" else self._rss_overhead
+            limit = self._quota + overhead
             if used > limit:
                 self._kill_tree(pid)
                 self._on_kill(

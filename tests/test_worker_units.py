@@ -10,6 +10,7 @@ WORKER_DIR = Path(__file__).resolve().parent.parent / "worker"
 sys.path.insert(0, str(WORKER_DIR))
 
 from loom_worker.backends.echo import EchoBackend  # noqa: E402
+from loom_worker.backends.vllm import MAX_GPU_UTILISATION as MAX_UTIL  # noqa: E402
 from loom_worker.backends.vllm import VllmBackend  # noqa: E402
 from loom_worker.watchdog import QuotaWatchdog  # noqa: E402
 
@@ -41,9 +42,12 @@ def test_vllm_command_and_quota_fraction():
 
 def test_vllm_quota_fraction_clamped():
     assert make_vllm(vram_quota_bytes=1).gpu_memory_utilization() == 0.05
-    assert make_vllm(vram_quota_bytes=100 * GIB).gpu_memory_utilization() == 0.95
-    # Unknown total VRAM -> vLLM default share.
-    assert make_vllm(total_vram_bytes=0).gpu_memory_utilization() == 0.9
+    # Never the whole card: vLLM refuses to start unless that share is free at
+    # startup, and the driver/another tenant always holds a few hundred MB.
+    assert make_vllm(vram_quota_bytes=100 * GIB).gpu_memory_utilization() == MAX_UTIL
+    assert MAX_UTIL < 0.95
+    # Unknown total VRAM -> vLLM default share, still capped.
+    assert make_vllm(total_vram_bytes=0).gpu_memory_utilization() == min(0.9, MAX_UTIL)
 
 
 def test_vllm_rejects_partial_shard():

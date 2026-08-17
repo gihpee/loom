@@ -27,6 +27,16 @@ curl -s localhost:8010/admin/models_view | python3 -m json.tool
 Для прод-моделей укажите в каталоге `"backend_type": "shard"` — тогда модель,
 не влезающая на одну карту, будет разложена по нескольким узлам.
 
+## Сборка образа воркера
+
+```bash
+bash scripts/build_worker.sh          # локально, под архитектуру этой машины
+bash scripts/build_worker.sh --push   # linux/amd64 в реестр (для GPU-хостов)
+```
+
+Образ должен быть той же архитектуры, что GPU-машины: собранный на Apple Silicon
+`arm64`-образ не запустится на `amd64`-сервере.
+
 ## Как подключается GPU-машина
 
 ```bash

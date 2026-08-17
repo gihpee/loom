@@ -40,7 +40,7 @@ class EchoBackend(BackendAdapter):
     def prepare(self) -> None:
         return None
 
-    def start(self) -> None:
+    def _spawn(self) -> None:
         env = os.environ.copy()
         # Make loom_worker importable in the child even when the parent runs
         # from a source checkout (tests) rather than an installed package.

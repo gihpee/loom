@@ -39,6 +39,18 @@ class OrchestratorConfig:
     slo_window_s: float = 60.0
     slo_min_samples: int = 10
     slo_boost_factor: float = 2.0
+    # A backend start is slow (weights download + engine warm-up). Telemetry
+    # older than this after a deploy was issued still describes the previous
+    # attempt and must not trigger re-placement.
+    deploy_grace_s: float = 60.0
+    # How long a (model, node) that failed to start is left alone before the
+    # broker is allowed to place it there again.
+    deploy_retry_s: float = 300.0
+    # How long to wait for StartServing to report back. A cold start downloads
+    # the whole checkpoint first, so this is minutes-to-an-hour, not seconds;
+    # it must exceed the worker's LOOM_BACKEND_READY_TIMEOUT_S or the
+    # orchestrator declares failure while the engine is still coming up.
+    start_timeout_s: float = 3600.0
 
     @classmethod
     def from_env(cls) -> "OrchestratorConfig":
@@ -69,4 +81,7 @@ class OrchestratorConfig:
             slo_window_s=float(os.environ.get("LOOM_SLO_WINDOW_S", "60")),
             slo_min_samples=int(os.environ.get("LOOM_SLO_MIN_SAMPLES", "10")),
             slo_boost_factor=float(os.environ.get("LOOM_SLO_BOOST", "2.0")),
+            deploy_grace_s=float(os.environ.get("LOOM_DEPLOY_GRACE_S", "60")),
+            deploy_retry_s=float(os.environ.get("LOOM_DEPLOY_RETRY_S", "300")),
+            start_timeout_s=float(os.environ.get("LOOM_START_TIMEOUT_S", "3600")),
         )

@@ -51,7 +51,7 @@ class MlxBackend(BackendAdapter):
                 f"[{self.start_layer}, {self.end_layer}) is not supported yet"
             )
 
-    def start(self) -> None:
+    def _spawn(self) -> None:
         env = os.environ.copy()
         pkg_parent = str(Path(__file__).resolve().parent.parent.parent)
         env["PYTHONPATH"] = pkg_parent + os.pathsep + env.get("PYTHONPATH", "")

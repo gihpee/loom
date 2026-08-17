@@ -100,6 +100,14 @@ class MultiModelController:
         self.nodes: Dict[str, NodeDescriptor] = {}
         self.sessions: Dict[str, WorkerSession] = {}
         self.deployed: Deployment = {}
+        # (model, node) -> when the current deploy attempt was issued. A worker
+        # heartbeat still describing the PREVIOUS attempt must not be mistaken
+        # for a fresh failure — that turns one bad start into a launch storm.
+        self.deploy_started: Dict[Tuple[str, str], float] = {}
+        # (model, node) -> (when it failed, why). Re-placement waits out a
+        # cooldown so a shard that cannot start (bad model, too little VRAM) is
+        # retried on a human timescale instead of every rebalance pass.
+        self.deploy_failures: Dict[Tuple[str, str], Tuple[float, str]] = {}
         self.last_plan: Optional[BrokerPlan] = None
         self._lock = asyncio.Lock()
         # SLO tracking: model_id -> deque[(ts, ttft_ms, error)]
@@ -135,9 +143,15 @@ class MultiModelController:
             agent_version=reg.agent_version,
         )
         self.sessions[session.node_id] = session
-        # Worker reconnect: it lost its shards; forget what we thought was deployed.
+        # A re-registering worker may be a restarted container with nothing
+        # loaded, so drop our bookkeeping and let it be re-placed; if it is the
+        # same agent with shards still running, its LoadShard/StartServing are
+        # idempotent and its telemetry re-syncs the routing table.
         for key in [k for k in self.deployed if k[1] == session.node_id]:
             self.deployed.pop(key, None)
+            self.deploy_started.pop(key, None)
+        for key in [k for k in self.deploy_failures if k[1] == session.node_id]:
+            self.deploy_failures.pop(key, None)  # fresh agent, fresh attempt
         await self.rebalance(reason=f"node-join {session.node_id}")
 
     async def on_disconnect(self, session: WorkerSession) -> None:
@@ -151,6 +165,7 @@ class MultiModelController:
             self.store.delete_shard_perf(model_id, node_id)
         for key in [k for k in self.deployed if k[1] == node_id]:
             self.deployed.pop(key, None)
+            self.deploy_started.pop(key, None)
         self.node_last_seen.pop(node_id, None)
         for key in [k for k in self.shard_status if k[1] == node_id]:
             self.shard_status.pop(key, None)
@@ -249,8 +264,14 @@ class MultiModelController:
 
             # Self-healing: a shard the worker reports as FAILED (e.g. the
             # watchdog killed the backend) is forgotten and re-placed on the
-            # next broker pass. "loading"/"loaded" are NOT failures.
+            # next broker pass. "loading"/"loaded"/"starting" are NOT failures.
             key = (shard.model_id, session.node_id)
+            issued_at = self.deploy_started.get(key, 0.0)
+            if time.time() - issued_at < self.config.deploy_grace_s:
+                # Too soon to judge: this heartbeat may still describe the
+                # previous attempt, and re-placing now would stack a second
+                # engine on top of the one that is starting.
+                continue
             if shard.status == "failed" and key in self.deployed:
                 logger.warning(
                     "shard %s on %s reported failed; scheduling re-placement",
@@ -357,11 +378,28 @@ class MultiModelController:
             for model_id, node_id in removals:
                 await self._teardown_on_worker(model_id, node_id)
                 self.deployed.pop((model_id, node_id), None)
+                self.deploy_started.pop((model_id, node_id), None)
 
             # 2) Deploy additions without holding the lock on slow backend starts.
+            now = time.time()
             for model_id, node_id in additions:
-                entry = desired[(model_id, node_id)]
-                self.deployed[(model_id, node_id)] = entry
+                key = (model_id, node_id)
+                failed_at, error = self.deploy_failures.get(key, (0.0, ""))
+                if now - failed_at < self.config.deploy_retry_s:
+                    # Same placement failed moments ago; a backend start costs
+                    # minutes and a full checkpoint download, so retrying every
+                    # pass would just hammer the GPU.
+                    logger.info(
+                        "[Rebalance] skipping %s on %s for %.0fs more (last failure: %s)",
+                        model_id,
+                        node_id,
+                        self.config.deploy_retry_s - (now - failed_at),
+                        error,
+                    )
+                    continue
+                entry = desired[key]
+                self.deployed[key] = entry
+                self.deploy_started[key] = now
                 asyncio.create_task(self._deploy_on_worker(model_id, node_id, entry))
 
     async def _teardown_on_worker(self, model_id: str, node_id: str) -> None:
@@ -425,7 +463,7 @@ class MultiModelController:
             )
             if not ack.ok:
                 logger.error("LoadShard %s on %s failed: %s", model_id, node_id, ack.error)
-                self.deployed.pop((model_id, node_id), None)  # retry on next pass
+                self._mark_deploy_failed(model_id, node_id, ack.error)
                 return
             meta = new_meta()
             ack = await session.send_command(
@@ -433,13 +471,34 @@ class MultiModelController:
                     start_serving=worker_control_pb2.ModelRequest(model_id=model_id, meta=meta)
                 ),
                 meta.command_id,
+                timeout_s=self.config.start_timeout_s,
             )
             if not ack.ok:
                 logger.error("StartServing %s on %s failed: %s", model_id, node_id, ack.error)
-                self.deployed.pop((model_id, node_id), None)
+                self._mark_deploy_failed(model_id, node_id, ack.error)
+                return
+            # Started for real: forget any earlier failure on this placement.
+            self.deploy_failures.pop((model_id, node_id), None)
+            logger.info(
+                "[Rebalance] %s stage %d/%d serving on %s",
+                model_id,
+                stage_index,
+                num_stages,
+                node_id,
+            )
         except (ConnectionError, asyncio.TimeoutError) as exc:
             logger.warning("deploy of %s on %s failed: %s", model_id, node_id, exc)
-            self.deployed.pop((model_id, node_id), None)
+            self._mark_deploy_failed(model_id, node_id, str(exc))
+
+    def _mark_deploy_failed(self, model_id: str, node_id: str, error: str) -> None:
+        """Forget the placement and start its retry cooldown.
+
+        The failure is kept (not just dropped) so the admin UI can say WHY a
+        model is not running, instead of showing an endless silent retry."""
+        key = (model_id, node_id)
+        self.deployed.pop(key, None)
+        self.deploy_started.pop(key, None)
+        self.deploy_failures[key] = (time.time(), error or "unknown error")
 
     # ------------------------------------------------------------- quota override
     async def set_quota(self, model_id: str, node_id: str, vram_quota_bytes: int):
@@ -665,6 +724,22 @@ class MultiModelController:
                 "unscheduled": bool(
                     self.last_plan and spec.model_id in self.last_plan.unscheduled
                 ),
+                # Why a model is not running, in the operator's own words.
+                "failures": [
+                    {
+                        "node_id": node_id,
+                        "error": error,
+                        "age_s": round(time.time() - failed_at, 1),
+                        "retry_in_s": max(
+                            0.0,
+                            round(self.config.deploy_retry_s - (time.time() - failed_at), 1),
+                        ),
+                    }
+                    for (model_id_, node_id), (failed_at, error) in sorted(
+                        self.deploy_failures.items()
+                    )
+                    if model_id_ == spec.model_id
+                ],
             }
         return {"models": out}
 

@@ -30,6 +30,7 @@ class CommandHandlers:
         watchdog_poll_s: float = 2.0,
         relay_url: str = "",
         rss_overhead_bytes: Optional[int] = None,
+        vram_overhead_bytes: Optional[int] = None,
     ) -> None:
         self.state = state
         self.send = send
@@ -42,6 +43,12 @@ class CommandHandlers:
             rss_overhead_bytes
             if rss_overhead_bytes is not None
             else int(float(os.environ.get("LOOM_RSS_OVERHEAD_MB", "2048")) * 1024 * 1024)
+        )
+        # CUDA context + kernels on top of the quota (see QuotaWatchdog).
+        self.vram_overhead_bytes = (
+            vram_overhead_bytes
+            if vram_overhead_bytes is not None
+            else int(float(os.environ.get("LOOM_VRAM_OVERHEAD_MB", "1024")) * 1024 * 1024)
         )
         self.watchdog_poll_s = watchdog_poll_s
         self._watchdogs: dict[str, QuotaWatchdog] = {}
@@ -72,9 +79,28 @@ class CommandHandlers:
             vram_quota_bytes=req.vram_quota_bytes,
             role=role,
         )
+        logger.info(
+            "LoadShard %s layers [%d,%d) backend=%s quota=%.1fGB stage %d/%d",
+            req.model_id,
+            req.start_layer,
+            req.end_layer,
+            req.backend_type,
+            req.vram_quota_bytes / (1024**3),
+            role.stage_index,
+            role.num_stages,
+        )
         existing = self.state.get(req.model_id)
-        if existing is not None and existing.status in (ShardStatus.LOADED, ShardStatus.SERVING):
-            return self._ack(command_id, True)  # idempotent
+        if existing is not None and existing.status in (
+            ShardStatus.LOADED,
+            ShardStatus.STARTING,
+            ShardStatus.SERVING,
+        ):
+            # Idempotent: the same shard is already here. Never rebuild the
+            # backend under a running process — that would orphan it.
+            logger.info(
+                "LoadShard %s: already %s, nothing to do", req.model_id, existing.status.value
+            )
+            return self._ack(command_id, True)
         if existing is not None:
             # Replacing a FAILED/STOPPED shard: release its leftovers first.
             self._teardown(req.model_id, existing, to_status=ShardStatus.STOPPED)
@@ -119,6 +145,16 @@ class CommandHandlers:
         shard = self.state.get(req.model_id)
         if shard is None or shard.backend is None:
             return self._ack(command_id, False, f"model {req.model_id} is not loaded")
+        if shard.status == ShardStatus.STARTING:
+            # A start is already in flight. Launching another engine here would
+            # orphan the first one — it keeps the GPU while nobody holds its
+            # handle, and every later attempt then dies with OOM.
+            logger.info(
+                "StartServing %s: start already in progress on port %d; ignoring",
+                req.model_id,
+                shard.backend.port,
+            )
+            return self._ack(command_id, True)
         if shard.status == ShardStatus.SERVING:
             # Idempotent — but re-announce the endpoint: the orchestrator may
             # have restarted and lost its endpoint table.
@@ -136,6 +172,12 @@ class CommandHandlers:
         def _serve() -> None:
             backend = shard.backend
             try:
+                logger.info(
+                    "StartServing %s: launching %s backend on port %d",
+                    req.model_id,
+                    shard.spec.backend_type,
+                    backend.port,
+                )
                 backend.start()
                 watchdog = QuotaWatchdog(
                     get_pid=backend.pid,
@@ -144,13 +186,28 @@ class CommandHandlers:
                     device=self.device,
                     poll_interval_s=self.watchdog_poll_s,
                     rss_overhead_bytes=self.rss_overhead_bytes,
+                    vram_overhead_bytes=self.vram_overhead_bytes,
                 )
                 watchdog.start()
                 self._watchdogs[req.model_id] = watchdog
-                if not backend.wait_healthy():
-                    shard.status = ShardStatus.FAILED
-                    shard.error = "backend failed health check"
-                    self.send(self._ack(command_id, False, shard.error))
+                healthy = backend.wait_healthy()
+                if shard.status != ShardStatus.STARTING:
+                    # Stopped/unloaded while we were starting: the teardown
+                    # already had the last word, do not resurrect a status.
+                    logger.info(
+                        "StartServing %s: shard is %s, abandoning this start",
+                        req.model_id,
+                        shard.status.value,
+                    )
+                    return
+                if not healthy:
+                    # Release the process before reporting failure: a backend
+                    # that is stuck (or still downloading) holds the whole VRAM
+                    # quota, and the re-placement would hit an OOM cascade.
+                    error = "backend failed health check"
+                    self._teardown(req.model_id, shard, to_status=ShardStatus.FAILED)
+                    shard.error = error
+                    self.send(self._ack(command_id, False, error))
                     return
                 shard.status = ShardStatus.SERVING
                 # Loopback only: the orchestrator reaches the backend through
@@ -168,10 +225,13 @@ class CommandHandlers:
                 )
             except Exception as exc:
                 logger.exception("StartServing failed for %s", req.model_id)
-                shard.status = ShardStatus.FAILED
+                self._teardown(req.model_id, shard, to_status=ShardStatus.FAILED)
                 shard.error = str(exc)
                 self.send(self._ack(command_id, False, str(exc)))
 
+        # Claim the shard before the thread exists: the next StartServing (a
+        # retry, a rebalance race) must see STARTING, not LOADED.
+        shard.status = ShardStatus.STARTING
         # Serve-start can be slow (model load); run it off the dispatch thread.
         threading.Thread(target=_serve, name=f"serve-{req.model_id}", daemon=True).start()
         return None  # ack is sent asynchronously by _serve

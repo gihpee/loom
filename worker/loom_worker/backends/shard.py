@@ -76,7 +76,7 @@ class ShardBackend(BackendAdapter):
     def prepare(self) -> None:
         return None  # any layer range is valid — that is the whole point
 
-    def start(self) -> None:
+    def _spawn(self) -> None:
         env = os.environ.copy()
         pkg_parent = str(Path(__file__).resolve().parent.parent.parent)
         env["PYTHONPATH"] = pkg_parent + os.pathsep + env.get("PYTHONPATH", "")

@@ -11,6 +11,9 @@ from typing import Dict, Optional
 class ShardStatus(str, Enum):
     LOADING = "loading"
     LOADED = "loaded"
+    # A start is in flight (weights downloading, engine warming up). Distinct
+    # from LOADED so a repeated StartServing cannot launch a second engine.
+    STARTING = "starting"
     SERVING = "serving"
     STOPPED = "stopped"
     FAILED = "failed"

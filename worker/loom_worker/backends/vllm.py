@@ -13,6 +13,7 @@ data plane work.
 
 from __future__ import annotations
 
+import logging
 import os
 import subprocess
 import sys
@@ -20,7 +21,15 @@ from typing import List, Optional
 
 from loom_worker.backends.base import BackendAdapter
 
+logger = logging.getLogger("loom_worker.backend.vllm")
+
 GIB = 1024**3
+
+# vLLM refuses to start unless this fraction of TOTAL device memory is free at
+# startup, so asking for the last drop makes the launch fragile: the driver,
+# another tenant or a dying predecessor holds a few hundred MB and nothing
+# starts at all. Cap below 1.0 even when the broker granted the whole card.
+MAX_GPU_UTILISATION = float(os.environ.get("LOOM_VLLM_MAX_UTILISATION", "0.88"))
 
 
 class VllmBackend(BackendAdapter):
@@ -35,9 +44,9 @@ class VllmBackend(BackendAdapter):
     def gpu_memory_utilization(self) -> float:
         if self.total_vram_bytes <= 0:
             # Unknown total: fall back to vLLM's default share.
-            return 0.9
+            return min(0.9, MAX_GPU_UTILISATION)
         frac = self.vram_quota_bytes / self.total_vram_bytes
-        return max(0.05, min(0.95, frac))
+        return max(0.05, min(MAX_GPU_UTILISATION, frac))
 
     def command(self) -> List[str]:
         return [
@@ -60,12 +69,22 @@ class VllmBackend(BackendAdapter):
                 f"[{self.start_layer}, {self.end_layer}) is not supported yet"
             )
 
-    def start(self) -> None:
+    def _spawn(self) -> None:
+        cmd = self.command()
+        logger.info("%s: launching vLLM: %s", self.model_id, " ".join(cmd))
         self._proc = subprocess.Popen(
-            self.command(),
+            cmd,
             stdout=sys.stdout,
             stderr=sys.stderr,
             env=os.environ.copy(),
+        )
+        logger.info(
+            "%s: vLLM pid=%d port=%d quota=%.1fGB utilisation=%.3f",
+            self.model_id,
+            self._proc.pid,
+            self.port,
+            self.vram_quota_bytes / GIB,
+            self.gpu_memory_utilization(),
         )
 
     def stop(self) -> None:

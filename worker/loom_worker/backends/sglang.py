@@ -66,7 +66,7 @@ class SglangBackend(BackendAdapter):
                 f"[{self.start_layer}, {self.end_layer}) is not supported yet"
             )
 
-    def start(self) -> None:
+    def _spawn(self) -> None:
         self._proc = subprocess.Popen(
             self.command(), stdout=sys.stdout, stderr=sys.stderr, env=os.environ.copy()
         )
