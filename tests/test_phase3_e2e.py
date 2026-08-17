@@ -55,7 +55,8 @@ def test_watchdog_kill_keeps_node_alive_and_self_heals():
     worker.handlers._on_watchdog_kill = record_kill
     try:
         assert wait_until(lambda: bool(controller.endpoints.candidates("qwen3-0.6b")), 30)
-        first_port = controller.endpoints.candidates("qwen3-0.6b")[0].base_url
+        first_pid = worker.state.get("qwen3-0.6b").backend.pid()
+        assert first_pid is not None
 
         # Deliberate quota breach: 1 byte. The RSS watchdog must kill the
         # backend subprocess.
@@ -79,8 +80,14 @@ def test_watchdog_kill_keeps_node_alive_and_self_heals():
             30,
         ), "model did not self-heal after watchdog kill"
         assert wait_until(lambda: bool(controller.endpoints.candidates("qwen3-0.6b")), 10)
-        second_port = controller.endpoints.candidates("qwen3-0.6b")[0].base_url
-        assert second_port != first_port  # genuinely restarted backend
+        # A NEW process is serving. The port may or may not be reused (a shard
+        # whose process died is relaunched on its existing backend), so the pid
+        # is what proves the backend genuinely restarted.
+        assert wait_until(
+            lambda: (b := worker.state.get("qwen3-0.6b").backend) is not None
+            and b.pid() not in (None, first_pid),
+            20,
+        ), "the backend process was not replaced"
     finally:
         worker.stop()
         orch.stop()

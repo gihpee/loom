@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import threading
 import time
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -115,6 +117,25 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.flush()
 
 
+def _exit_when_orphaned(poll_s: float = 2.0) -> None:
+    """Exit if the process that spawned us is gone.
+
+    Same guard as the pipeline stage server: an interrupted test run (or a
+    killed agent) otherwise leaves these servers holding ports and CPU
+    forever — dozens of them accumulated over a session and slowed everything
+    down. Only a CHANGE of parent counts: the agent is PID 1 in a container.
+    """
+    original_ppid = os.getppid()
+
+    def loop() -> None:
+        while True:
+            time.sleep(poll_s)
+            if os.getppid() != original_ppid:
+                os._exit(0)
+
+    threading.Thread(target=loop, name="parent-watch", daemon=True).start()
+
+
 def main() -> None:
     global STARTUP_DELAY, MODEL_ID
     parser = argparse.ArgumentParser()
@@ -125,6 +146,7 @@ def main() -> None:
     STARTUP_DELAY = args.startup_delay
     MODEL_ID = args.model_id
     server = ThreadingHTTPServer(("0.0.0.0", args.port), Handler)
+    _exit_when_orphaned()
     server.serve_forever()
 
 

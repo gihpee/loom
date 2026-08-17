@@ -187,8 +187,11 @@ def test_stage_routes_are_published_and_cleaned(pipeline_stack):
 
     # The hub knows which node serves each stage — that is what makes the
     # activations routable without workers talking to each other.
+    # Derived from the live deployment, so it cannot disagree with the layout
+    # above (it used to: a broker pass that ended early left this empty while
+    # the stages kept serving).
     pipeline_ids = controller.model_pipelines.get(MODEL_ID, [])
-    assert pipeline_ids
+    assert pipeline_ids, f"stages are deployed but no pipeline is named: {layout}"
     stages = controller.tunnel.pipeline_stages(pipeline_ids[0])
     assert set(stages) == set(range(len(layout)))
     assert len(set(stages.values())) == len(layout)

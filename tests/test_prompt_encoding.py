@@ -99,3 +99,39 @@ def test_falls_back_when_the_template_misbehaves(tokenizer):
 
     ids = _encode_chat(Broken(), MESSAGES)
     assert ids and all(isinstance(i, int) for i in ids)
+
+
+# ------------------------------------------------------- generation limits
+def test_default_token_budget_fits_a_reasoning_model():
+    """A 128-token default truncates Qwen3 mid-<think> and looks like a crash."""
+    from loom_worker.shard import server
+
+    assert server.DEFAULT_MAX_TOKENS >= 1024
+
+
+def test_template_kwargs_reach_the_template(tokenizer):
+    """`chat_template_kwargs` is how a caller turns reasoning off per request."""
+    seen = {}
+
+    class Recording:
+        chat_template = TEMPLATE
+
+        def apply_chat_template(self, messages, **kwargs):
+            seen.update(kwargs)
+            # Render with the template passed explicitly: the shared fixture's
+            # own attribute is cleared by the test above.
+            return tokenizer.apply_chat_template(
+                messages, chat_template=TEMPLATE, add_generation_prompt=True, tokenize=True
+            )
+
+    ids = _encode_chat(Recording(), MESSAGES, {"enable_thinking": False})
+    assert seen.get("enable_thinking") is False
+    assert ids and all(isinstance(i, int) for i in ids)
+
+
+def test_console_exposes_the_token_budget_and_thinking_switch():
+    html = (Path(__file__).resolve().parent.parent / "src/loom/api/admin_ui.html").read_text()
+    assert "c-maxtok" in html and "max_tokens" in html
+    assert "chat_template_kwargs" in html and "enable_thinking" in html
+    # A capped answer must say so instead of looking like a broken pipeline.
+    assert "finish_reason=length" in html

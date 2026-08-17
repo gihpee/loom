@@ -118,8 +118,6 @@ class MultiModelController:
         # Read-only observability state for the admin UI (no control logic).
         self.node_last_seen: Dict[str, float] = {}
         self.shard_status: Dict[Tuple[str, str], Tuple[str, float]] = {}  # -> (status, ts)
-        # model_id -> [pipeline_id, ...] (one per replica)
-        self.model_pipelines: Dict[str, List[str]] = {}
         # Set by the server once the dial address is resolved (admin UI shows it).
         self.public_address = None
 
@@ -256,9 +254,6 @@ class MultiModelController:
                         num_stages,
                     )
                     self.tunnel.register_stage_routes(pipeline_id, {stage_index: session.node_id})
-                    self.model_pipelines.setdefault(shard.model_id, [])
-                    if pipeline_id not in self.model_pipelines[shard.model_id]:
-                        self.model_pipelines[shard.model_id].append(pipeline_id)
                     logger.info(
                         "re-synced %s stage %d/%d on %s from telemetry",
                         shard.model_id,
@@ -344,7 +339,6 @@ class MultiModelController:
             # pipeline_id -> {stage_index: node_id}, published to the tunnel hub
             # so inter-stage activations can be routed.
             pipeline_routes: Dict[str, Dict[int, str]] = {}
-            self.model_pipelines = {}
             for spec in self.registry.list():
                 grants = plan.allocations.get(spec.model_id) or {}
                 if not grants:
@@ -359,10 +353,8 @@ class MultiModelController:
                         spec.model_id,
                         allocation,
                     )
-                self.model_pipelines[spec.model_id] = []
                 for idx, stages in enumerate(pipelines):
                     pipeline_id = f"{spec.model_id}#{idx}"
-                    self.model_pipelines[spec.model_id].append(pipeline_id)
                     pipeline_routes[pipeline_id] = {}
                     for stage_index, (node_id, start, end) in enumerate(stages):
                         desired[(spec.model_id, node_id)] = (
@@ -645,6 +637,24 @@ class MultiModelController:
                 logger.exception("periodic rebalance failed")
 
     # ------------------------------------------------------------- request routing
+    @property
+    def model_pipelines(self) -> Dict[str, List[str]]:
+        """model_id -> [pipeline_id, ...] (one per replica), derived state.
+
+        Derived rather than stored: a dict rebuilt on every broker pass drifts
+        from `deployed` the moment a pass ends early, and then a model with
+        live stages reports no pipelines at all.
+        """
+        out: Dict[str, List[str]] = {}
+        for (model_id, _node_id), entry in self.deployed.items():
+            pipeline_id = entry[3]
+            ids = out.setdefault(model_id, [])
+            if pipeline_id not in ids:
+                ids.append(pipeline_id)
+        for ids in out.values():
+            ids.sort()
+        return out
+
     def head_nodes(self, model_id: str) -> Dict[str, str]:
         """pipeline_id -> node_id of stage 0 for each replica of the model."""
         heads: Dict[str, str] = {}

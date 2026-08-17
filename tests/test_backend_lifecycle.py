@@ -235,3 +235,36 @@ def test_vram_overhead_is_not_charged_to_the_quota():
         assert kills and "vram" in kills[0]
     finally:
         watchdog.stop()
+
+
+def test_a_serving_shard_whose_process_died_is_restarted_not_re_announced():
+    """Idempotency is checked against the process, not the bookkeeping.
+
+    A backend killed behind the agent's back (watchdog, OOM killer, crash)
+    leaves the status saying SERVING. Answering "already serving" then hands
+    the orchestrator an endpoint with nothing behind it.
+    """
+    state, handlers, sent = make_handlers()
+    assert load(handlers).ack.ok
+    start(handlers, command_id="s1")
+    shard = state.get("lifecycle")
+    backend = shard.backend
+    try:
+        deadline = time.time() + 30
+        while time.time() < deadline and shard.status != ShardStatus.SERVING:
+            time.sleep(0.1)
+        assert shard.status == ShardStatus.SERVING
+        first_pid = backend.pid()
+
+        backend.stop()  # simulate the watchdog killing it
+        assert backend.pid() is None
+
+        # StartServing must relaunch instead of re-announcing the dead port.
+        assert start(handlers, command_id="s2") is None, "no restart was attempted"
+        deadline = time.time() + 30
+        while time.time() < deadline and shard.status != ShardStatus.SERVING:
+            time.sleep(0.1)
+        assert shard.status == ShardStatus.SERVING
+        assert backend.pid() not in (None, first_pid), "a fresh process should be serving"
+    finally:
+        backend.stop()

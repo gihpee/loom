@@ -333,6 +333,7 @@ curl -s localhost:8000/admin/models_view -H "X-Loom-Admin-Token: $LOOM_ADMIN_TOK
 | `Free memory on device cuda:0 ... less than desired` | на карте уже висит чей-то процесс: `nvidia-smi`. Если это осиротевший бэкенд от прошлого запуска — перезапустите контейнер воркера; квоту под vLLM ограничивает `LOOM_VLLM_MAX_UTILISATION` (по умолчанию 0.88) |
 | В логах воркера несколько запусков одного движка | должно быть исключено: воркер отвечает `start already in progress`. Если видите повтор — проверьте, что образ пересобран (`scripts/build_worker.sh`) |
 | Модель долго `starting` | это скачивание весов; прогресс — `docker logs` воркера, строка `backend still starting (Ns elapsed)` каждые 30 с |
+| Ответ обрывается, `<think>` не закрыт | это лимит, не сбой: в ответе `finish_reason: length`. Поднимите `max_tokens` в запросе (в консоли админки есть поле) или отключите размышления — `{"chat_template_kwargs": {"enable_thinking": false}}`; дефолт задаётся `LOOM_MAX_TOKENS_DEFAULT` |
 | `too many dimensions 'str'` в логе стадии | старый образ воркера: токенизатор transformers 5 возвращает `BatchEncoding`, а не список токенов. Пересоберите образ (`scripts/build_worker.sh`) |
 | Модель не поднимается, причина неизвестна | `/admin/ui` → вкладка Models: под раскладкой красным выводится последняя ошибка старта и через сколько будет повтор |
 

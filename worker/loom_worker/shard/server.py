@@ -37,6 +37,12 @@ logger = logging.getLogger("loom_worker.shard.server")
 
 STATE: Dict[str, object] = {}
 
+# Reasoning models (Qwen3 & co) spend their first few hundred tokens inside
+# <think>, so a small cap truncates the answer before it starts — the reply
+# looks broken even though the pipeline worked. Requests may still ask for
+# fewer or more; this is only the default when the caller says nothing.
+DEFAULT_MAX_TOKENS = int(os.environ.get("LOOM_MAX_TOKENS_DEFAULT", "2048"))
+
 
 # --------------------------------------------------------------------- relay
 def relay(payload: dict) -> None:
@@ -168,14 +174,22 @@ def handle_stage_message(msg: dict) -> None:
 
 
 # ------------------------------------------------------------------ generation
-def generate(messages: List[dict], *, max_tokens: int, temperature: float, top_p: float, stream_cb=None) -> dict:
+def generate(
+    messages: List[dict],
+    *,
+    max_tokens: int,
+    temperature: float,
+    top_p: float,
+    stream_cb=None,
+    template_kwargs: Optional[dict] = None,
+) -> dict:
     """Head-stage generation loop; returns the completion text and token counts."""
     executor: ShardExecutor = STATE["executor"]
     topology = STATE["topology"]
     tokenizer = STATE["tokenizer"]
     eos_ids = set(STATE["eos_token_ids"])
 
-    prompt_ids = _encode_chat(tokenizer, messages)
+    prompt_ids = _encode_chat(tokenizer, messages, template_kwargs)
     request_id = uuid.uuid4().hex
     pending = PendingRequest(request_id)
     with PENDING_LOCK:
@@ -262,13 +276,23 @@ def _as_token_ids(encoded) -> List[int]:
     return encoded
 
 
-def _encode_chat(tokenizer, messages: List[dict]) -> List[int]:
-    """Apply the chat template when the model has one, else concatenate."""
+def _encode_chat(
+    tokenizer, messages: List[dict], template_kwargs: Optional[dict] = None
+) -> List[int]:
+    """Apply the chat template when the model has one, else concatenate.
+
+    `template_kwargs` is passed straight to the template, which is how
+    reasoning models are configured per request — Qwen3 takes
+    `enable_thinking: false` to skip the <think> block.
+    """
     try:
         if getattr(tokenizer, "chat_template", None):
             return _as_token_ids(
                 tokenizer.apply_chat_template(
-                    messages, add_generation_prompt=True, tokenize=True
+                    messages,
+                    add_generation_prompt=True,
+                    tokenize=True,
+                    **(template_kwargs or {}),
                 )
             )
     except Exception:
@@ -341,9 +365,17 @@ class Handler(BaseHTTPRequestHandler):
 
     def _chat(self, body: dict) -> None:
         messages = body.get("messages") or []
-        max_tokens = int(body.get("max_tokens") or body.get("max_completion_tokens") or 128)
+        max_tokens = int(
+            body.get("max_tokens") or body.get("max_completion_tokens") or DEFAULT_MAX_TOKENS
+        )
         temperature = float(body.get("temperature") or 0.0)
         top_p = float(body.get("top_p") or 1.0)
+        # Same field vLLM uses: {"chat_template_kwargs": {"enable_thinking": false}}
+        # turns off the <think> block on Qwen3-style models.
+        template_kwargs = body.get("chat_template_kwargs") or None
+        if template_kwargs is not None and not isinstance(template_kwargs, dict):
+            self._json(400, {"error": "chat_template_kwargs must be an object"})
+            return
         model_id = STATE["model_id"]
         created = int(time.time())
         chat_id = f"chatcmpl-{uuid.uuid4().hex[:24]}"
@@ -351,7 +383,11 @@ class Handler(BaseHTTPRequestHandler):
         if not body.get("stream"):
             try:
                 result = generate(
-                    messages, max_tokens=max_tokens, temperature=temperature, top_p=top_p
+                    messages,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                    top_p=top_p,
+                    template_kwargs=template_kwargs,
                 )
             except Exception as exc:
                 logger.exception("generation failed")
@@ -404,6 +440,7 @@ class Handler(BaseHTTPRequestHandler):
                 temperature=temperature,
                 top_p=top_p,
                 stream_cb=emit,
+                template_kwargs=template_kwargs,
             )
             final = {
                 "id": chat_id,

@@ -366,7 +366,10 @@ async function viewConsole() {
   const opts = models.data.map(m=>`<option>${esc(m.id)}</option>`).join("");
   return `<h2>Test console → POST /v1/chat/completions</h2>
     <p>model <select id="c-model">${opts}</select>
-       <label class="muted"><input type="checkbox" id="c-stream"> stream</label></p>
+       max_tokens <input id="c-maxtok" type="text" value="1024" style="width:70px">
+       <label class="muted"><input type="checkbox" id="c-stream"> stream</label>
+       <label class="muted" title="Qwen3 и другие reasoning-модели: выключает блок &lt;think&gt;">
+         <input type="checkbox" id="c-nothink"> без think</label></p>
     <textarea id="c-prompt" placeholder="prompt…">привет, loom</textarea>
     <p><button class="action" onclick="sendChat()">send</button></p>
     <pre id="c-out" class="muted">—</pre>`;
@@ -376,17 +379,57 @@ async function sendChat() {
   out.textContent = "…";
   const body = {model: $("#c-model").value, stream: $("#c-stream").checked,
                 messages: [{role:"user", content: $("#c-prompt").value}]};
+  const maxTok = parseInt($("#c-maxtok").value, 10);
+  if (maxTok > 0) body.max_tokens = maxTok;
+  // Reasoning models burn hundreds of tokens inside <think> before answering.
+  if ($("#c-nothink").checked) body.chat_template_kwargs = {enable_thinking: false};
   try {
     const r = await fetch("/v1/chat/completions", {method:"POST", headers: headers(), body: JSON.stringify(body)});
     if (body.stream) {
+      if (!r.ok) { out.textContent = JSON.stringify(await r.json().catch(() => ({})), null, 2); return; }
+      // Render the stream as text, the way a chat looks — not as raw SSE frames.
       out.textContent = "";
-      const reader = r.body.getReader(); const dec = new TextDecoder();
-      while (true) { const {done, value} = await reader.read(); if (done) break;
-                     out.textContent += dec.decode(value); }
+      const reader = r.body.getReader(), dec = new TextDecoder();
+      let buf = "", text = "", reason = null;
+      while (true) {
+        const {done, value} = await reader.read();
+        if (done) break;
+        buf += dec.decode(value, {stream: true});
+        // SSE events are separated by a blank line; a chunk can split one in
+        // half, so keep the unterminated tail for the next read.
+        const events = buf.split("\n\n");
+        buf = events.pop();
+        for (const ev of events) {
+          for (const line of ev.split("\n")) {
+            if (!line.startsWith("data:")) continue;
+            const payload = line.slice(5).trim();
+            if (!payload || payload === "[DONE]") continue;
+            try {
+              const choice = (JSON.parse(payload).choices || [])[0] || {};
+              if (choice.delta && choice.delta.content) text += choice.delta.content;
+              if (choice.finish_reason) reason = choice.finish_reason;
+            } catch (e) { /* a frame we cannot parse is not worth breaking the view */ }
+          }
+        }
+        out.textContent = text;  // grows live, like a chat
+      }
+      if (reason) {
+        out.textContent = text + (reason === "length"
+          ? `\n\n⚠ finish_reason=length — ответ обрезан лимитом max_tokens, поднимите его`
+          : `\n\nfinish_reason=${reason}`);
+      }
     } else {
       const j = await r.json();
-      out.textContent = r.ok && j.choices ? j.choices[0].message.content + "\n\n" + JSON.stringify(j.usage)
-                                          : JSON.stringify(j, null, 2);
+      if (r.ok && j.choices) {
+        const reason = j.choices[0].finish_reason;
+        // "length" means the cap cut the answer off, not that the model stopped.
+        const note = reason === "length"
+          ? `\n\n⚠ finish_reason=length — ответ обрезан лимитом max_tokens, поднимите его`
+          : `\n\nfinish_reason=${reason}`;
+        out.textContent = j.choices[0].message.content + note + "\n" + JSON.stringify(j.usage);
+      } else {
+        out.textContent = JSON.stringify(j, null, 2);
+      }
     }
   } catch (e) { out.textContent = "error: " + e.message; }
 }

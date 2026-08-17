@@ -63,6 +63,35 @@ class CommandHandlers:
             ack=worker_control_pb2.Ack(command_id=command_id, ok=ok, error=error)
         )
 
+    def _is_live(self, shard: ShardState) -> bool:
+        """Is this shard really up, not just recorded as up?
+
+        Idempotency must be checked against the process, not the bookkeeping: a
+        backend killed behind our back (watchdog, OOM killer, crash) leaves the
+        status saying SERVING, and answering "already serving" to the next
+        command would advertise an endpoint with nothing behind it.
+        """
+        if shard.backend is None:
+            return False
+        if shard.status == ShardStatus.LOADED:
+            return True  # nothing spawned yet, by design
+        if shard.status == ShardStatus.STARTING:
+            # A start is in flight: between claiming the shard and spawning the
+            # process there is a moment with no pid, and calling that "dead"
+            # would let a retry launch a second engine — the exact failure this
+            # whole guard exists to prevent.
+            return True
+        if shard.status != ShardStatus.SERVING:
+            return False
+        if shard.backend.is_running():
+            return True
+        logger.warning(
+            "shard %s is recorded as %s but its process is gone; treating it as failed",
+            shard.spec.model_id,
+            shard.status.value,
+        )
+        return False
+
     # --- command handlers --------------------------------------------------
     def load_shard(self, req: worker_control_pb2.LoadShardRequest) -> gateway_pb2.WorkerMessage:
         command_id = req.meta.command_id
@@ -94,11 +123,7 @@ class CommandHandlers:
             role.num_stages,
         )
         existing = self.state.get(req.model_id)
-        if existing is not None and existing.status in (
-            ShardStatus.LOADED,
-            ShardStatus.STARTING,
-            ShardStatus.SERVING,
-        ):
+        if existing is not None and self._is_live(existing):
             # Idempotent: the same shard is already here. Never rebuild the
             # backend under a running process — that would orphan it.
             logger.info(
@@ -149,6 +174,14 @@ class CommandHandlers:
         shard = self.state.get(req.model_id)
         if shard is None or shard.backend is None:
             return self._ack(command_id, False, f"model {req.model_id} is not loaded")
+        if not self._is_live(shard) and shard.status in (
+            ShardStatus.STARTING,
+            ShardStatus.SERVING,
+        ):
+            # Recorded as up, but the process died. Fall through and start it
+            # again instead of re-announcing a dead endpoint.
+            shard.status = ShardStatus.LOADED
+            shard.endpoint_url = None
         if shard.status == ShardStatus.STARTING:
             # A start is already in flight. Launching another engine here would
             # orphan the first one — it keeps the GPU while nobody holds its
