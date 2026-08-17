@@ -31,24 +31,35 @@ logger = get_logger(__name__)
 
 NGROK_API = "http://ngrok:4040/api/tunnels"
 NGROK_API_LOCAL = "http://127.0.0.1:4040/api/tunnels"
+# Public-IP echo services. Needed because inside a container we only see the
+# docker bridge address (172.x), never the host's public IP.
+IP_SERVICES = ("https://api.ipify.org", "https://ifconfig.me/ip", "https://icanhazip.com")
 
 
 @dataclass
 class PublicAddress:
     address: str
-    source: str  # "env" | "ngrok" | "host-ip" | "loopback"
+    source: str  # "env" | "ngrok" | "public-ip" | "host-ip" | "loopback"
     reachable_externally: bool
+    self_check: Optional[bool] = None  # could WE open a TCP connection to it?
 
     @property
     def warning(self) -> Optional[str]:
-        if self.reachable_externally:
-            return None
-        return (
-            "Workers on other machines cannot reach this address. Either set "
-            "LOOM_PUBLIC_ADDR to a reachable host:port, or run the bundled "
-            "tunnel (docker compose --profile tunnel up -d) so a public "
-            "endpoint is created for you."
-        )
+        if not self.reachable_externally:
+            return (
+                "Workers on other machines cannot reach this address. Either set "
+                "LOOM_PUBLIC_ADDR to a reachable host:port, or run the bundled "
+                "tunnel (docker compose --profile tunnel up -d) so a public "
+                "endpoint is created for you."
+            )
+        if self.self_check is False:
+            return (
+                f"Could not open a TCP connection to {self.address} from here. "
+                "That is normal for some NAT setups, but check that the port is "
+                "published and not blocked by a firewall — workers dial exactly "
+                "this address."
+            )
+        return None
 
 
 def _from_ngrok(grpc_port: int) -> Optional[str]:
@@ -65,6 +76,33 @@ def _from_ngrok(grpc_port: int) -> Optional[str]:
         except Exception:
             continue
     return None
+
+
+def _public_ip_via_service() -> Optional[str]:
+    """Ask an echo service for the host's public IP (skippable, short timeout)."""
+    if os.environ.get("LOOM_SKIP_IP_LOOKUP", "").lower() in ("1", "true", "yes"):
+        return None
+    for url in IP_SERVICES:
+        try:
+            resp = httpx.get(url, timeout=3)
+            if resp.status_code == 200:
+                ip = resp.text.strip()
+                if ip and not _is_private(ip) and len(ip) <= 45:
+                    return ip
+        except Exception:
+            continue
+    return None
+
+
+def _tcp_reachable(host: str, port: int, timeout: float = 2.0) -> Optional[bool]:
+    """Best-effort: can we connect to the address we are about to advertise?"""
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+    except Exception:
+        return None
 
 
 def _host_ip() -> Optional[str]:
@@ -96,13 +134,36 @@ def _is_private(host: str) -> bool:
 def resolve_public_address(grpc_port: int) -> PublicAddress:
     explicit = os.environ.get("LOOM_PUBLIC_ADDR", "").strip()
     if explicit:
-        host = explicit.rsplit(":", 1)[0]
-        return PublicAddress(explicit, "env", not _is_private(host))
+        host, _, port_s = explicit.rpartition(":")
+        host = host or explicit
+        try:
+            port = int(port_s)
+        except ValueError:
+            port = grpc_port
+        return PublicAddress(
+            explicit,
+            "env",
+            not _is_private(host),
+            self_check=_tcp_reachable(host, port),
+        )
 
     tunnel = _from_ngrok(grpc_port)
     if tunnel:
         logger.info("public address discovered via tunnel: %s", tunnel)
         return PublicAddress(tunnel, "ngrok", True)
+
+    # A containerised orchestrator only sees the docker bridge IP, so ask the
+    # outside world what our public address is.
+    public_ip = _public_ip_via_service()
+    if public_ip:
+        addr = f"{public_ip}:{grpc_port}"
+        check = _tcp_reachable(public_ip, grpc_port)
+        logger.info(
+            "public IP detected: %s (tcp self-check: %s)",
+            addr,
+            {True: "ok", False: "failed", None: "unknown"}[check],
+        )
+        return PublicAddress(addr, "public-ip", True, self_check=check)
 
     ip = _host_ip()
     if ip:

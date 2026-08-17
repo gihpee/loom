@@ -1,11 +1,16 @@
 # Loom orchestrator for real deployments (no workers here — GPU owners attach
 # themselves with `docker run gihpee/loomworker --key ...`).
 #
-#   LOOM_PUBLIC_ADDR=<your-host-or-ip>:9000 docker compose -f docker-compose.prod.yml up -d --build
-#   curl -sX POST localhost:8000/admin/keys -H 'X-Loom-Admin-Token: ...' -d '{"label":"gpu-box-1"}'
+#   bash scripts/init_env.sh            # generates .env with random secrets
+#   docker compose -f docker-compose.prod.yml up -d --build
 #
-# LOOM_PUBLIC_ADDR is mandatory: it is embedded into every issued join key, so
-# the worker learns where to dial from the key alone.
+# Everything configurable lives in .env (see .env.example): ports, tokens,
+# catalog, placement ratios. No address to configure — the orchestrator detects
+# what workers should dial (src/loom/orchestrator/public_addr.py) and embeds it
+# into every join key.
+#
+# Ports are published as <port>:<port> on purpose: the port number ends up
+# inside the join key, so it must be identical inside and outside the container.
 
 services:
   orchestrator:
@@ -15,37 +20,45 @@ services:
     restart: unless-stopped
     environment:
       LOOM_MODEL_CATALOG: /app/configs/${LOOM_CATALOG:-catalog-qwen3-8b.json}
-      LOOM_GRPC_PORT: "9000"
-      LOOM_HTTP_PORT: "8000"
-      # Leave empty to auto-detect (host IP, or the bundled tunnel below).
-      # Set it explicitly when you have a domain / public IP / VPN address.
+      LOOM_HTTP_PORT: ${LOOM_HTTP_PORT:-8000}
+      LOOM_GRPC_PORT: ${LOOM_GRPC_PORT:-9000}
       LOOM_PUBLIC_ADDR: ${LOOM_PUBLIC_ADDR:-}
-      # Join keys survive restarts here.
+      LOOM_SKIP_IP_LOOKUP: ${LOOM_SKIP_IP_LOOKUP:-}
+      LOOM_ADMIN_TOKEN: ${LOOM_ADMIN_TOKEN:-}
+      LOOM_NODE_TOKEN: ${LOOM_NODE_TOKEN:-}
+      HF_TOKEN: ${HF_TOKEN:-}
       LOOM_KEYSTORE_PATH: /data/keys.json
-      LOOM_ADMIN_TOKEN: ${LOOM_ADMIN_TOKEN:?set LOOM_ADMIN_TOKEN}
-      LOOM_REBALANCE_S: "60"
-      LOOM_HEARTBEAT_TIMEOUT_S: "45"
+      LOOM_PARAM_MEM_RATIO: ${LOOM_PARAM_MEM_RATIO:-0.6}
+      LOOM_KVCACHE_MEM_RATIO: ${LOOM_KVCACHE_MEM_RATIO:-0.3}
+      LOOM_QPS_PER_PIPELINE: ${LOOM_QPS_PER_PIPELINE:-10}
+      LOOM_REBALANCE_S: ${LOOM_REBALANCE_S:-60}
+      LOOM_HEARTBEAT_TIMEOUT_S: ${LOOM_HEARTBEAT_TIMEOUT_S:-45}
+      LOOM_SLO_CHECK_S: ${LOOM_SLO_CHECK_S:-10}
+      LOOM_SLO_WINDOW_S: ${LOOM_SLO_WINDOW_S:-60}
+      LOOM_SLO_MIN_SAMPLES: ${LOOM_SLO_MIN_SAMPLES:-10}
+      LOOM_SLO_BOOST: ${LOOM_SLO_BOOST:-2.0}
+      LOOM_LOG_LEVEL: ${LOOM_LOG_LEVEL:-INFO}
     ports:
-      - "8000:8000"   # OpenAI-compatible client API + admin UI
-      - "9000:9000"   # control plane + data-plane tunnel (workers dial in)
+      # client API + admin UI
+      - "${LOOM_HTTP_PORT:-8000}:${LOOM_HTTP_PORT:-8000}"
+      # control plane + data-plane tunnel (workers dial in)
+      - "${LOOM_GRPC_PORT:-9000}:${LOOM_GRPC_PORT:-9000}"
     volumes:
       - loom-data:/data
     depends_on:
       - redis
       - postgres
 
-  # Optional public entry point for hosts WITHOUT a public IP.
-  # A worker behind NAT can only dial out, so something must be reachable:
+  # Optional public entry point for hosts WITHOUT a public IP:
   #   docker compose -f docker-compose.prod.yml --profile tunnel up -d
-  # The orchestrator queries the tunnel's local API and embeds the public
-  # host:port into every join key automatically.
   ngrok:
     image: ngrok/ngrok:latest
     profiles: ["tunnel"]
     restart: unless-stopped
-    command: ["tcp", "orchestrator:9000", "--log", "stdout"]
+    command: ["tcp", "orchestrator:${LOOM_GRPC_PORT:-9000}", "--log", "stdout"]
     environment:
-      NGROK_AUTHTOKEN: ${NGROK_AUTHTOKEN:?set NGROK_AUTHTOKEN (free account at ngrok.com)}
+      # Only needed when running with --profile tunnel.
+      NGROK_AUTHTOKEN: ${NGROK_AUTHTOKEN:-}
     depends_on:
       - orchestrator
 
@@ -61,7 +74,7 @@ services:
     environment:
       POSTGRES_DB: loom
       POSTGRES_USER: loom
-      POSTGRES_PASSWORD: ${LOOM_PG_PASSWORD:?set LOOM_PG_PASSWORD}
+      POSTGRES_PASSWORD: ${LOOM_PG_PASSWORD:-loom}
     volumes:
       - loom-pg:/var/lib/postgresql/data
       - ./src/loom/perfmap/schema.sql:/docker-entrypoint-initdb.d/schema.sql:ro

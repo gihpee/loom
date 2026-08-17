@@ -15,16 +15,17 @@ services:
       dockerfile: docker/orchestrator.Dockerfile
     environment:
       LOOM_MODEL_CATALOG: /app/configs/${LOOM_MODEL_CATALOG_NAME:-catalog-demo.json}
-      LOOM_GRPC_PORT: "9000"
-      LOOM_HTTP_PORT: "8000"
-      LOOM_PUBLIC_ADDR: ${LOOM_PUBLIC_ADDR:-orchestrator:9000}
+      LOOM_GRPC_PORT: ${LOOM_GRPC_PORT:-9000}
+      LOOM_HTTP_PORT: ${LOOM_HTTP_PORT:-8000}
+      LOOM_PUBLIC_ADDR: ${LOOM_PUBLIC_ADDR:-orchestrator:${LOOM_GRPC_PORT:-9000}}
       LOOM_NODE_TOKEN: ${LOOM_NODE_TOKEN:-dev-token}
       LOOM_ADMIN_TOKEN: ${LOOM_ADMIN_TOKEN:-}
       LOOM_KEYSTORE_PATH: /data/keys.json
       LOOM_REBALANCE_S: "30"
     ports:
-      - "8000:8000"   # OpenAI-compatible client API + admin UI
-      - "9000:9000"   # control plane + data-plane tunnel (workers dial in)
+      # Same number inside and out: the port travels inside join keys.
+      - "${LOOM_HTTP_PORT:-8000}:${LOOM_HTTP_PORT:-8000}"
+      - "${LOOM_GRPC_PORT:-9000}:${LOOM_GRPC_PORT:-9000}"
     volumes:
       - loom-data:/data
     depends_on:
@@ -37,7 +38,7 @@ services:
     environment:
       # Dev shortcut: master token instead of an issued join key.
       LOOM_KEY: ${LOOM_NODE_TOKEN:-dev-token}
-      LOOM_ORCH_ADDR: orchestrator:9000
+      LOOM_ORCH_ADDR: orchestrator:${LOOM_GRPC_PORT:-9000}
       LOOM_NODE_TOKEN: ${LOOM_NODE_TOKEN:-dev-token}
       # Hardware is auto-detected; these override it for the CPU demo so the
       # pool holds exactly two demo models (~1.9 GB each) and a third one

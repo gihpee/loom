@@ -74,6 +74,7 @@ def test_rejects_unsupported_config():
 # ------------------------------------------------- dial address detection
 def test_explicit_address_wins(monkeypatch):
     monkeypatch.setenv("LOOM_PUBLIC_ADDR", "loom.example.com:9000")
+    monkeypatch.setattr(public_addr, "_tcp_reachable", lambda h, p, timeout=2.0: None)
     addr = public_addr.resolve_public_address(9000)
     assert addr.address == "loom.example.com:9000"
     assert addr.source == "env"
@@ -83,6 +84,7 @@ def test_explicit_address_wins(monkeypatch):
 
 def test_private_explicit_address_warns(monkeypatch):
     monkeypatch.setenv("LOOM_PUBLIC_ADDR", "192.168.1.5:9000")
+    monkeypatch.setattr(public_addr, "_tcp_reachable", lambda h, p, timeout=2.0: None)
     addr = public_addr.resolve_public_address(9000)
     assert addr.reachable_externally is False
     assert "cannot reach" in addr.warning
@@ -92,6 +94,7 @@ def test_tunnel_is_used_when_present(monkeypatch):
     """With no env var, a co-located tunnel supplies the public endpoint."""
     monkeypatch.delenv("LOOM_PUBLIC_ADDR", raising=False)
     monkeypatch.setattr(public_addr, "_from_ngrok", lambda port: "5.tcp.ngrok.io:12345")
+    monkeypatch.setattr(public_addr, "_public_ip_via_service", lambda: None)
     addr = public_addr.resolve_public_address(9000)
     assert addr.address == "5.tcp.ngrok.io:12345"
     assert addr.source == "ngrok"
@@ -101,11 +104,42 @@ def test_tunnel_is_used_when_present(monkeypatch):
 def test_loopback_fallback_warns(monkeypatch):
     monkeypatch.delenv("LOOM_PUBLIC_ADDR", raising=False)
     monkeypatch.setattr(public_addr, "_from_ngrok", lambda port: None)
+    monkeypatch.setattr(public_addr, "_public_ip_via_service", lambda: None)
     monkeypatch.setattr(public_addr, "_host_ip", lambda: None)
     addr = public_addr.resolve_public_address(9000)
     assert addr.address == "127.0.0.1:9000"
     assert addr.reachable_externally is False
     assert addr.warning
+
+
+def test_public_ip_beats_docker_bridge_address(monkeypatch):
+    """Inside a container the bridge IP is useless — the public IP must win."""
+    monkeypatch.delenv("LOOM_PUBLIC_ADDR", raising=False)
+    monkeypatch.setattr(public_addr, "_from_ngrok", lambda port: None)
+    monkeypatch.setattr(public_addr, "_public_ip_via_service", lambda: "203.0.113.10")
+    monkeypatch.setattr(public_addr, "_host_ip", lambda: "172.19.0.4")
+    monkeypatch.setattr(public_addr, "_tcp_reachable", lambda h, p, timeout=2.0: True)
+    addr = public_addr.resolve_public_address(9000)
+    assert addr.address == "203.0.113.10:9000"
+    assert addr.source == "public-ip"
+    assert addr.reachable_externally is True
+    assert addr.self_check is True
+    assert addr.warning is None
+
+
+def test_failed_self_check_warns_about_firewall(monkeypatch):
+    monkeypatch.delenv("LOOM_PUBLIC_ADDR", raising=False)
+    monkeypatch.setattr(public_addr, "_from_ngrok", lambda port: None)
+    monkeypatch.setattr(public_addr, "_public_ip_via_service", lambda: "203.0.113.10")
+    monkeypatch.setattr(public_addr, "_tcp_reachable", lambda h, p, timeout=2.0: False)
+    addr = public_addr.resolve_public_address(9000)
+    assert addr.self_check is False
+    assert "firewall" in addr.warning
+
+
+def test_ip_lookup_can_be_disabled(monkeypatch):
+    monkeypatch.setenv("LOOM_SKIP_IP_LOOKUP", "1")
+    assert public_addr._public_ip_via_service() is None
 
 
 # ------------------------------------------------- admin API surface
