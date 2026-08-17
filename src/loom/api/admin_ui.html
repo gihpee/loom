@@ -372,17 +372,27 @@ async function viewConsole() {
          <input type="checkbox" id="c-nothink"> без think</label></p>
     <textarea id="c-prompt" placeholder="prompt…">привет, loom</textarea>
     <p><button class="action" onclick="sendChat()">send</button></p>
-    <pre id="c-out" class="muted">—</pre>`;
+    <pre id="c-out" class="muted">—</pre>
+    <div id="c-stats"></div>
+    <div id="c-hist">${renderHistory()}</div>`;
 }
 async function sendChat() {
   const out = $("#c-out");
   out.textContent = "…";
+  $("#c-stats").innerHTML = "";
   const body = {model: $("#c-model").value, stream: $("#c-stream").checked,
                 messages: [{role:"user", content: $("#c-prompt").value}]};
   const maxTok = parseInt($("#c-maxtok").value, 10);
   if (maxTok > 0) body.max_tokens = maxTok;
   // Reasoning models burn hundreds of tokens inside <think> before answering.
-  if ($("#c-nothink").checked) body.chat_template_kwargs = {enable_thinking: false};
+  const noThink = $("#c-nothink").checked;
+  if (noThink) body.chat_template_kwargs = {enable_thinking: false};
+
+  // Client-side clock. The server reports its own numbers; the difference
+  // between the two is what the API hop plus the worker tunnel cost.
+  const t0 = performance.now();
+  let firstChunkAt = null, chunkTimes = [], text = "", reason = null;
+  let usage = null, timings = null;
   try {
     const r = await fetch("/v1/chat/completions", {method:"POST", headers: headers(), body: JSON.stringify(body)});
     if (body.stream) {
@@ -390,7 +400,7 @@ async function sendChat() {
       // Render the stream as text, the way a chat looks — not as raw SSE frames.
       out.textContent = "";
       const reader = r.body.getReader(), dec = new TextDecoder();
-      let buf = "", text = "", reason = null;
+      let buf = "";
       while (true) {
         const {done, value} = await reader.read();
         if (done) break;
@@ -405,33 +415,232 @@ async function sendChat() {
             const payload = line.slice(5).trim();
             if (!payload || payload === "[DONE]") continue;
             try {
-              const choice = (JSON.parse(payload).choices || [])[0] || {};
-              if (choice.delta && choice.delta.content) text += choice.delta.content;
+              const frame = JSON.parse(payload);
+              const choice = (frame.choices || [])[0] || {};
+              if (choice.delta && choice.delta.content) {
+                const now = performance.now();
+                if (firstChunkAt === null) firstChunkAt = now;
+                chunkTimes.push(now);
+                text += choice.delta.content;
+              }
               if (choice.finish_reason) reason = choice.finish_reason;
+              if (frame.usage) usage = frame.usage;        // closing chunk
+              if (frame.timings) timings = frame.timings;  // closing chunk
             } catch (e) { /* a frame we cannot parse is not worth breaking the view */ }
           }
         }
         out.textContent = text;  // grows live, like a chat
       }
-      if (reason) {
-        out.textContent = text + (reason === "length"
-          ? `\n\n⚠ finish_reason=length — ответ обрезан лимитом max_tokens, поднимите его`
-          : `\n\nfinish_reason=${reason}`);
-      }
+      if (reason) out.textContent = text + reasonNote(reason);
     } else {
       const j = await r.json();
       if (r.ok && j.choices) {
-        const reason = j.choices[0].finish_reason;
-        // "length" means the cap cut the answer off, not that the model stopped.
-        const note = reason === "length"
-          ? `\n\n⚠ finish_reason=length — ответ обрезан лимитом max_tokens, поднимите его`
-          : `\n\nfinish_reason=${reason}`;
-        out.textContent = j.choices[0].message.content + note + "\n" + JSON.stringify(j.usage);
+        reason = j.choices[0].finish_reason;
+        text = j.choices[0].message.content;
+        usage = j.usage || null;
+        timings = j.timings || null;
+        out.textContent = text + reasonNote(reason);
       } else {
         out.textContent = JSON.stringify(j, null, 2);
+        return;
       }
     }
-  } catch (e) { out.textContent = "error: " + e.message; }
+  } catch (e) { out.textContent = "error: " + e.message; return; }
+
+  const totalMs = performance.now() - t0;
+  const run = buildRun({body, noThink, totalMs, firstChunkAt, t0, chunkTimes, usage, timings, reason, text});
+  $("#c-stats").innerHTML = renderRunStats(run);
+  pushRun(run);
+  $("#c-hist").innerHTML = renderHistory();
+}
+
+function reasonNote(reason) {
+  // "length" means the cap cut the answer off, not that the model stopped.
+  return reason === "length"
+    ? `\n\n⚠ finish_reason=length — ответ обрезан лимитом max_tokens, поднимите его`
+    : `\n\nfinish_reason=${reason}`;
+}
+
+// ---------------------------------------------------------------- run stats
+function pct(sorted, q) {
+  if (!sorted.length) return 0;
+  return sorted[Math.min(sorted.length - 1, Math.floor(q * sorted.length))];
+}
+
+function buildRun({body, noThink, totalMs, firstChunkAt, t0, chunkTimes, usage, timings, reason, text}) {
+  // Gaps between streamed tokens as the client saw them (empty for non-stream).
+  const gaps = [];
+  for (let i = 1; i < chunkTimes.length; i++) gaps.push(chunkTimes[i] - chunkTimes[i-1]);
+  const sortedGaps = gaps.slice().sort((a,b) => a-b);
+  const clientTtft = firstChunkAt === null ? null : firstChunkAt - t0;
+  // Prefer the server's token count; fall back to counting stream chunks.
+  const completion = usage ? usage.completion_tokens : chunkTimes.length;
+  const decodeMs = clientTtft === null ? null : totalMs - clientTtft;
+  return {
+    at: Date.now(),
+    model: body.model,
+    stream: !!body.stream,
+    noThink,
+    maxTokens: body.max_tokens || null,
+    reason,
+    chars: text.length,
+    promptTokens: usage ? usage.prompt_tokens : null,
+    completionTokens: completion,
+    totalMs,
+    clientTtftMs: clientTtft,
+    // Steady-state speed: prefill excluded, which is the number worth comparing.
+    // Needs a real decode window: a backend that flushes every chunk at once
+    // (the echo stub, a proxy that buffers) would otherwise report thousands
+    // of tokens/s, which is a measurement artefact, not a speed.
+    clientDecodeTps: (decodeMs && decodeMs >= 5 && completion > 1)
+      ? ((completion - 1) / (decodeMs / 1000)) : null,
+    clientTps: totalMs > 0 && completion ? completion / (totalMs / 1000) : null,
+    gapP50: pct(sortedGaps, 0.5),
+    gapP95: pct(sortedGaps, 0.95),
+    gaps,
+    server: timings || null,
+  };
+}
+
+function ms(v) { return v === null || v === undefined ? "—" : (v >= 1000 ? (v/1000).toFixed(2) + " s" : v.toFixed(0) + " ms"); }
+function num(v, d) { return v === null || v === undefined ? "—" : v.toFixed(d === undefined ? 1 : d); }
+
+function card(label, value, hint) {
+  return `<div style="border:1px solid var(--line);border-radius:6px;padding:8px 10px;min-width:120px">
+    <div class="muted">${label}</div>
+    <div style="font-size:17px;color:var(--acc)">${value}</div>
+    ${hint ? `<div class="muted">${hint}</div>` : ""}</div>`;
+}
+
+function renderRunStats(run) {
+  const s = run.server;
+  const tps = run.clientDecodeTps !== null ? run.clientDecodeTps : (s ? s.decode_tokens_per_s : null);
+  const ttft = run.clientTtftMs !== null ? run.clientTtftMs : (s ? s.ttft_ms : null);
+  const cards = [
+    card("tokens/s (decode)", num(tps, 2), "без учёта prefill"),
+    card("TTFT", ms(ttft), "до первого токена"),
+    card("время ответа", ms(run.totalMs), run.stream ? "клиент, весь стрим" : "клиент, весь запрос"),
+    card("токенов", `${run.completionTokens ?? "—"}`,
+         run.promptTokens !== null ? `prompt ${run.promptTokens}` : "по чанкам стрима"),
+    card("tokens/s (e2e)", num(run.clientTps, 2), "включая prefill"),
+    // Server numbers first: several tokens can share one network chunk, so the
+    // client's own gaps understate the cadence and overstate its spread.
+    card("между токенами",
+         s ? `${num(s.inter_token_ms_p50)} / ${num(s.inter_token_ms_p95)} ms`
+           : (run.gaps.length ? `${num(run.gapP50)} / ${num(run.gapP95)} ms` : "—"),
+         s ? "p50 / p95 · голова" : "p50 / p95 · клиент"),
+  ];
+  let serverBlock = "";
+  if (s) {
+    // The gap between the two clocks is the API hop + the worker tunnel.
+    const overhead = run.totalMs - s.total_ms;
+    const perHop = s.stages > 1 ? s.inter_token_ms_p50 / s.stages : null;
+    serverBlock = `<p class="muted" style="margin-top:10px">по данным головы пайплайна:
+      prefill ${ms(s.ttft_ms)} (${num(s.prompt_tokens_per_s)} tok/s) ·
+      decode ${ms(s.decode_ms)} (${num(s.decode_tokens_per_s, 2)} tok/s) ·
+      между токенами p50 ${num(s.inter_token_ms_p50)} / p95 ${num(s.inter_token_ms_p95)} / max ${num(s.inter_token_ms_max)} ms ·
+      стадий ${s.stages}${perHop ? ` (≈ ${num(perHop)} ms на переход)` : ""} ·
+      накладные транспорта ${ms(Math.max(0, overhead))}</p>`;
+  } else {
+    serverBlock = `<p class="muted" style="margin-top:10px">бэкенд не прислал timings —
+      цифры измерены клиентом (vLLM-бэкенд или старый образ воркера)</p>`;
+  }
+  const spark = run.gaps.length > 1
+    ? `<h2 style="margin-top:16px">Приход токенов клиенту (ms между чанками)</h2>${sparkline(run.gaps)}`
+    : "";
+  return `<h2 style="margin-top:16px">Статистика запроса</h2>
+    <div style="display:flex;gap:8px;flex-wrap:wrap">${cards.join("")}</div>
+    ${serverBlock}${spark}`;
+}
+
+// ------------------------------------------------------------------ charts
+function sparkline(values) {
+  const w = 620, h = 70, pad = 4;
+  const max = Math.max(...values), min = Math.min(...values);
+  const span = (max - min) || 1;
+  const pts = values.map((v, i) => {
+    const x = pad + (i / Math.max(1, values.length - 1)) * (w - 2*pad);
+    const y = h - pad - ((v - min) / span) * (h - 2*pad);
+    return `${x.toFixed(1)},${y.toFixed(1)}`;
+  }).join(" ");
+  return `<svg viewBox="0 0 ${w} ${h}" style="width:100%;max-width:${w}px;height:${h}px;
+      background:var(--panel);border:1px solid var(--line);border-radius:6px">
+      <polyline points="${pts}" fill="none" stroke="var(--acc)" stroke-width="1.5"/>
+    </svg>
+    <p class="muted">мин ${num(min)} · медиана ${num(pct(values.slice().sort((a,b)=>a-b), 0.5))} ·
+       макс ${num(max)} ms · ${values.length} интервалов</p>`;
+}
+
+function barChart(rows, unit, colorVar) {
+  // Horizontal bars: labels stay readable however long the model id is.
+  // A run with nothing measurable (non-streamed, old worker image) gets an
+  // empty bar and a dash — not a zero, which would read as "it was that slow".
+  const values = rows.map(r => r.value).filter(v => v !== null && v !== undefined);
+  const max = Math.max(...values, 0.0001);
+  return `<div style="display:flex;flex-direction:column;gap:3px;margin:6px 0 14px">` +
+    rows.map(r => {
+      const has = r.value !== null && r.value !== undefined;
+      const width = has ? (100 * r.value / max).toFixed(1) : 0;
+      return `<div style="display:flex;align-items:center;gap:8px">
+      <span class="muted" style="width:160px;text-align:right;flex:none">${esc(r.label)}</span>
+      <span style="flex:1;background:var(--panel);border:1px solid var(--line);border-radius:4px;height:16px">
+        <span style="display:block;height:100%;width:${width}%;
+              background:var(${colorVar});border-radius:3px"></span></span>
+      <span style="width:110px;flex:none">${has ? num(r.value, 2) + " " + unit : "<span class=\'dim\'>—</span>"}</span>
+    </div>`;
+    }).join("") + `</div>`;
+}
+
+// ---------------------------------------------------------------- history
+const HIST_KEY = "loom_console_runs";
+function loadRuns() {
+  try { return JSON.parse(localStorage.getItem(HIST_KEY) || "[]"); } catch (e) { return []; }
+}
+function pushRun(run) {
+  // Keep the raw gap series out of storage: it is per-run detail, and 20 runs
+  // of it would blow past the localStorage quota.
+  const {gaps, ...slim} = run;
+  const runs = loadRuns();
+  runs.unshift(slim);
+  localStorage.setItem(HIST_KEY, JSON.stringify(runs.slice(0, 20)));
+}
+function clearRuns() { localStorage.removeItem(HIST_KEY); $("#c-hist").innerHTML = renderHistory(); }
+
+function runLabel(r) {
+  const when = new Date(r.at).toLocaleTimeString();
+  return `${when} ${r.model}${r.noThink ? " ·no-think" : ""}${r.stream ? " ·stream" : ""}`;
+}
+
+function renderHistory() {
+  const runs = loadRuns();
+  if (!runs.length) {
+    return `<h2 style="margin-top:20px">История прогонов</h2>
+            <p class="muted">пусто — отправьте запрос, и здесь появится сравнение</p>`;
+  }
+  const pick = (client, serverKey) => runs.map(r => {
+    const own = r[client];
+    if (own !== null && own !== undefined) return {label: runLabel(r), value: own};
+    return {label: runLabel(r), value: r.server ? r.server[serverKey] : null};
+  });
+  const tps = pick("clientDecodeTps", "decode_tokens_per_s");
+  const ttft = pick("clientTtftMs", "ttft_ms");
+  const rows = runs.map(r => [
+    new Date(r.at).toLocaleTimeString(),
+    esc(r.model) + (r.noThink ? ` <span class="dim">no-think</span>` : "") +
+      (r.stream ? ` <span class="dim">stream</span>` : ""),
+    `${r.completionTokens ?? "—"}${r.promptTokens !== null && r.promptTokens !== undefined ? ` <span class="dim">+${r.promptTokens} prompt</span>` : ""}`,
+    num(r.clientDecodeTps, 2),
+    ms(r.clientTtftMs),
+    ms(r.totalMs),
+    r.server ? `${num(r.server.inter_token_ms_p50)} / ${num(r.server.inter_token_ms_p95)}` : "—",
+    r.server ? r.server.stages : "—",
+    r.reason === "length" ? `<span class="warn">length</span>` : `<span class="dim">${esc(r.reason || "—")}</span>`,
+  ]);
+  return `<h2 style="margin-top:20px">Сравнение прогонов
+      <button class="action danger" style="margin-left:8px;padding:2px 8px" onclick="clearRuns()">очистить</button></h2>
+    <p class="muted">tokens/s (decode) — больше лучше</p>${barChart(tps, "tok/s", "--ok")}
+    <p class="muted">TTFT — меньше лучше</p>${barChart(ttft, "ms", "--warn")}
+    ` + table(["время","модель","токенов","tok/s","TTFT","всего","между токенами p50/p95","стадий","finish"], rows);
 }
 
 // ------------------------------------------------------------------ refresh

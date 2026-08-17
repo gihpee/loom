@@ -204,3 +204,62 @@ def test_stage_routes_are_published_and_cleaned(pipeline_stack):
         or len(stage_layout(controller)) != before,
         60,
     )
+
+
+def test_response_carries_generation_timings(pipeline_stack, reference_completion):
+    """The head measures what only it can see: prefill, decode, per-hop cost.
+
+    A client can time the round trip, but not tell prefill from decode, and on
+    a pipeline the round trip also hides the tunnel. These numbers are what the
+    admin console shows as generation stats.
+    """
+    orch, _ = pipeline_stack
+    assert wait_until(lambda: bool(orch.controller.endpoints.candidates(MODEL_ID)), 90)
+
+    async def call(api):
+        return await api.post(
+            "/v1/chat/completions",
+            json={
+                "model": MODEL_ID,
+                "messages": [{"role": "user", "content": PROMPT}],
+                "max_tokens": 8,
+            },
+        )
+
+    body = orch.call_api(call).json()
+    t = body["timings"]
+    assert t["stages"] == len(stage_layout(orch.controller))
+    assert t["ttft_ms"] > 0 and t["total_ms"] >= t["ttft_ms"]
+    assert t["decode_tokens_per_s"] > 0
+    assert t["inter_token_ms_p50"] >= 0
+    assert body["usage"]["completion_tokens"] == 8
+
+
+def test_stream_closes_with_usage_and_timings(pipeline_stack, reference_completion):
+    """Streaming clients must not have to count chunks to know the token cost."""
+    orch, _ = pipeline_stack
+    assert wait_until(lambda: bool(orch.controller.endpoints.candidates(MODEL_ID)), 90)
+
+    async def call(api):
+        async with api.stream(
+            "POST",
+            "/v1/chat/completions",
+            json={
+                "model": MODEL_ID,
+                "messages": [{"role": "user", "content": PROMPT}],
+                "max_tokens": 8,
+                "stream": True,
+            },
+        ) as resp:
+            return [line async for line in resp.aiter_lines()]
+
+    lines = orch.call_api(call)
+    frames = [
+        json.loads(l[len("data:"):].strip())
+        for l in lines
+        if l.startswith("data:") and "[DONE]" not in l
+    ]
+    closing = frames[-1]
+    assert closing["usage"]["completion_tokens"] == 8
+    assert closing["timings"]["stages"] >= 1
+    assert closing["choices"][0]["finish_reason"]

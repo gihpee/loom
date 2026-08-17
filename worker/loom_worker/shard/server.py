@@ -197,6 +197,12 @@ def generate(
 
     generated: List[int] = []
     finish_reason = "length"
+    # Timings are measured here, at the only place that sees the whole request:
+    # prefill, every hop between stages and sampling. A client can only guess
+    # at these from the outside, and for a pipeline the guess is worst.
+    started_at = time.perf_counter()
+    first_token_at: Optional[float] = None
+    token_times: List[float] = []
     try:
         positions = list(range(len(prompt_ids)))
         step_input = list(prompt_ids)
@@ -226,6 +232,10 @@ def generate(
                     raise RuntimeError(msg.get("error", "pipeline error"))
                 token = int(msg["token_id"])
 
+            now = time.perf_counter()
+            if first_token_at is None:
+                first_token_at = now
+            token_times.append(now)
             generated.append(token)
             if stream_cb is not None:
                 stream_cb(tokenizer.decode([token], skip_special_tokens=True))
@@ -248,6 +258,57 @@ def generate(
         "prompt_tokens": len(prompt_ids),
         "completion_tokens": len(generated),
         "finish_reason": finish_reason,
+        "timings": _timings(started_at, first_token_at, token_times, len(prompt_ids)),
+    }
+
+
+def _percentile(sorted_values: List[float], q: float) -> float:
+    if not sorted_values:
+        return 0.0
+    idx = min(len(sorted_values) - 1, int(q * len(sorted_values)))
+    return sorted_values[idx]
+
+
+def _timings(
+    started_at: float,
+    first_token_at: Optional[float],
+    token_times: List[float],
+    prompt_tokens: int,
+) -> dict:
+    """Per-request numbers, in the units people actually compare.
+
+    - ttft: prefill of the whole prompt plus one trip through every stage;
+    - decode: the steady-state part, which is what tokens/s should be measured
+      over (mixing prefill in makes short answers look artificially slow);
+    - inter-token percentiles: on a pipeline these expose the per-hop cost, so
+      a tail that drifts up means the network between stages, not the GPU.
+    """
+    topology = STATE.get("topology") or {}
+    ended_at = token_times[-1] if token_times else time.perf_counter()
+    total_ms = (ended_at - started_at) * 1000
+    ttft_ms = ((first_token_at - started_at) * 1000) if first_token_at else 0.0
+    gaps = sorted(
+        (token_times[i] - token_times[i - 1]) * 1000 for i in range(1, len(token_times))
+    )
+    decode_ms = total_ms - ttft_ms
+    decoded = max(0, len(token_times) - 1)  # tokens produced after the first
+    return {
+        "ttft_ms": round(ttft_ms, 1),
+        "total_ms": round(total_ms, 1),
+        "decode_ms": round(decode_ms, 1),
+        # Steady-state speed and the end-to-end speed a user actually feels.
+        "decode_tokens_per_s": round(decoded / (decode_ms / 1000), 2) if decode_ms > 0 else 0.0,
+        "tokens_per_s": (
+            round(len(token_times) / (total_ms / 1000), 2) if total_ms > 0 else 0.0
+        ),
+        "prompt_tokens_per_s": (
+            round(prompt_tokens / (ttft_ms / 1000), 1) if ttft_ms > 0 else 0.0
+        ),
+        "inter_token_ms_p50": round(_percentile(gaps, 0.50), 1),
+        "inter_token_ms_p95": round(_percentile(gaps, 0.95), 1),
+        "inter_token_ms_max": round(gaps[-1], 1) if gaps else 0.0,
+        "stages": int(topology.get("num_stages", 1)),
+        "pipeline_id": topology.get("pipeline_id", ""),
     }
 
 
@@ -412,6 +473,9 @@ class Handler(BaseHTTPRequestHandler):
                         "completion_tokens": result["completion_tokens"],
                         "total_tokens": result["prompt_tokens"] + result["completion_tokens"],
                     },
+                    # Non-standard, additive: clients that do not know the field
+                    # ignore it, and ours renders it as generation stats.
+                    "timings": result["timings"],
                 },
             )
             return
@@ -442,6 +506,9 @@ class Handler(BaseHTTPRequestHandler):
                 stream_cb=emit,
                 template_kwargs=template_kwargs,
             )
+            # The closing chunk carries the counts and timings (what OpenAI
+            # calls stream_options.include_usage). Without it a streaming
+            # client has to guess token counts from the number of deltas.
             final = {
                 "id": chat_id,
                 "object": "chat.completion.chunk",
@@ -450,6 +517,12 @@ class Handler(BaseHTTPRequestHandler):
                 "choices": [
                     {"index": 0, "delta": {}, "finish_reason": result["finish_reason"]}
                 ],
+                "usage": {
+                    "prompt_tokens": result["prompt_tokens"],
+                    "completion_tokens": result["completion_tokens"],
+                    "total_tokens": result["prompt_tokens"] + result["completion_tokens"],
+                },
+                "timings": result["timings"],
             }
             self._chunk(f"data: {json.dumps(final)}\n\n")
             self._chunk("data: [DONE]\n\n")

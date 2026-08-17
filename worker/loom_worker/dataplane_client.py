@@ -236,7 +236,15 @@ class DataPlaneClient:
                 if self._cancelled.pop(rid, False):
                     logger.debug("request %s cancelled by orchestrator", rid[:8])
                     return
-                data = resp.read(CHUNK_SIZE)
+                # read1() hands over whatever has already arrived; plain
+                # read(n) blocks until n bytes accumulate, which held every SSE
+                # token back until the answer was complete — "streaming" then
+                # delivered the whole reply in one burst at the end.
+                data = (
+                    resp.read1(CHUNK_SIZE)
+                    if hasattr(resp, "read1")
+                    else resp.read(CHUNK_SIZE)
+                )
                 if not data:
                     break
                 self._send(
