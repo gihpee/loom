@@ -82,12 +82,33 @@ def test_explicit_address_wins(monkeypatch):
     assert addr.warning is None
 
 
-def test_private_explicit_address_warns(monkeypatch):
-    monkeypatch.setenv("LOOM_PUBLIC_ADDR", "192.168.1.5:9000")
-    monkeypatch.setattr(public_addr, "_tcp_reachable", lambda h, p, timeout=2.0: None)
+def test_private_lan_address_is_informational_not_an_error(monkeypatch):
+    """A LAN/VPN address is a normal deployment — must not look like a failure."""
+    monkeypatch.setenv("LOOM_PUBLIC_ADDR", "10.124.10.11:19090")
+    monkeypatch.setattr(public_addr, "_tcp_reachable", lambda h, p, timeout=2.0: True)
     addr = public_addr.resolve_public_address(9000)
-    assert addr.reachable_externally is False
-    assert "cannot reach" in addr.warning
+    assert addr.reachable_externally is False  # not internet-routable, true
+    assert addr.severity == "info"
+    assert addr.warning is None  # no red alarm
+    assert "той же сети" in addr.note
+
+
+def test_private_address_with_failed_check_warns(monkeypatch):
+    monkeypatch.setenv("LOOM_PUBLIC_ADDR", "10.124.10.11:19090")
+    monkeypatch.setattr(public_addr, "_tcp_reachable", lambda h, p, timeout=2.0: False)
+    addr = public_addr.resolve_public_address(9000)
+    assert addr.severity == "warn"
+    assert "фаерволом" in addr.warning
+
+
+def test_loopback_is_the_only_hard_failure(monkeypatch):
+    monkeypatch.delenv("LOOM_PUBLIC_ADDR", raising=False)
+    monkeypatch.setattr(public_addr, "_from_ngrok", lambda port: None)
+    monkeypatch.setattr(public_addr, "_public_ip_via_service", lambda: None)
+    monkeypatch.setattr(public_addr, "_host_ip", lambda: None)
+    addr = public_addr.resolve_public_address(9000)
+    assert addr.severity == "warn"
+    assert "loopback" in addr.note
 
 
 def test_tunnel_is_used_when_present(monkeypatch):
@@ -109,7 +130,7 @@ def test_loopback_fallback_warns(monkeypatch):
     addr = public_addr.resolve_public_address(9000)
     assert addr.address == "127.0.0.1:9000"
     assert addr.reachable_externally is False
-    assert addr.warning
+    assert addr.severity == "warn"
 
 
 def test_public_ip_beats_docker_bridge_address(monkeypatch):
@@ -127,14 +148,17 @@ def test_public_ip_beats_docker_bridge_address(monkeypatch):
     assert addr.warning is None
 
 
-def test_failed_self_check_warns_about_firewall(monkeypatch):
+def test_public_address_with_hairpin_nat_is_informational(monkeypatch):
+    """Public IP + failed self-check is usually just hairpin NAT, not an error."""
     monkeypatch.delenv("LOOM_PUBLIC_ADDR", raising=False)
     monkeypatch.setattr(public_addr, "_from_ngrok", lambda port: None)
     monkeypatch.setattr(public_addr, "_public_ip_via_service", lambda: "203.0.113.10")
     monkeypatch.setattr(public_addr, "_tcp_reachable", lambda h, p, timeout=2.0: False)
     addr = public_addr.resolve_public_address(9000)
     assert addr.self_check is False
-    assert "firewall" in addr.warning
+    assert addr.severity == "info"
+    assert addr.warning is None
+    assert "hairpin" in addr.note.lower() or "NAT" in addr.note
 
 
 def test_ip_lookup_can_be_disabled(monkeypatch):
@@ -220,3 +244,14 @@ def test_ui_exposes_deploy_and_connect():
         "docker run -d --gpus all",
     ):
         assert needle in html, needle
+
+
+def test_ui_can_copy_the_worker_command():
+    """Copying must work on plain http too, where the clipboard API is blocked."""
+    html = (Path(__file__).resolve().parent.parent / "src/loom/api/admin_ui.html").read_text()
+    assert "copy команду" in html and "copy только ключ" in html
+    assert "navigator.clipboard" in html          # modern path
+    assert 'execCommand("copy")' in html          # http:// fallback
+    assert "selectAll(" in html                   # last resort: select for Ctrl+C
+    # The issued command survives a page reload.
+    assert "loom_last_key_only_cmd" in html

@@ -167,6 +167,11 @@ def create_app(controller: MultiModelController) -> FastAPI:
             "dial_address": address,
             "source": getattr(public, "source", "config"),
             "reachable_externally": getattr(public, "reachable_externally", None),
+            # "ok" | "info" | "warn" — a private LAN address is fine (info),
+            # only loopback / a failed check is a real problem (warn).
+            "severity": getattr(public, "severity", "info"),
+            "self_check": getattr(public, "self_check", None),
+            "note": getattr(public, "note", None),
             "warning": getattr(public, "warning", None),
             "worker_image": "gihpee/loomworker",
         }

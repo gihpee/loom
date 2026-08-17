@@ -40,26 +40,62 @@ IP_SERVICES = ("https://api.ipify.org", "https://ifconfig.me/ip", "https://icanh
 class PublicAddress:
     address: str
     source: str  # "env" | "ngrok" | "public-ip" | "host-ip" | "loopback"
-    reachable_externally: bool
+    reachable_externally: bool  # routable from the internet (not RFC1918)
     self_check: Optional[bool] = None  # could WE open a TCP connection to it?
 
     @property
-    def warning(self) -> Optional[str]:
-        if not self.reachable_externally:
+    def severity(self) -> str:
+        """"ok" | "info" | "warn" — how loudly the UI should talk about it.
+
+        A private address is NOT a problem per se: a LAN/VPN/datacenter address
+        works perfectly for workers on that same network, which is a completely
+        normal deployment. Only a loopback address (or a failed TCP check on an
+        address we do control) actually blocks remote workers.
+        """
+        if self.address.startswith("127.") or self.address.startswith("localhost"):
+            return "warn"
+        if self.self_check is False and not self.reachable_externally:
+            return "warn"
+        if not self.reachable_externally or self.self_check is not True:
+            return "info"
+        return "ok"
+
+    @property
+    def note(self) -> Optional[str]:
+        """Human-readable status of the dial address (None when all good)."""
+        check = {True: "TCP-проверка прошла", False: "TCP-проверка НЕ прошла", None: "TCP-проверка не выполнялась"}[
+            self.self_check
+        ]
+        if self.address.startswith("127.") or self.address.startswith("localhost"):
             return (
-                "Workers on other machines cannot reach this address. Either set "
-                "LOOM_PUBLIC_ADDR to a reachable host:port, or run the bundled "
-                "tunnel (docker compose --profile tunnel up -d) so a public "
-                "endpoint is created for you."
+                "Это loopback-адрес: подключиться смогут только воркеры на этой же "
+                "машине. Задайте LOOM_PUBLIC_ADDR (адрес в вашей сети или публичный) "
+                "либо поднимите туннель: docker compose --profile tunnel up -d."
             )
+        if not self.reachable_externally:
+            base = (
+                f"Адрес в приватной сети ({self.address}) — это нормально, если ваши "
+                f"воркеры в этой же сети/VPN. {check}."
+            )
+            if self.self_check is False:
+                return (
+                    base
+                    + " Проверьте, что порт опубликован и не закрыт фаерволом: "
+                    "воркеры звонят именно на этот адрес."
+                )
+            return base
         if self.self_check is False:
             return (
-                f"Could not open a TCP connection to {self.address} from here. "
-                "That is normal for some NAT setups, but check that the port is "
-                "published and not blocked by a firewall — workers dial exactly "
-                "this address."
+                f"Публичный адрес {self.address}, но {check.lower()} изнутри контейнера. "
+                "Для многих NAT это нормально (hairpin), однако убедитесь, что порт "
+                "открыт снаружи — воркеры звонят именно сюда."
             )
         return None
+
+    @property
+    def warning(self) -> Optional[str]:
+        """Kept for compatibility: only real problems."""
+        return self.note if self.severity == "warn" else None
 
 
 def _from_ngrok(grpc_port: int) -> Optional[str]:

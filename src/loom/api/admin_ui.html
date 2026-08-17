@@ -72,6 +72,55 @@ function esc(s) { return String(s).replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&l
 function statusCls(s) {
   return {serving:"ok", loading:"warn", loaded:"warn", failed:"bad", stopped:"dim", unknown:"dim"}[s] || "dim";
 }
+function selectAll(el) {
+  if (!el) return;
+  const range = document.createRange();
+  range.selectNodeContents(el);
+  const sel = window.getSelection();
+  sel.removeAllRanges();
+  sel.addRange(range);
+}
+
+async function copyText(text, btn, fallbackEl) {
+  let ok = false;
+  // 1. Modern API. Works on https and on localhost; may still throw on a plain
+  //    http:// LAN address or when the document is not focused — hence step 2.
+  try {
+    if (navigator.clipboard) { await navigator.clipboard.writeText(text); ok = true; }
+  } catch (e) { ok = false; }
+  // 2. Legacy path: a hidden textarea + execCommand (needs a user gesture).
+  if (!ok) {
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.setAttribute("readonly", "");
+    ta.style.position = "fixed";
+    ta.style.top = "0";
+    ta.style.left = "0";
+    ta.style.opacity = "0";
+    document.body.appendChild(ta);
+    ta.focus();
+    ta.select();
+    ta.setSelectionRange(0, text.length);
+    try { ok = document.execCommand("copy"); } catch (e) { ok = false; }
+    document.body.removeChild(ta);
+  }
+  // 3. Last resort: select the text on screen so Ctrl+C / Cmd+C just works.
+  if (!ok && fallbackEl) { selectAll(fallbackEl); }
+  if (btn) {
+    const prev = btn.dataset.label || btn.textContent;
+    btn.dataset.label = prev;
+    btn.textContent = ok ? "скопировано ✓" : "выделено — Ctrl+C";
+    setTimeout(() => { btn.textContent = btn.dataset.label; }, 2000);
+  }
+  return ok;
+}
+// Values referenced by copy buttons (avoids quoting problems in inline JS).
+const COPY = {};
+function copyFrom(id, btn) {
+  // Selecting the visible command block is the graceful degradation path.
+  return copyText(COPY[id] || "", btn, document.querySelector("#k-cmd"));
+}
+
 function table(headersArr, rows) {
   return `<table><tr>${headersArr.map(h=>`<th>${h}</th>`).join("")}</tr>` +
     rows.map(r=>`<tr>${r.map(c=>`<td>${c}</td>`).join("")}</tr>`).join("") + `</table>`;
@@ -176,6 +225,9 @@ async function removeModel(id) {
 async function viewKeys() {
   const conn = await api("/admin/connect");
   const data = await api("/admin/keys");
+  COPY.cmd = localStorage.getItem("loom_last_key_only_cmd") || "";
+  COPY.key = lastKeyRaw;
+  COPY.addr = conn.dial_address || "";
   const rows = (data.keys || []).map(k => [
     esc(k.key_id),
     esc(k.label || "—"),
@@ -185,21 +237,35 @@ async function viewKeys() {
     k.revoked ? `<span class="bad">revoked</span>` : `<span class="ok">active</span>`,
     k.revoked ? "" : `<button class="action danger" onclick="revokeKey('${esc(k.key_id)}')">revoke</button>`,
   ]);
-  const warn = conn.warning
-    ? `<p class="bad">⚠ ${esc(conn.warning)}</p>`
-    : `<p class="ok">адрес доступен воркерам извне</p>`;
+  const sev = conn.severity || (conn.warning ? "warn" : "ok");
+  const cls = {ok:"ok", info:"warn", warn:"bad"}[sev] || "dim";
+  const icon = {ok:"✓", info:"ℹ", warn:"⚠"}[sev] || "";
+  const status = conn.note
+    ? `<p class="${cls}">${icon} ${esc(conn.note)}</p>`
+    : `<p class="ok">✓ адрес доступен воркерам</p>`;
+  const check = {true:"TCP-проверка прошла", false:"TCP-проверка не прошла",
+                 null:"TCP-проверка не выполнялась"}[String(conn.self_check)];
   return `<h2>Адрес подключения воркеров</h2>
     <p>воркеры звонят на <b>${esc(conn.dial_address)}</b>
-       <span class="dim">(определён автоматически: ${esc(conn.source)})</span></p>
-    ${warn}
-    <h2>Join keys — everything a GPU owner needs</h2>
+       <button class="action" onclick="copyFrom('addr', this)">copy</button>
+       <span class="dim">(источник: ${esc(conn.source)}${conn.source === "env" ? " — задан вами в .env" : " — определён автоматически"}; ${esc(check || "")})</span></p>
+    ${status}
+    <h2>Join keys — всё, что нужно владельцу GPU</h2>
     <p><input id="k-label" type="text" placeholder="label, e.g. gpu-box-1">
        <input id="k-max" type="text" placeholder="max nodes (blank = ∞)" style="width:170px">
-       <button class="action" onclick="issueKey()">issue key</button></p>
-    <pre id="k-out" class="muted">${esc(lastKey)}</pre>` +
+       <button class="action" onclick="issueKey()">issue key</button>
+       ${lastKeyRaw ? `<button class="action" onclick="copyFrom('cmd', this)">copy команду</button>
+         <button class="action" onclick="copyFrom('key', this)">copy только ключ</button>` : ""}</p>
+    ${lastKeyRaw
+      ? `<p class="muted">На GPU-машине выполнить ОДНУ команду (клик по строке выделяет её):</p>
+         <pre id="k-cmd" onclick="selectAll(this)">${esc(COPY.cmd)}</pre>
+         <p class="muted">адрес оркестратора ${esc(conn.dial_address)} уже внутри ключа</p>`
+      : `<pre id="k-out" class="muted">${esc(lastKey)}</pre>`}` +
     table(["key id","label","dial address","max nodes","used by","state",""], rows);
 }
-let lastKey = "— issue a key, then run the printed command on the GPU machine —";
+let lastKey = localStorage.getItem("loom_last_key_cmd") ||
+  "— issue a key, then run the printed command on the GPU machine —";
+let lastKeyRaw = localStorage.getItem("loom_last_key_raw") || "";
 let connCache = null;
 async function issueKey() {
   const label = $("#k-label").value;
@@ -207,9 +273,14 @@ async function issueKey() {
   try {
     const r = await api("/admin/keys", {method:"POST", body: JSON.stringify(
       {label, max_nodes: Number.isFinite(maxNodes) ? maxNodes : 0})});
-    lastKey = "На GPU-машине выполнить ОДНУ команду:\n\n" +
-      "docker run -d --gpus all --restart unless-stopped gihpee/loomworker --key " + r.key +
+    const cmd = "docker run -d --gpus all --restart unless-stopped " +
+      (r.worker_image || "gihpee/loomworker") + " --key " + r.key;
+    lastKeyRaw = r.key;
+    lastKey = "На GPU-машине выполнить ОДНУ команду:\n\n" + cmd +
       "\n\n(адрес оркестратора " + r.address + " уже внутри ключа)";
+    localStorage.setItem("loom_last_key_cmd", lastKey);
+    localStorage.setItem("loom_last_key_raw", r.key);
+    localStorage.setItem("loom_last_key_only_cmd", cmd);
     refresh();
   } catch (e) { lastKey = "error: " + e.message; $("#k-out").textContent = lastKey; }
 }
