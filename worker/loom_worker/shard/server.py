@@ -237,19 +237,47 @@ def generate(messages: List[dict], *, max_tokens: int, temperature: float, top_p
     }
 
 
+def _as_token_ids(encoded) -> List[int]:
+    """Normalise whatever a tokenizer returned into a flat list of token ids.
+
+    Tokenizers are not consistent about this across versions: transformers 5
+    made `return_dict=True` the default for `apply_chat_template`, so it hands
+    back a BatchEncoding — and iterating THAT yields its keys ("input_ids",
+    "attention_mask"), not the ids. Callers also see plain lists, batched
+    lists-of-lists and tensors. Anything that is not ids raises, so the caller
+    can fall back instead of feeding strings into torch.
+    """
+    if hasattr(encoded, "keys") and "input_ids" in encoded:  # BatchEncoding/dict
+        encoded = encoded["input_ids"]
+    if hasattr(encoded, "tolist"):  # torch tensor / numpy array
+        encoded = encoded.tolist()
+    encoded = list(encoded)
+    if encoded and isinstance(encoded[0], (list, tuple)):  # batch of one
+        encoded = list(encoded[0])
+    if not encoded:
+        raise ValueError("tokenizer returned no tokens")
+    bad = next((t for t in encoded if not isinstance(t, int) or isinstance(t, bool)), None)
+    if bad is not None:
+        raise TypeError(f"tokenizer returned {type(bad).__name__}, not token ids")
+    return encoded
+
+
 def _encode_chat(tokenizer, messages: List[dict]) -> List[int]:
     """Apply the chat template when the model has one, else concatenate."""
     try:
         if getattr(tokenizer, "chat_template", None):
-            return tokenizer.apply_chat_template(
-                messages, add_generation_prompt=True, tokenize=True
+            return _as_token_ids(
+                tokenizer.apply_chat_template(
+                    messages, add_generation_prompt=True, tokenize=True
+                )
             )
     except Exception:
-        logger.warning("chat template failed; falling back to plain concatenation")
+        logger.warning(
+            "chat template failed; falling back to plain concatenation", exc_info=True
+        )
     text = "\n".join(f"{m.get('role', 'user')}: {m.get('content', '')}" for m in messages)
     text += "\nassistant:"
-    ids = tokenizer.encode(text)
-    return list(ids)
+    return _as_token_ids(tokenizer.encode(text))
 
 
 # ------------------------------------------------------------------ HTTP layer
@@ -470,24 +498,24 @@ def main(argv=None) -> None:
     server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
     threading.Thread(target=server.serve_forever, name="stage-http", daemon=True).start()
 
-    model_path = resolve_model_path(args.weights_uri)
-    shard, config = build_shard(
-        ShardSpec(
-            model_path=model_path,
-            start_layer=args.start_layer,
-            end_layer=args.end_layer,
-            is_first=is_first,
-            is_last=is_last,
-            device=args.device,
-            dtype=args.dtype,
-        )
+    spec = ShardSpec(
+        model_path="",  # filled in below, once the weights are on disk
+        start_layer=args.start_layer,
+        end_layer=args.end_layer,
+        is_first=is_first,
+        is_last=is_last,
+        device=args.device,
+        dtype=args.dtype,
     )
+    # Fetch only the safetensors files this stage's layers live in.
+    spec.model_path = resolve_model_path(args.weights_uri, shard=spec)
+    shard, config = build_shard(spec)
     STATE["executor"] = ShardExecutor(shard)
 
     if is_first or is_last:
         from transformers import AutoTokenizer
 
-        STATE["tokenizer"] = AutoTokenizer.from_pretrained(model_path)
+        STATE["tokenizer"] = AutoTokenizer.from_pretrained(spec.model_path)
     eos = getattr(config, "eos_token_id", None)
     STATE["eos_token_ids"] = (
         [eos] if isinstance(eos, int) else list(eos or [])

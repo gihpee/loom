@@ -148,16 +148,17 @@ def test_repeated_start_serving_launches_one_backend():
         for i in range(5):
             reply = start(handlers, command_id=f"s-retry-{i}")
             assert reply.ack.ok
-        assert backend.wait_healthy(timeout_s=30)
+        # Wait for the shard itself, not for the process: the serve thread
+        # spawns it, so polling backend.pid() from here would race.
+        deadline = time.time() + 30
+        while time.time() < deadline and state.get("lifecycle").status != ShardStatus.SERVING:
+            time.sleep(0.1)
+        assert state.get("lifecycle").status == ShardStatus.SERVING
         pid = backend.pid()
         assert pid is not None
         # Still the one process the first StartServing launched.
         assert start(handlers, command_id="s-late").ack.ok
         assert backend.pid() == pid
-        deadline = time.time() + 10
-        while time.time() < deadline and state.get("lifecycle").status != ShardStatus.SERVING:
-            time.sleep(0.1)
-        assert state.get("lifecycle").status == ShardStatus.SERVING
     finally:
         backend.stop()
 

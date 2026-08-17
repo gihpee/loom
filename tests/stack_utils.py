@@ -53,6 +53,9 @@ class OrchestratorHarness:
             keystore_path=str(keystore_path) if keystore_path else "",
             perfmap_sync_interval_s=1.0,
             rebalance_interval_s=3600.0,  # explicit triggers only in tests
+            # Production waits minutes before retrying a failed placement (a
+            # retry costs a checkpoint download); tests must not.
+            deploy_retry_s=5.0,
         )
         self.keystore = KeyStore(
             public_address=self.config.public_address, path=keystore_path or None
@@ -157,6 +160,10 @@ class WorkerHarness:
             # runtime room instead of having the watchdog kill every stage.
             # Watchdog tests pass 0 to exercise strict enforcement.
             rss_overhead_bytes=rss_overhead_bytes,
+            # Bounded so a broken start does not wait out the production-sized
+            # timeout, but generous: several torch stages warming up in
+            # parallel on a busy machine legitimately take minutes.
+            ready_timeout_s=300.0,
         )
         self.client = GatewayClient(
             orchestrator_addr=f"127.0.0.1:{orch_port}",

@@ -6,10 +6,21 @@ from pathlib import Path
 
 TINY_MODEL_DIR = Path("/tmp/loom-tiny-llama")
 
+# The head stage applies the chat template, so the fixture must have one —
+# without it tests only ever exercised the plain-concatenation fallback and
+# missed a bug that killed every real request. Chosen to render EXACTLY the
+# same string as that fallback, so reference completions stay comparable:
+#   "user: hello\nassistant:"
+CHAT_TEMPLATE = (
+    "{% for m in messages %}{{ m['role'] }}: {{ m['content'] }}\n{% endfor %}assistant:"
+)
+
 
 def ensure_tiny_model(path: Path = TINY_MODEL_DIR, num_layers: int = 6) -> Path:
     """Create the model once; reuse it on later runs."""
     if (path / "model.safetensors").exists():
+        if not _has_chat_template(path):
+            _save_byte_tokenizer(path)  # refresh a cache from before the template
         return path
     import torch
     from transformers import AutoModelForCausalLM, LlamaConfig
@@ -32,6 +43,13 @@ def ensure_tiny_model(path: Path = TINY_MODEL_DIR, num_layers: int = 6) -> Path:
     return path
 
 
+def _has_chat_template(path: Path) -> bool:
+    for candidate in (path / "chat_template.jinja", path / "tokenizer_config.json"):
+        if candidate.exists() and "assistant:" in candidate.read_text():
+            return True
+    return False
+
+
 def _save_byte_tokenizer(path: Path) -> None:
     """A 256-symbol byte-level tokenizer matching the model's vocab_size."""
     from tokenizers import Tokenizer, decoders, models, pre_tokenizers
@@ -48,5 +66,6 @@ def _save_byte_tokenizer(path: Path) -> None:
         eos_token=None,
         unk_token=None,
         pad_token=None,
+        chat_template=CHAT_TEMPLATE,
     )
     tokenizer.save_pretrained(path)

@@ -113,3 +113,77 @@ def test_ui_renders_deploy_failures():
     html = (Path(__file__).resolve().parent.parent / "src/loom/api/admin_ui.html").read_text()
     assert "m.failures" in html
     assert "starting:" in html  # the new shard status has its own colour
+
+
+def test_a_shard_that_was_serving_heals_without_waiting_out_the_grace():
+    """The grace window covers unconfirmed starts only.
+
+    Once a shard has reported `serving`, a later `failed` (watchdog kill, crash)
+    is real: delaying re-placement by a minute would be a self-inflicted outage.
+    """
+    ctrl = make_controller(deploy_grace_s=60.0)
+    model_id = next(iter(ctrl.registry.ids()))
+    key = (model_id, "n1")
+    ctrl.deployed[key] = (4 * GIB, 0, 24, f"{model_id}#0", 0, 1)
+    ctrl.deploy_started[key] = time.time()  # just deployed...
+
+    rebalances = []
+    ctrl.rebalance = lambda reason: rebalances.append(reason) or asyncio.sleep(0)
+
+    serving = telemetry(model_id, "serving")
+    serving.shards[0].local_port = 41177
+    asyncio.run(ctrl.on_telemetry(session(), serving))
+    assert key not in ctrl.deploy_started, "a confirmed start is no longer in flight"
+
+    asyncio.run(ctrl.on_telemetry(session(), telemetry(model_id, "failed")))
+    assert key not in ctrl.deployed and rebalances
+
+
+def test_the_endpoint_announcement_ends_the_grace_window():
+    """A crash seconds after startup must heal at once.
+
+    The worker announces its endpoint as soon as the backend answers /health —
+    a whole heartbeat earlier than telemetry. Until this was honoured, a shard
+    killed right after starting sat unusable for the length of the grace window.
+    """
+    ctrl = make_controller(deploy_grace_s=60.0)
+    model_id = next(iter(ctrl.registry.ids()))
+    key = (model_id, "n1")
+    ctrl.deployed[key] = (4 * GIB, 0, 24, f"{model_id}#0", 0, 1)
+    ctrl.deploy_started[key] = time.time()
+
+    endpoint = SimpleNamespace(model_id=model_id, local_port=41177)
+    asyncio.run(ctrl.on_endpoint(session(), endpoint))
+    assert key not in ctrl.deploy_started
+
+    rebalances = []
+    ctrl.rebalance = lambda reason: rebalances.append(reason) or asyncio.sleep(0)
+    asyncio.run(ctrl.on_telemetry(session(), telemetry(model_id, "failed")))
+    assert key not in ctrl.deployed and rebalances
+
+
+def test_a_failed_deploy_books_its_own_retry():
+    """Recovery must not depend on an unrelated event happening later.
+
+    A backend that dies on startup used to leave the model parked until some
+    node joined or the periodic timer came round — in a pool that is otherwise
+    idle, that is an outage nobody triggers the end of.
+    """
+    ctrl = make_controller(deploy_retry_s=0.1)
+    model_id = next(iter(ctrl.registry.ids()))
+
+    async def scenario():
+        reasons = []
+
+        async def fake_rebalance(reason):
+            reasons.append(reason)
+
+        ctrl.rebalance = fake_rebalance
+        ctrl._mark_deploy_failed(model_id, "n1", "backend process exited")
+        assert (model_id, "n1") in ctrl._retry_tasks
+        await asyncio.sleep(1.0)
+        return reasons
+
+    reasons = asyncio.run(scenario())
+    assert any("retry" in r for r in reasons), reasons
+    assert not ctrl._retry_tasks, "retry task was not cleaned up"

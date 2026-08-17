@@ -26,6 +26,73 @@ logger = logging.getLogger("loom_worker.shard.loader")
 _DTYPES = {"float32": "float32", "float16": "float16", "bfloat16": "bfloat16"}
 
 
+def shard_target_key(
+    key: str, *, start_layer: int, end_layer: int, is_first: bool, is_last: bool
+) -> Optional[str]:
+    """Map a checkpoint key to this stage's local parameter name, or None.
+
+    `model.layers.{global}` -> `layers.{global - start_layer}`; embeddings and
+    head belong only to the stages whose role needs them. Returning None means
+    "this tensor is somebody else's" — which is also what tells the downloader
+    that a whole safetensors file can be skipped.
+    """
+    if key.startswith("model.layers."):
+        rest = key[len("model.layers.") :]
+        idx_str, _, tail = rest.partition(".")
+        try:
+            idx = int(idx_str)
+        except ValueError:
+            return None
+        if not (start_layer <= idx < end_layer):
+            return None
+        return f"layers.{idx - start_layer}.{tail}"
+    if key in ("model.embed_tokens.weight", "embed_tokens.weight"):
+        return "embed.weight" if is_first else None
+    if key in ("model.norm.weight", "norm.weight"):
+        return "norm.weight" if is_last else None
+    if key == "lm_head.weight":
+        return "lm_head.weight" if is_last else None
+    return None
+
+
+def needed_weight_files(
+    weight_map: Dict[str, str],
+    *,
+    start_layer: int,
+    end_layer: int,
+    is_first: bool,
+    is_last: bool,
+    tie_word_embeddings: bool = False,
+) -> List[str]:
+    """Safetensors files this stage actually needs, from the checkpoint index.
+
+    A 14B model split over two nodes ships ~8 shard files; a stage that owns
+    layers [0,20) needs roughly half of them. Downloading the rest is pure
+    waste of disk and time on every worker.
+
+    An empty result means the checkpoint does not use the key naming we know,
+    and the caller must fall back to all files rather than load nothing.
+    """
+    files = set()
+    for key, file_name in weight_map.items():
+        if shard_target_key(
+            key,
+            start_layer=start_layer,
+            end_layer=end_layer,
+            is_first=is_first,
+            is_last=is_last,
+        ) is not None:
+            files.add(file_name)
+    # Tied embeddings: the head is not in the checkpoint at all, so the last
+    # stage has to read the input-embedding matrix instead.
+    if is_last and tie_word_embeddings and "lm_head.weight" not in weight_map:
+        for key in ("model.embed_tokens.weight", "embed_tokens.weight"):
+            if key in weight_map:
+                files.add(weight_map[key])
+                break
+    return sorted(files)
+
+
 @dataclass
 class ShardSpec:
     model_path: str
@@ -142,40 +209,49 @@ class ShardModel:
 
     # ------------------------------------------------------------- weights
     def _weight_files(self) -> List[str]:
+        """Only the files holding this stage's tensors.
+
+        The others may not even be on disk: the downloader fetches this same
+        subset (see `resolve_model_path`).
+        """
         path = Path(self.spec.model_path)
         index = path / "model.safetensors.index.json"
         if index.exists():
-            mapping = json.loads(index.read_text())["weight_map"]
-            return sorted({str(path / f) for f in mapping.values()})
+            weight_map = json.loads(index.read_text())["weight_map"]
+            names = needed_weight_files(
+                weight_map,
+                start_layer=self.spec.start_layer,
+                end_layer=self.spec.end_layer,
+                is_first=self.spec.is_first,
+                is_last=self.spec.is_last,
+                tie_word_embeddings=bool(getattr(self.config, "tie_word_embeddings", False)),
+            )
+            if names:
+                files = [str(path / name) for name in names]
+                missing = [f for f in files if not os.path.exists(f)]
+                if missing:
+                    raise FileNotFoundError(
+                        f"weight files missing for layers "
+                        f"[{self.spec.start_layer}, {self.spec.end_layer}): {missing}"
+                    )
+                return files
+            logger.warning(
+                "checkpoint index uses unknown key naming; reading every shard file"
+            )
+            return sorted({str(path / f) for f in weight_map.values()})
         files = sorted(glob.glob(str(path / "*.safetensors")))
         if not files:
             raise FileNotFoundError(f"no safetensors weights under {path}")
         return files
 
     def _target_name(self, key: str) -> Optional[str]:
-        """Map a checkpoint key to this stage's local parameter name.
-
-        `model.layers.{global}` -> `layers.{global - start_layer}`; embeddings
-        and head are kept only where the role needs them.
-        """
-        spec = self.spec
-        if key.startswith("model.layers."):
-            rest = key[len("model.layers.") :]
-            idx_str, _, tail = rest.partition(".")
-            try:
-                idx = int(idx_str)
-            except ValueError:
-                return None
-            if not (spec.start_layer <= idx < spec.end_layer):
-                return None
-            return f"layers.{idx - spec.start_layer}.{tail}"
-        if key in ("model.embed_tokens.weight", "embed_tokens.weight"):
-            return "embed.weight" if spec.is_first else None
-        if key in ("model.norm.weight", "norm.weight"):
-            return "norm.weight" if spec.is_last else None
-        if key in ("lm_head.weight",):
-            return "lm_head.weight" if spec.is_last else None
-        return None
+        return shard_target_key(
+            key,
+            start_layer=self.spec.start_layer,
+            end_layer=self.spec.end_layer,
+            is_first=self.spec.is_first,
+            is_last=self.spec.is_last,
+        )
 
     def _modules_by_prefix(self) -> Dict[str, object]:
         mods: Dict[str, object] = {"layers": self.layers}
@@ -243,8 +319,23 @@ class ShardModel:
         raise RuntimeError("tie_word_embeddings=True but no embedding weights found")
 
 
-def resolve_model_path(weights_uri: str, hf_token: Optional[str] = None) -> str:
-    """Return a local directory for the weights, downloading from HF if needed."""
+_METADATA_PATTERNS = ["*.json", "*.model", "*.txt", "tokenizer*"]
+
+
+def resolve_model_path(
+    weights_uri: str,
+    hf_token: Optional[str] = None,
+    *,
+    shard: Optional[ShardSpec] = None,
+) -> str:
+    """Return a local directory for the weights, downloading from HF if needed.
+
+    With `shard`, only the safetensors files holding that stage's tensors are
+    fetched: metadata first (config + index + tokenizer, a few hundred KB),
+    then exactly the shard files named by `model.safetensors.index.json` for
+    the stage's layer range. A 14B model on two nodes then costs each of them
+    about half the checkpoint instead of all of it.
+    """
     uri = weights_uri
     for prefix in ("hf://", "huggingface://"):
         if uri.startswith(prefix):
@@ -253,12 +344,60 @@ def resolve_model_path(weights_uri: str, hf_token: Optional[str] = None) -> str:
         return uri
     from huggingface_hub import snapshot_download
 
-    logger.info("downloading %s from HuggingFace…", uri)
+    token = hf_token or os.environ.get("HF_TOKEN")
+    if shard is None:
+        logger.info("downloading %s from HuggingFace (whole checkpoint)…", uri)
+        return snapshot_download(
+            repo_id=uri, token=token, allow_patterns=_METADATA_PATTERNS + ["*.safetensors"]
+        )
+
+    # Pass 1: metadata only — cheap, and it tells us what to fetch next.
+    path = snapshot_download(repo_id=uri, token=token, allow_patterns=_METADATA_PATTERNS)
+    patterns = _weight_patterns_for_shard(Path(path), shard)
+    logger.info("downloading %s from HuggingFace: %d weight file(s)…", uri, len(patterns))
     return snapshot_download(
-        repo_id=uri,
-        token=hf_token or os.environ.get("HF_TOKEN"),
-        allow_patterns=["*.json", "*.safetensors", "*.model", "*.txt", "tokenizer*"],
+        repo_id=uri, token=token, allow_patterns=_METADATA_PATTERNS + patterns
     )
+
+
+def _weight_patterns_for_shard(path: Path, shard: ShardSpec) -> List[str]:
+    """Which safetensors files to fetch for this stage (all, if unsure)."""
+    index = path / "model.safetensors.index.json"
+    if not index.exists():
+        # Single-file checkpoint (or an unusual layout): nothing to select.
+        return ["*.safetensors"]
+    weight_map = json.loads(index.read_text())["weight_map"]
+    tie = False
+    config_file = path / "config.json"
+    if config_file.exists():
+        raw = json.loads(config_file.read_text())
+        tie = bool(raw.get("tie_word_embeddings", raw.get("text_config", {}).get(
+            "tie_word_embeddings", False
+        )))
+    names = needed_weight_files(
+        weight_map,
+        start_layer=shard.start_layer,
+        end_layer=shard.end_layer,
+        is_first=shard.is_first,
+        is_last=shard.is_last,
+        tie_word_embeddings=tie,
+    )
+    total = len(set(weight_map.values()))
+    if not names:
+        logger.warning(
+            "checkpoint index uses unknown key naming; downloading all %d weight files",
+            total,
+        )
+        return ["*.safetensors"]
+    logger.info(
+        "layers [%d, %d): %d of %d weight files needed (%s)",
+        shard.start_layer,
+        shard.end_layer,
+        len(names),
+        total,
+        ", ".join(names[:4]) + ("…" if len(names) > 4 else ""),
+    )
+    return names
 
 
 def build_shard(spec: ShardSpec) -> Tuple[ShardModel, object]:

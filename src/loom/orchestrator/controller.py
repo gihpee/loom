@@ -108,6 +108,8 @@ class MultiModelController:
         # cooldown so a shard that cannot start (bad model, too little VRAM) is
         # retried on a human timescale instead of every rebalance pass.
         self.deploy_failures: Dict[Tuple[str, str], Tuple[float, str]] = {}
+        # In-flight cooldown timers, one per failed placement.
+        self._retry_tasks: Dict[Tuple[str, str], asyncio.Task] = {}
         self.last_plan: Optional[BrokerPlan] = None
         self._lock = asyncio.Lock()
         # SLO tracking: model_id -> deque[(ts, ttft_ms, error)]
@@ -178,6 +180,13 @@ class MultiModelController:
     async def on_endpoint(self, session: WorkerSession, ep: gateway_pb2.ServingEndpoint) -> None:
         if self.registry.get(ep.model_id) is None:
             return
+        # The backend answered /health: the start is no longer in flight. This
+        # is the earliest and most authoritative signal (telemetry only carries
+        # it on the next heartbeat), and until it lands a `failed` report is
+        # treated as stale — a crash right after startup must still heal fast.
+        key = (ep.model_id, session.node_id)
+        self.deploy_started.pop(key, None)
+        self.deploy_failures.pop(key, None)
         # Only stage 0 accepts client requests; middle/tail stages serve
         # activations over the tunnel and must never be routed to directly.
         entry = self.deployed.get((ep.model_id, session.node_id))
@@ -228,6 +237,9 @@ class MultiModelController:
             # without waiting for a new StartServing.
             key = (shard.model_id, session.node_id)
             if shard.status == "serving" and shard.local_port:
+                # Confirmed up: the start is no longer in flight, so a later
+                # `failed` report is real news and must heal immediately.
+                self.deploy_started.pop(key, None)
                 stage_index = int(shard.stage_index)
                 num_stages = max(1, int(shard.num_stages))
                 pipeline_id = shard.pipeline_id or f"{shard.model_id}#0"
@@ -266,11 +278,13 @@ class MultiModelController:
             # watchdog killed the backend) is forgotten and re-placed on the
             # next broker pass. "loading"/"loaded"/"starting" are NOT failures.
             key = (shard.model_id, session.node_id)
-            issued_at = self.deploy_started.get(key, 0.0)
-            if time.time() - issued_at < self.config.deploy_grace_s:
-                # Too soon to judge: this heartbeat may still describe the
-                # previous attempt, and re-placing now would stack a second
-                # engine on top of the one that is starting.
+            issued_at = self.deploy_started.get(key)
+            if issued_at is not None and time.time() - issued_at < self.config.deploy_grace_s:
+                # A start we have not seen succeed yet: this heartbeat may
+                # still describe the previous attempt, and re-placing now would
+                # stack a second engine on top of the one that is starting.
+                # Shards that already reported `serving` are not in this dict,
+                # so a genuine crash still heals without delay.
                 continue
             if shard.status == "failed" and key in self.deployed:
                 logger.warning(
@@ -491,14 +505,39 @@ class MultiModelController:
             self._mark_deploy_failed(model_id, node_id, str(exc))
 
     def _mark_deploy_failed(self, model_id: str, node_id: str, error: str) -> None:
-        """Forget the placement and start its retry cooldown.
+        """Forget the placement, start its retry cooldown, and book the retry.
 
         The failure is kept (not just dropped) so the admin UI can say WHY a
-        model is not running, instead of showing an endless silent retry."""
+        model is not running. The retry is scheduled explicitly rather than
+        left to whatever event happens next: a transient failure (a backend
+        that died on startup) must not park the model until some unrelated
+        node joins or the periodic timer comes round."""
         key = (model_id, node_id)
         self.deployed.pop(key, None)
         self.deploy_started.pop(key, None)
         self.deploy_failures[key] = (time.time(), error or "unknown error")
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return  # called outside the loop: the periodic pass still retries
+        if key not in self._retry_tasks:
+            self._retry_tasks[key] = asyncio.create_task(self._retry_after_cooldown(key))
+
+    async def _retry_after_cooldown(self, key: Tuple[str, str]) -> None:
+        model_id, node_id = key
+        try:
+            # A hair past the cooldown, so the skip check in rebalance() has
+            # certainly expired.
+            await asyncio.sleep(self.config.deploy_retry_s + 0.5)
+            if self.registry.get(model_id) is None:
+                return
+            await self.rebalance(reason=f"retry {model_id}@{node_id}")
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("retry pass for %s on %s failed", model_id, node_id)
+        finally:
+            self._retry_tasks.pop(key, None)
 
     # ------------------------------------------------------------- quota override
     async def set_quota(self, model_id: str, node_id: str, vram_quota_bytes: int):

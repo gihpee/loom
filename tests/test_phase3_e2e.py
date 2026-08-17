@@ -42,6 +42,17 @@ def test_watchdog_kill_keeps_node_alive_and_self_heals():
         rss_overhead_bytes=0,
     ).start()
     controller = orch.controller
+    # Record kills as they happen: the `failed` status is transient (self-healing
+    # replaces the shard within a heartbeat), so polling for it races with the
+    # very recovery this test wants to see.
+    kills: list = []
+    original_on_kill = worker.handlers._on_watchdog_kill
+
+    def record_kill(model_id, reason):
+        kills.append((model_id, reason))
+        original_on_kill(model_id, reason)
+
+    worker.handlers._on_watchdog_kill = record_kill
     try:
         assert wait_until(lambda: bool(controller.endpoints.candidates("qwen3-0.6b")), 30)
         first_port = controller.endpoints.candidates("qwen3-0.6b")[0].base_url
@@ -51,11 +62,10 @@ def test_watchdog_kill_keeps_node_alive_and_self_heals():
         ack = orch.submit(controller.set_quota("qwen3-0.6b", "wd-node", 1))
         assert ack.ok
 
-        assert wait_until(
-            lambda: (shard := worker.state.get("qwen3-0.6b")) is not None
-            and shard.status.value == "failed",
-            20,
-        ), "watchdog did not kill the over-quota backend"
+        assert wait_until(lambda: bool(kills), 20), (
+            "watchdog did not kill the over-quota backend"
+        )
+        assert "quota" in kills[0][1]
 
         # The node itself is alive: still connected, still heartbeating.
         assert "wd-node" in orch.servicer.sessions

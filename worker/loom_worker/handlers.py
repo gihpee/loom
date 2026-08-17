@@ -31,6 +31,7 @@ class CommandHandlers:
         relay_url: str = "",
         rss_overhead_bytes: Optional[int] = None,
         vram_overhead_bytes: Optional[int] = None,
+        ready_timeout_s: Optional[float] = None,
     ) -> None:
         self.state = state
         self.send = send
@@ -50,6 +51,9 @@ class CommandHandlers:
             if vram_overhead_bytes is not None
             else int(float(os.environ.get("LOOM_VRAM_OVERHEAD_MB", "1024")) * 1024 * 1024)
         )
+        # How long a backend may take to answer /health. None = the adapter's
+        # own default (LOOM_BACKEND_READY_TIMEOUT_S); tests pass seconds.
+        self.ready_timeout_s = ready_timeout_s
         self.watchdog_poll_s = watchdog_poll_s
         self._watchdogs: dict[str, QuotaWatchdog] = {}
 
@@ -190,15 +194,14 @@ class CommandHandlers:
                 )
                 watchdog.start()
                 self._watchdogs[req.model_id] = watchdog
-                healthy = backend.wait_healthy()
+                healthy = backend.wait_healthy(timeout_s=self.ready_timeout_s)
                 if shard.status != ShardStatus.STARTING:
-                    # Stopped/unloaded while we were starting: the teardown
-                    # already had the last word, do not resurrect a status.
-                    logger.info(
-                        "StartServing %s: shard is %s, abandoning this start",
-                        req.model_id,
-                        shard.status.value,
-                    )
+                    # Stopped, unloaded or watchdog-killed while we were
+                    # starting: that verdict stands, but the orchestrator is
+                    # still waiting on this command — never leave it hanging.
+                    reason = shard.error or f"start aborted ({shard.status.value})"
+                    logger.info("StartServing %s: %s", req.model_id, reason)
+                    self.send(self._ack(command_id, False, reason))
                     return
                 if not healthy:
                     # Release the process before reporting failure: a backend
