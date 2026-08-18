@@ -20,16 +20,23 @@ WORKDIR /app
 COPY pyproject.toml ./
 COPY loom_worker ./loom_worker
 
-RUN pip install --no-cache-dir . nvidia-ml-py>=12.0
+# Quoted on purpose: unquoted, the shell reads ">=12.0" as a redirect and
+# silently installs whatever nvidia-ml-py version it likes.
+RUN pip install --no-cache-dir . "nvidia-ml-py>=12.0"
 
 # Record what the stage engine was built against. The patches in
 # loom_worker/vllm_stage/ target these internals; a mismatch surfaces at
 # startup with a message naming what to re-check, not as wrong numbers.
-RUN python -c "import vllm; print('vLLM in image:', vllm.__version__)" \
-    && python -c "import vllm.distributed.utils as u; assert hasattr(u, 'get_pp_indices'), 'get_pp_indices moved'" \
-    && python -c "from vllm.v1.worker.gpu_model_runner import GPUModelRunner" \
-    && python -c "from vllm.v1.core.sched.output import SchedulerOutput, NewRequestData, CachedRequestData" \
-    && python -c "from vllm.v1.core.kv_cache_manager import KVCacheManager"
+# python3, not python: the base image ships no `python` alias.
+RUN python3 -c "\
+import vllm, vllm.distributed.utils as u;\
+from vllm.v1.worker.gpu_model_runner import GPUModelRunner;\
+from vllm.v1.core.sched.output import SchedulerOutput, NewRequestData, CachedRequestData;\
+from vllm.v1.core.kv_cache_manager import KVCacheManager;\
+from vllm.model_executor.model_loader import default_loader;\
+from vllm.distributed.parallel_state import GroupCoordinator;\
+assert hasattr(u, 'get_pp_indices'), 'get_pp_indices moved';\
+print('vLLM in image:', vllm.__version__)"
 
 ENV LOOM_LOG_LEVEL=INFO \
     HF_HOME=/root/.cache/huggingface \
