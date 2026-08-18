@@ -117,9 +117,6 @@ class ShardModel:
         self.device = torch.device(spec.device)
         self.num_layers = spec.end_layer - spec.start_layer
         self.embed = None  # only on the first stage
-        self.inner = None  # the skeleton's own model, driven per stage
-        self.compiled = None  # torch.compile wrapper around `inner`, if any
-        self.shard_config = None  # config narrowed to this stage's layer count
         self.layers = None
         self.norm = None  # only on the last stage
         self.lm_head = None  # only on the last stage
@@ -142,14 +139,10 @@ class ShardModel:
         # device so nothing is allocated yet.
         shard_cfg = type(cfg).from_dict(cfg.to_dict())
         shard_cfg.num_hidden_layers = self.num_layers
-        # Kept for the executor: a StaticCache must be sized for the layers this
-        # stage actually holds, not for the whole model.
-        self.shard_config = shard_cfg
         with torch.device("meta"):
             skeleton = AutoModelForCausalLM.from_config(shard_cfg)
 
         inner = skeleton.model if hasattr(skeleton, "model") else skeleton
-        self.inner = inner
         self.layers = inner.layers
         if self.spec.is_first:
             self.embed = inner.embed_tokens
@@ -178,7 +171,6 @@ class ShardModel:
 
         self._load_weights()
         self._assert_materialised()
-        self._wire_inner_model()
         for module in (self.embed, self.layers, self.norm, self.lm_head):
             if module is not None:
                 module.eval()
@@ -193,47 +185,6 @@ class ShardModel:
             self.spec.dtype,
         )
         return self
-
-    def _wire_inner_model(self) -> None:
-        """Make the skeleton's own model usable as this stage's forward.
-
-        Running the layers by hand means re-implementing what the model already
-        does — attention masks in particular, which differ between cache types
-        and are easy to get subtly wrong (a wrong mask does not crash, it just
-        returns slightly different numbers). Delegating keeps us on the path
-        transformers tests and compiles.
-
-        Two edits make the full model behave as one stage:
-        - the final norm belongs to the LAST stage only; elsewhere it must not
-          touch the hidden states travelling to the next node;
-        - the embedding belongs to the FIRST stage only; other stages are fed
-          `inputs_embeds` and must not keep an unmaterialised module around.
-        """
-        import torch.nn as nn
-
-        if self.rotary is not None:
-            # The skeleton's own rotary went through meta+to_empty (garbage
-            # inv_freq); ours was built on the device. See the note above.
-            self.inner.rotary_emb = self.rotary
-        if not self.spec.is_last:
-            self.inner.norm = nn.Identity()
-        if not self.spec.is_first:
-            self.inner.embed_tokens = None
-
-    def run_layers(self, hidden, **kwargs):
-        """Run this stage's layers over `hidden` (already embedded).
-
-        Uses the compiled model when one is installed, and the eager module
-        otherwise. Both are kept: compilation is an optimisation that must be
-        revocable at runtime, without reloading 14 GB of weights.
-        """
-        model = self.compiled if self.compiled is not None else self.inner
-        out = model(inputs_embeds=hidden, **kwargs)
-        return out.last_hidden_state if hasattr(out, "last_hidden_state") else out[0]
-
-    def drop_compiled(self) -> None:
-        """Fall back to the eager module for the rest of this stage's life."""
-        self.compiled = None
 
     def _assert_materialised(self) -> None:
         """Fail loudly if any tensor is still meta or holds garbage.

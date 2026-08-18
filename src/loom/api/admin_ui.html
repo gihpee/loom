@@ -534,16 +534,12 @@ function renderRunStats(run) {
   if (s) {
     // The gap between the two clocks is the API hop + the worker tunnel.
     const overhead = run.totalMs - s.total_ms;
-    // p50 / stages is arithmetic, not a measurement: the interval covers
-    // compute on every stage AND the hops between them. It is an upper bound
-    // on what one hop can cost; the honest way to get the hop price is to add
-    // a stage and look at how p50 moves.
-    const perStage = s.stages > 1 ? s.inter_token_ms_p50 / s.stages : null;
+    const perHop = s.stages > 1 ? s.inter_token_ms_p50 / s.stages : null;
     serverBlock = `<p class="muted" style="margin-top:10px">по данным головы пайплайна:
       prefill ${ms(s.ttft_ms)} (${num(s.prompt_tokens_per_s)} tok/s) ·
       decode ${ms(s.decode_ms)} (${num(s.decode_tokens_per_s, 2)} tok/s) ·
       между токенами p50 ${num(s.inter_token_ms_p50)} / p95 ${num(s.inter_token_ms_p95)} / max ${num(s.inter_token_ms_max)} ms ·
-      стадий ${s.stages}${perStage ? ` (${num(perStage)} ms на стадию, вместе с переходом)` : ""} ·
+      стадий ${s.stages}${perHop ? ` (≈ ${num(perHop)} ms на переход)` : ""} ·
       накладные транспорта ${ms(Math.max(0, overhead))}</p>`;
   } else {
     serverBlock = `<p class="muted" style="margin-top:10px">бэкенд не прислал timings —
