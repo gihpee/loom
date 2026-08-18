@@ -55,15 +55,32 @@ class StageRuntimeConfig:
         return self.end_layer >= self.num_layers
 
 
-def _accepted_fields(cls) -> set:
-    """Which keyword arguments this vLLM config class actually takes."""
-    import dataclasses
+def accepted_arguments(cls):
+    """Keyword arguments this config class actually accepts, or None for "any".
+
+    The constructor signature is the only honest source. `dataclasses.fields()`
+    looks like the obvious one and is wrong: it omits InitVar pseudo-fields,
+    which are init-only parameters. vLLM 0.27 declares SchedulerConfig's
+    `max_model_len` and `is_encoder_decoder` exactly that way — required by
+    __init__, invisible to fields() — so trusting fields() meant dropping two
+    mandatory arguments and failing with "Field required".
+
+    None means the constructor takes **kwargs and nothing should be dropped.
+    """
     import inspect
 
     try:
-        return {f.name for f in dataclasses.fields(cls)}
-    except TypeError:
-        return set(inspect.signature(cls.__init__).parameters) - {"self"}
+        parameters = inspect.signature(cls).parameters
+    except (TypeError, ValueError):  # pragma: no cover - exotic callables
+        return None
+    if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in parameters.values()):
+        return None
+    return {
+        name
+        for name, p in parameters.items()
+        if p.kind
+        in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
+    } - {"self"}
 
 
 def _construct(cls, *, required=(), **kwargs):
@@ -79,7 +96,9 @@ def _construct(cls, *, required=(), **kwargs):
     silently serving with vLLM's own defaults would mean ignoring the broker's
     grant, and that shows up much later as an OOM nobody can explain.
     """
-    accepted = _accepted_fields(cls)
+    accepted = accepted_arguments(cls)
+    if accepted is None:
+        return cls(**kwargs)  # takes **kwargs: nothing to filter
     missing_required = [k for k in required if k not in accepted]
     if missing_required:
         raise VllmIntegrationError(

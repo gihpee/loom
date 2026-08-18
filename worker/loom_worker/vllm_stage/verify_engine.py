@@ -18,7 +18,6 @@ defaults would surface later as an OOM nobody can trace.
 
 from __future__ import annotations
 
-import dataclasses
 import importlib
 import sys
 
@@ -61,12 +60,11 @@ CONFIG_FIELDS = {
 
 
 def _fields(cls) -> set:
-    try:
-        return {f.name for f in dataclasses.fields(cls)}
-    except TypeError:
-        import inspect
+    """What the constructor takes — see accepted_arguments on why not fields()."""
+    from loom_worker.vllm_stage.runtime import accepted_arguments
 
-        return set(inspect.signature(cls.__init__).parameters) - {"self"}
+    accepted = accepted_arguments(cls)
+    return accepted if accepted is not None else set()
 
 
 def main() -> int:
