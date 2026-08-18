@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import threading
 import time
 from dataclasses import dataclass, field
@@ -22,6 +23,13 @@ from loom_worker.shard.loader import ShardModel
 logger = logging.getLogger("loom_worker.shard.executor")
 
 
+def _flag(name: str, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return default
+    return raw.strip().lower() not in ("0", "false", "no", "off")
+
+
 @dataclass
 class RequestState:
     """Per-request KV cache and bookkeeping, owned by this stage."""
@@ -30,18 +38,54 @@ class RequestState:
     cache: object  # transformers Cache
     created_at: float = field(default_factory=time.time)
     seen_tokens: int = 0
+    # Guards this request's own cache. Requests do not share state, so they
+    # only need to be serialised against themselves — not against each other.
+    lock: threading.RLock = field(default_factory=threading.RLock)
 
 
 class ShardExecutor:
     """Runs this stage's layers. Thread-safe: one lock around the model."""
 
-    def __init__(self, shard: ShardModel, *, max_requests: int = 64) -> None:
+    def __init__(
+        self,
+        shard: ShardModel,
+        *,
+        max_requests: Optional[int] = None,
+        static_cache: Optional[bool] = None,
+        compile_model: Optional[bool] = None,
+        max_cache_len: Optional[int] = None,
+    ) -> None:
         import torch
 
         self.torch = torch
         self.shard = shard
         self.spec = shard.spec
-        self.max_requests = max_requests
+        on_gpu = str(self.spec.device).startswith("cuda")
+        # A preallocated (static) KV cache is what lets CUDA graphs capture the
+        # decode step: shapes and addresses stop moving. It costs memory per
+        # request up front, so it is the GPU default and off on CPU.
+        self.static_cache = _flag("LOOM_STATIC_CACHE", on_gpu) if static_cache is None else static_cache
+        self.max_cache_len = int(
+            max_cache_len
+            if max_cache_len is not None
+            else os.environ.get("LOOM_MAX_CACHE_LEN", "4096")
+        )
+        # Graphs only pay off with a static cache; without one every step
+        # retraces and compilation is a net loss.
+        self.compile_model = (
+            _flag("LOOM_COMPILE", on_gpu and self.static_cache)
+            if compile_model is None
+            else compile_model
+        )
+        self.max_requests = int(
+            max_requests
+            if max_requests is not None
+            else os.environ.get("LOOM_MAX_REQUESTS", "8" if self.static_cache else "64")
+        )
+        self._wire_dtype = self._pick_wire_dtype()
+        self._log_capacity()
+        if self.compile_model:
+            self._compile()
         self._states: Dict[str, RequestState] = {}
         self._lock = threading.RLock()
         # transformers renamed the cache kwarg (`past_key_value` -> `past_key_values`)
@@ -65,10 +109,72 @@ class ShardExecutor:
             "unsupported transformers version"
         )
 
-    # ------------------------------------------------------------- lifecycle
-    def _state(self, request_id: str) -> RequestState:
+    # --------------------------------------------------------------- runtime
+    def _kv_bytes_per_token(self) -> int:
+        cfg = self.shard.shard_config or self.shard.config
+        heads = int(getattr(cfg, "num_key_value_heads", None) or getattr(cfg, "num_attention_heads"))
+        head_dim = int(
+            getattr(cfg, "head_dim", None)
+            or int(getattr(cfg, "hidden_size")) // int(getattr(cfg, "num_attention_heads"))
+        )
+        layers = len(self.shard.layers)
+        elem = 2 if self.shard.dtype in (self.torch.bfloat16, self.torch.float16) else 4
+        return layers * heads * head_dim * 2 * elem  # K and V
+
+    def _log_capacity(self) -> None:
+        if not self.static_cache:
+            logger.info(
+                "executor: dynamic KV cache, up to %d concurrent requests", self.max_requests
+            )
+            return
+        per_request = self._kv_bytes_per_token() * self.max_cache_len
+        logger.info(
+            "executor: static KV cache %d tokens = %.2f GB per request, "
+            "%d concurrent max (%.2f GB total), compile=%s",
+            self.max_cache_len,
+            per_request / 1024**3,
+            self.max_requests,
+            per_request * self.max_requests / 1024**3,
+            self.compile_model,
+        )
+
+    def _compile(self) -> None:
+        """Wrap the stage model in torch.compile (CUDA graphs on the decode step).
+
+        Failure here is never fatal: a stage that cannot compile must still
+        serve, just slower. The first request pays the compilation cost.
+        """
+        torch = self.torch
+        try:
+            self.shard.inner = torch.compile(
+                self.shard.inner,
+                mode=os.environ.get("LOOM_COMPILE_MODE", "reduce-overhead"),
+                dynamic=False,
+            )
+            logger.info("executor: model compiled (first request pays warm-up)")
+        except Exception:
+            logger.exception("torch.compile failed; continuing without it")
+            self.compile_model = False
+
+    def _new_cache(self):
         from transformers import DynamicCache
 
+        if not self.static_cache:
+            return DynamicCache()
+        from transformers import StaticCache
+
+        cfg = self.shard.shard_config
+        if cfg is None:  # pragma: no cover - only for shards built by old code
+            return DynamicCache()
+        return StaticCache(
+            config=cfg,
+            max_cache_len=self.max_cache_len,
+            device=self.shard.device,
+            dtype=self.shard.dtype,
+        )
+
+    # ------------------------------------------------------------- lifecycle
+    def _state(self, request_id: str) -> RequestState:
         with self._lock:
             state = self._states.get(request_id)
             if state is None:
@@ -78,7 +184,7 @@ class ShardExecutor:
                     oldest = min(self._states.values(), key=lambda s: s.created_at)
                     self._states.pop(oldest.request_id, None)
                     logger.warning("evicted stale request state %s", oldest.request_id)
-                state = RequestState(request_id=request_id, cache=DynamicCache())
+                state = RequestState(request_id=request_id, cache=self._new_cache())
                 self._states[request_id] = state
             return state
 
@@ -112,7 +218,13 @@ class ShardExecutor:
         """
         torch = self.torch
         state = self._state(request_id)
-        with self._lock, torch.no_grad():
+        # Concurrency policy: requests hold only their own cache, so they can
+        # run side by side — that is what fills the pipeline bubble while
+        # another stage is busy. The exception is CUDA graphs (compile in
+        # reduce-overhead mode), which replay through fixed buffers and must
+        # not be entered twice at once.
+        model_lock = self._lock if self.compile_model else state.lock
+        with model_lock, torch.inference_mode():
             if self.spec.is_first:
                 if input_ids is None:
                     raise ValueError("first stage requires input_ids")
@@ -126,21 +238,16 @@ class ShardExecutor:
                     h = h.unsqueeze(0)
 
             pos = torch.tensor([positions], dtype=torch.long, device=self.shard.device)
-            cache_position = pos[0]
-            rotary = self.shard.rotary
-            position_embeddings = rotary(h, pos) if rotary is not None else None
-
-            layer_kwargs = {
-                "attention_mask": None,  # v0: one sequence per request -> causal by default
-                "position_ids": pos,
-                "use_cache": True,
-                "cache_position": cache_position,
-                "position_embeddings": position_embeddings,
-                self._cache_kwarg: state.cache,
-            }
-            for layer in self.shard.layers:
-                out = layer(h, **layer_kwargs)
-                h = out[0] if isinstance(out, tuple) else out
+            # The model's own forward builds the attention mask, applies rotary
+            # and drives the cache — all of which depend on the cache type and
+            # are silently wrong if reimplemented by hand.
+            h = self.shard.run_layers(
+                h,
+                position_ids=pos,
+                cache_position=pos[0],
+                use_cache=True,
+                **{self._cache_kwarg: state.cache},
+            )
 
             state.seen_tokens += len(positions)
 
@@ -183,19 +290,40 @@ class ShardExecutor:
         return int(torch.multinomial(probs, 1, generator=generator).item())
 
     # -------------------------------------------------------------- transport
-    def serialize(self, tensor) -> Tuple[bytes, List[int], str]:
-        """Tensor -> (bytes, shape, dtype) for the wire.
+    def _pick_wire_dtype(self):
+        """Dtype for activations on the wire.
 
-        float32 on the wire keeps the format portable across stages that may
-        run different dtypes (a cuda stage and a cpu stage can co-operate).
+        The stage's own dtype by default: sending bf16 halves the payload of
+        every hop, and the receiver casts to whatever it runs anyway, so a
+        bf16 stage and an fp32 stage still interoperate. float32 stays the
+        fallback because it is the one every device supports.
         """
-        t = tensor.detach().to("cpu", dtype=self.torch.float32).contiguous()
-        return t.numpy().tobytes(), list(t.shape), "float32"
+        torch = self.torch
+        override = os.environ.get("LOOM_WIRE_DTYPE", "").strip().lower()
+        by_name = {"float32": torch.float32, "float16": torch.float16, "bfloat16": torch.bfloat16}
+        if override in by_name:
+            return by_name[override]
+        if self.shard.dtype in (torch.bfloat16, torch.float16):
+            return self.shard.dtype
+        return torch.float32
+
+    def serialize(self, tensor) -> Tuple[bytes, List[int], str]:
+        """Tensor -> (bytes, shape, dtype) for the wire."""
+        torch = self.torch
+        wire = self._wire_dtype
+        t = tensor.detach().to("cpu", dtype=wire).contiguous()
+        if wire is torch.bfloat16:
+            # numpy has no bfloat16; reinterpret the same 2 bytes as int16.
+            raw = t.view(torch.int16).numpy().tobytes()
+        else:
+            raw = t.numpy().tobytes()
+        return raw, list(t.shape), str(wire).replace("torch.", "")
 
     def deserialize(self, data: bytes, shape: List[int], dtype: str):
         torch = self.torch
-        np_dtype = {"float32": "float32", "float16": "float16"}.get(dtype, "float32")
-        import numpy as np
-
-        array = np.frombuffer(data, dtype=np_dtype).reshape(tuple(shape))
-        return torch.from_numpy(array.copy())
+        by_name = {"float32": torch.float32, "float16": torch.float16, "bfloat16": torch.bfloat16}
+        wire = by_name.get(dtype, torch.float32)
+        # bytearray: frombuffer needs a writable buffer, and the copy is what
+        # detaches the tensor from the transport's memory.
+        flat = torch.frombuffer(bytearray(data), dtype=wire)
+        return flat.reshape(tuple(shape))

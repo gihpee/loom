@@ -150,3 +150,76 @@ def test_rejects_impossible_layer_range(model_dir):
         build_shard(
             ShardSpec(model_path=model_dir, start_layer=4, end_layer=99, is_first=True, is_last=True)
         )
+
+
+def test_concurrent_requests_do_not_corrupt_each_other(model_dir):
+    """Requests run side by side on a stage — that is what fills the bubble.
+
+    Each holds only its own KV cache, so the answers must be identical to
+    running them one after another. This is the safety net for dropping the
+    stage-wide lock.
+    """
+    import threading
+
+    (ex,) = build_stages(model_dir, [(0, 6)])
+    prompts = {
+        "a": [3, 17, 42, 8, 99],
+        "b": [7, 1, 200, 5],
+        "c": [11, 12, 13, 14, 15, 16],
+    }
+    # Ground truth: one at a time, each on a fresh request id.
+    expected = {}
+    for name, ids in prompts.items():
+        logits = ex.forward(
+            request_id=f"seq-{name}", positions=list(range(len(ids))), input_ids=ids
+        )[1]
+        token = ex.sample(logits)
+        nxt = ex.forward(
+            request_id=f"seq-{name}", positions=[len(ids)], input_ids=[token]
+        )[1]
+        expected[name] = (token, nxt)
+
+    got = {}
+    errors = []
+
+    def work(name, ids):
+        try:
+            logits = ex.forward(
+                request_id=f"par-{name}", positions=list(range(len(ids))), input_ids=ids
+            )[1]
+            token = ex.sample(logits)
+            nxt = ex.forward(
+                request_id=f"par-{name}", positions=[len(ids)], input_ids=[token]
+            )[1]
+            got[name] = (token, nxt)
+        except Exception as exc:  # surfaced below, threads swallow otherwise
+            errors.append(exc)
+
+    threads = [threading.Thread(target=work, args=(n, ids)) for n, ids in prompts.items()]
+    for th in threads:
+        th.start()
+    for th in threads:
+        th.join(timeout=60)
+
+    assert not errors, errors
+    assert set(got) == set(prompts)
+    for name in prompts:
+        assert got[name][0] == expected[name][0], f"{name}: different token under concurrency"
+        assert torch.allclose(got[name][1], expected[name][1], atol=1e-5), name
+
+
+def test_activations_survive_the_wire_in_every_dtype(model_dir, monkeypatch):
+    """bf16 halves every hop's payload; the round trip must still be exact."""
+    (ex,) = build_stages(model_dir, [(0, 6)])
+    hidden = torch.randn(1, 4, 64)
+
+    for name, atol in (("float32", 0.0), ("bfloat16", 5e-2), ("float16", 1e-2)):
+        monkeypatch.setenv("LOOM_WIRE_DTYPE", name)
+        ex._wire_dtype = ex._pick_wire_dtype()
+        data, shape, dtype = ex.serialize(hidden)
+        assert dtype == name
+        back = ex.deserialize(data, shape, dtype).to(torch.float32)
+        assert tuple(back.shape) == tuple(hidden.shape)
+        assert torch.allclose(back, hidden, atol=max(atol, 1e-6)), name
+        expected_bytes = hidden.numel() * (4 if name == "float32" else 2)
+        assert len(data) == expected_bytes
