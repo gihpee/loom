@@ -27,23 +27,10 @@ RUN pip install --no-cache-dir . "nvidia-ml-py>=12.0"
 # Record what the stage engine was built against. The patches in
 # loom_worker/vllm_stage/ target these internals; a mismatch surfaces at
 # startup with a message naming what to re-check, not as wrong numbers.
-# python3, not python: the base image ships no `python` alias.
-RUN python3 -c "\
-import vllm, vllm.distributed.utils as u;\
-from vllm.v1.worker.gpu_model_runner import GPUModelRunner;\
-from vllm.v1.core.sched.output import SchedulerOutput, NewRequestData, CachedRequestData;\
-from vllm.v1.core.kv_cache_manager import KVCacheManager;\
-from vllm.model_executor.model_loader import default_loader;\
-from vllm.distributed.parallel_state import GroupCoordinator;\
-from vllm.config import ModelConfig, CacheConfig, ParallelConfig, SchedulerConfig, VllmConfig;\
-import dataclasses as d;\
-f=lambda c: {x.name for x in d.fields(c)};\
-assert hasattr(u, 'get_pp_indices'), 'get_pp_indices moved';\
-assert {'gpu_memory_utilization','block_size'} <= f(CacheConfig), 'CacheConfig lost the VRAM knob';\
-assert {'model','max_model_len','dtype'} <= f(ModelConfig), 'ModelConfig fields moved';\
-assert {'max_num_seqs','max_model_len'} <= f(SchedulerConfig), 'SchedulerConfig fields moved';\
-assert {'pipeline_parallel_size','tensor_parallel_size'} <= f(ParallelConfig), 'ParallelConfig fields moved';\
-print('vLLM in image:', vllm.__version__)"
+# Fails the build if vLLM moved something the stage engine patches — better
+# here, in seconds, than after a half-hour checkpoint download on a GPU box.
+# The script prints what it found, so a mismatch is diagnosable from this log.
+RUN python3 -m loom_worker.vllm_stage.verify_engine
 
 ENV LOOM_LOG_LEVEL=INFO \
     HF_HOME=/root/.cache/huggingface \

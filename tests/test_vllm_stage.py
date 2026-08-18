@@ -83,6 +83,9 @@ def install_fake_vllm(monkeypatch):
 
     def module(name, **attrs):
         mod = types.ModuleType(name)
+        # __path__ makes it a package, so importlib will resolve submodules
+        # instead of stopping at "vllm is not a package".
+        mod.__path__ = []
         for key, value in attrs.items():
             setattr(mod, key, value)
         modules[name] = mod
@@ -116,11 +119,23 @@ def install_fake_vllm(monkeypatch):
             self.__dict__.update(kw)
 
     module("vllm")
+    module("vllm.distributed")
+    module("vllm.distributed.utils", get_pp_indices=lambda n, r, w: (0, n))
+    module("vllm.distributed.parallel_state", GroupCoordinator=type("GroupCoordinator", (), {}))
+    module("vllm.model_executor")
+    module("vllm.model_executor.model_loader")
+    module(
+        "vllm.model_executor.model_loader.default_loader",
+        DefaultModelLoader=type("DefaultModelLoader", (), {}),
+    )
+    module("vllm.v1.worker", GPUModelRunner=type("GPUModelRunner", (), {}))
+    module("vllm.v1.worker.gpu_model_runner", GPUModelRunner=type("GPUModelRunner", (), {}))
     module("vllm.sampling_params", SamplingParams=SamplingParams)
     module("vllm.sequence", IntermediateTensors=IntermediateTensors)
     module("vllm.v1")
     module("vllm.v1.request", Request=Request)
     module("vllm.v1.core")
+    module("vllm.v1.core.kv_cache_manager", KVCacheManager=type("KVCacheManager", (), {}))
     module("vllm.v1.core.sched")
     module(
         "vllm.v1.core.sched.output",
@@ -336,3 +351,65 @@ def test_losing_a_field_that_carries_the_quota_is_fatal():
             block_size=16,
             gpu_memory_utilization=0.75,
         )
+
+
+def test_engine_check_reports_before_it_judges(monkeypatch, capsys):
+    """The build-time check must name what it found, not just fail.
+
+    A bare "SchedulerConfig fields moved" sent someone reading vLLM's source to
+    work out which field. The report lists the missing ones, and only fields
+    whose loss changes behaviour are fatal.
+    """
+    import dataclasses
+
+    install_fake_vllm(monkeypatch)
+    config = types.ModuleType("vllm.config")
+
+    @dataclasses.dataclass
+    class ModelConfig:
+        model: str = ""
+        max_model_len: int = 4096
+        dtype: str = "auto"
+
+    @dataclasses.dataclass
+    class CacheConfig:
+        block_size: int = 16
+        gpu_memory_utilization: float = 0.9
+        # no swap_space — as in vLLM 0.27
+
+    @dataclasses.dataclass
+    class ParallelConfig:
+        pipeline_parallel_size: int = 1
+        tensor_parallel_size: int = 1
+
+    @dataclasses.dataclass
+    class SchedulerConfig:
+        max_num_seqs: int = 16
+        # no max_model_len, no max_num_batched_tokens
+
+    for cls in (ModelConfig, CacheConfig, ParallelConfig, SchedulerConfig):
+        setattr(config, cls.__name__, cls)
+    monkeypatch.setitem(sys.modules, "vllm.config", config)
+    sys.modules["vllm"].config = config
+    sys.modules["vllm"].__version__ = "0.27.1-fake"
+
+    from loom_worker.vllm_stage import verify_engine
+
+    assert verify_engine.main() == 0, "scheduling comfort fields are survivable"
+    report = capsys.readouterr().out
+    cache_line = next(l for l in report.splitlines() if "CacheConfig" in l)
+    assert "swap_space" in cache_line, "the field vLLM 0.27 dropped is named"
+    scheduler_line = next(l for l in report.splitlines() if "SchedulerConfig" in l)
+    assert "max_model_len" in scheduler_line, "so is the missing scheduler field"
+
+    # Now lose the field that carries the broker's grant.
+    @dataclasses.dataclass
+    class RenamedCacheConfig:
+        block_size: int = 16
+        memory_fraction: float = 0.9
+
+    config.CacheConfig = RenamedCacheConfig
+    assert verify_engine.main() == 1
+    problems = capsys.readouterr().err
+    assert "gpu_memory_utilization" in problems
+    assert "runtime.py" in problems, "the report must say where to fix it"

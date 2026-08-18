@@ -130,7 +130,7 @@ def build_stage_runner(config: StageRuntimeConfig):
 
     model_config = _construct(
         ModelConfig,
-        required=("model", "max_model_len", "dtype"),
+        required=("model", "max_model_len"),
         model=config.model_path,
         tokenizer=config.model_path,
         tokenizer_mode="auto",
@@ -144,7 +144,7 @@ def build_stage_runner(config: StageRuntimeConfig):
         CacheConfig,
         # The broker's grant lives in this one field; losing it would hand the
         # whole card to one model.
-        required=("gpu_memory_utilization", "block_size"),
+        required=("gpu_memory_utilization",),
         block_size=config.kv_block_size,
         gpu_memory_utilization=config.gpu_memory_utilization,
         swap_space=0,
@@ -154,14 +154,15 @@ def build_stage_runner(config: StageRuntimeConfig):
     # and vLLM is told it is alone so it never tries to talk to peers itself.
     parallel_config = _construct(
         ParallelConfig,
-        required=("pipeline_parallel_size", "tensor_parallel_size"),
+        # No required fields: both default to 1, which is what a stage wants.
         pipeline_parallel_size=1,
         tensor_parallel_size=1,
         distributed_executor_backend=None,
     )
     scheduler_config = _construct(
         SchedulerConfig,
-        required=("max_num_seqs", "max_model_len"),
+        # Scheduling limits are comfort, not correctness: if a field moved,
+        # vLLM's own default is fine and the drop is logged.
         max_num_batched_tokens=max(config.max_batched_tokens, config.max_model_len),
         max_num_seqs=config.max_num_seqs,
         max_model_len=config.max_model_len,
