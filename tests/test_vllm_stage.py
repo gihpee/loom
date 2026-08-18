@@ -12,6 +12,7 @@ which is exactly what a real integration bug would show up in.
 """
 
 import sys
+import time
 import types
 from pathlib import Path
 
@@ -544,3 +545,78 @@ def test_unknown_cache_layout_falls_back_to_the_memory_budget():
 
     config = StageRuntimeConfig(model_path="/m", start_layer=0, end_layer=2, num_layers=4)
     assert _kv_bytes_for_concurrency({"x": types.SimpleNamespace()}, config) == 0
+
+
+# ------------------------------------------------------- one caller at a time
+def test_the_engine_is_never_entered_twice_at_once(executor_factory):
+    """Two overlapping requests destroyed a live stage.
+
+    The stage server gives every inter-stage message its own thread. vLLM's
+    runner has one set of buffers and a process-wide forward context, so two
+    concurrent execute_model calls left one thread inside the model with the
+    context already cleared: "Forward context is not set", then an illegal
+    instruction that poisoned the CUDA context permanently.
+    """
+    import threading
+
+    ex, runner, _kv = executor_factory(start=0, end=20)
+    overlaps = []
+    inside = threading.Semaphore(1)
+    original = runner.execute_model
+
+    def slow_execute(**kwargs):
+        if not inside.acquire(blocking=False):
+            overlaps.append(1)          # a second caller got in
+        else:
+            time.sleep(0.05)            # hold the engine
+            inside.release()
+        return original(**kwargs)
+
+    runner.execute_model = slow_execute
+    threads = [
+        threading.Thread(
+            target=lambda i=i: ex.forward(
+                request_id=f"req-{i}", positions=[0, 1], input_ids=[1, 2]
+            )
+        )
+        for i in range(4)
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert not overlaps, "execute_model must be entered by one thread at a time"
+
+
+def test_a_poisoned_cuda_context_takes_the_process_down(executor_factory, monkeypatch):
+    """After an illegal instruction the device is done; serving on is a lie.
+
+    Exiting hands it to machinery that works: the agent sees the backend die,
+    the shard is reported failed and the orchestrator re-places it.
+    """
+    ex, runner, _kv = executor_factory()
+    exits = []
+    monkeypatch.setattr("loom_worker.vllm_stage.executor.os._exit", exits.append)
+
+    def dead_device(**kwargs):
+        raise RuntimeError("CUDA error: an illegal instruction was encountered")
+
+    runner.execute_model = dead_device
+    with pytest.raises(RuntimeError, match="illegal instruction"):
+        ex.forward(request_id="doomed", positions=[0], input_ids=[1])
+    assert exits == [70], "the stage must not linger with a dead context"
+
+
+def test_an_ordinary_failure_does_not_kill_the_stage(executor_factory, monkeypatch):
+    """Only device-level damage is fatal; a bad request is just an error."""
+    ex, runner, _kv = executor_factory()
+    exits = []
+    monkeypatch.setattr("loom_worker.vllm_stage.executor.os._exit", exits.append)
+
+    def ordinary(**kwargs):
+        raise ValueError("prompt too long")
+
+    runner.execute_model = ordinary
+    with pytest.raises(ValueError):
+        ex.forward(request_id="bad", positions=[0], input_ids=[1])
+    assert exits == [], "the stage keeps serving after a request-level error"

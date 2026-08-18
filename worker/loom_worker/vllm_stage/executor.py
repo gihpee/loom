@@ -23,6 +23,7 @@ activations go next, and how tokens are sampled.
 from __future__ import annotations
 
 import logging
+import os
 import threading
 import time
 from dataclasses import dataclass, field
@@ -63,6 +64,19 @@ class VllmStageExecutor:
         self.spec = _SpecView(config)
         self._requests: Dict[str, StageRequest] = {}
         self._lock = threading.RLock()
+        # ONE engine, ONE caller at a time. vLLM's model runner keeps a single
+        # set of persistent buffers — the input batch, the positions, the
+        # landing buffer — and enters a process-wide forward context around the
+        # model call. The stage server hands each inter-stage message to its
+        # own thread, so two overlapping requests ran execute_model
+        # concurrently: one thread's context exit cleared the global while the
+        # other was still inside the model, which surfaced as "Forward context
+        # is not set" and then, once attention had run on clobbered metadata,
+        # as an illegal instruction that poisons the CUDA context for good.
+        #
+        # Concurrency for this engine has to come from batching several
+        # requests into ONE execute_model call, never from calling it twice.
+        self._engine_lock = threading.RLock()
         self._prepare_incoming_buffer()
 
     def _prepare_incoming_buffer(self) -> None:
@@ -108,7 +122,7 @@ class VllmStageExecutor:
         with self._lock:
             return len(self._requests)
 
-    def free(self, request_id: str) -> None:
+    def free(self, request_id: str) -> None:  # noqa: D401 - see below
         """Release the request's KV blocks back to the pool.
 
         Unlike a per-request contiguous cache, blocks freed here are
@@ -119,15 +133,18 @@ class VllmStageExecutor:
             state = self._requests.pop(request_id, None)
         if state is None:
             return
-        try:
-            if state.vllm_request is not None:
-                self.kv_manager.free(state.vllm_request)
-        except Exception:
-            logger.exception("freeing KV blocks for %s failed", request_id)
-        try:
-            self.runner.requests.pop(request_id, None)
-        except Exception:
-            pass
+        # Under the engine lock: releasing blocks and dropping the runner's
+        # record of the request must not overlap a forward.
+        with self._engine_lock:
+            try:
+                if state.vllm_request is not None:
+                    self.kv_manager.free(state.vllm_request)
+            except Exception:
+                logger.exception("freeing KV blocks for %s failed", request_id)
+            try:
+                self.runner.requests.pop(request_id, None)
+            except Exception:
+                pass
 
     def forward(
         self,
@@ -166,31 +183,62 @@ class VllmStageExecutor:
         if is_prefill:
             state.token_ids = list(token_ids)
 
-        outputs = self.runner.execute_model(
-            scheduler_output=scheduler_output,
-            intermediate_tensors=intermediate,
-        )
-        state.generated += 1
-
-        if not self.spec.is_last:
-            # A non-final stage gets IntermediateTensors back — every tensor in
-            # it belongs to the next stage, not just the hidden states.
-            return self._outgoing_tensors(outputs), None
-
-        # The final stage returns None and parks its result: logits live in
-        # `execute_model_state` until sample_tokens() consumes it. Reading the
-        # logits and then NOT calling sample_tokens would make the next step
-        # fail with "State error", so the pair is done here, together.
-        state_after = getattr(self.runner, "execute_model_state", None)
-        logits = getattr(state_after, "logits", None) if state_after is not None else None
-        if logits is None:
-            logits = self._extract_logits(outputs)
-        else:
+        # One step = one exclusive turn with the engine, sampling included:
+        # execute_model parks its result and sample_tokens consumes it, so a
+        # second caller slipping between them would take the wrong logits.
+        with self._engine_lock:
             try:
-                self.runner.sample_tokens(None)  # clears the parked state
-            except Exception:
-                logger.exception("sample_tokens failed; the next step may refuse to run")
-        return None, self._last_position_logits(logits)
+                outputs = self.runner.execute_model(
+                    scheduler_output=scheduler_output,
+                    intermediate_tensors=intermediate,
+                )
+                state.generated += 1
+
+                if not self.spec.is_last:
+                    # A non-final stage gets IntermediateTensors back — every
+                    # tensor in it belongs to the next stage, not just the
+                    # hidden states.
+                    return self._outgoing_tensors(outputs), None
+
+                # The final stage returns None and parks its result: logits
+                # live in `execute_model_state` until sample_tokens() consumes
+                # it. Reading them and NOT calling sample_tokens makes the NEXT
+                # step fail with "State error", so the pair is done together.
+                parked = getattr(self.runner, "execute_model_state", None)
+                logits = getattr(parked, "logits", None) if parked is not None else None
+                if logits is None:
+                    logits = self._extract_logits(outputs)
+                else:
+                    self.runner.sample_tokens(None)  # clears the parked state
+                return None, self._last_position_logits(logits)
+            except BaseException as exc:
+                self._fail_fast_on_dead_device(exc)
+                raise
+
+    def _fail_fast_on_dead_device(self, exc: BaseException) -> None:
+        """Leave the process when the CUDA context can no longer be trusted.
+
+        An illegal memory access or illegal instruction kills the context, not
+        just the request: every later call on this device fails the same way,
+        so a stage that keeps running only serves errors. Exiting hands the
+        problem to machinery that already handles it — the agent notices the
+        backend died, reports the shard failed, and the orchestrator re-places
+        it on a fresh process.
+        """
+        message = str(exc)
+        fatal = (
+            "an illegal instruction" in message
+            or "an illegal memory access" in message
+            or "CUDA error: unspecified launch failure" in message
+        )
+        if not fatal:
+            return
+        logger.critical(
+            "CUDA context is unusable (%s); exiting so the stage is restarted "
+            "instead of serving errors",
+            message.splitlines()[0] if message else exc,
+        )
+        os._exit(70)
 
     def sample(
         self,

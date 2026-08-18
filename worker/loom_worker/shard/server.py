@@ -96,6 +96,30 @@ def _decode_tensor(executor: ShardExecutor, payload: dict):
     )
 
 
+# ---------------------------------------------------------------- stage inbox
+# Every inter-stage message is handled by ONE worker thread, in arrival order.
+#
+# This used to be a thread per message, which is what killed a live stage: the
+# inference engine holds one set of persistent buffers and a process-wide
+# forward context, so two steps running at once left one of them reading
+# metadata the other had already torn down — "Forward context is not set",
+# followed by an illegal instruction that poisons the CUDA context for good.
+# Throughput has to come from batching several sequences into one engine step,
+# never from calling the engine twice at the same time.
+STAGE_INBOX: "queue.Queue[dict]" = queue.Queue()
+
+
+def stage_inbox_loop() -> None:
+    while True:
+        msg = STAGE_INBOX.get()
+        try:
+            handle_stage_message(msg)
+        except Exception:
+            logger.exception("stage message failed: %s", msg.get("kind"))
+        finally:
+            STAGE_INBOX.task_done()
+
+
 # ------------------------------------------------------------------- stage step
 def handle_stage_message(msg: dict) -> None:
     """Process one inter-stage message on this stage."""
@@ -505,11 +529,9 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if self.path == "/stage/forward":
-            # Run off the HTTP thread: a stage step can take a while and the
-            # agent should not block on it.
-            threading.Thread(
-                target=handle_stage_message, args=(payload,), daemon=True
-            ).start()
+            # Off the HTTP thread (a step can take a while and the agent should
+            # not block on it), but onto ONE queue, not a thread per message.
+            STAGE_INBOX.put(payload)
             self._json(202, {"accepted": True})
             return
 
@@ -759,6 +781,7 @@ def main(argv=None) -> None:
     # Serve /health immediately so the agent can watch progress while weights load.
     server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
     threading.Thread(target=server.serve_forever, name="stage-http", daemon=True).start()
+    threading.Thread(target=stage_inbox_loop, name="stage-inbox", daemon=True).start()
 
     spec = ShardSpec(
         model_path="",  # filled in below, once the weights are on disk
