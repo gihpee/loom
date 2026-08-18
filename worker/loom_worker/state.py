@@ -28,6 +28,9 @@ class PipelineRole:
     num_stages: int = 1
     is_first: bool = True
     is_last: bool = True
+    # Depth of the WHOLE model. A stage knows its own range; engines that build
+    # their own slice (vLLM) also need to know where the model ends.
+    num_model_layers: int = 0
 
     @property
     def is_multi_stage(self) -> bool:

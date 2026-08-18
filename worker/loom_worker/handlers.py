@@ -102,6 +102,7 @@ class CommandHandlers:
             num_stages=max(1, topo.num_stages),
             is_first=topo.is_first if topo.num_stages else True,
             is_last=topo.is_last if topo.num_stages else True,
+            num_model_layers=int(topo.num_model_layers or 0),
         )
         spec = ShardSpec(
             model_id=req.model_id,
@@ -135,7 +136,7 @@ class CommandHandlers:
             self._teardown(req.model_id, existing, to_status=ShardStatus.STOPPED)
         try:
             backend_kwargs = dict(self.backend_kwargs.get(spec.backend_type, {}))
-            if spec.backend_type == "shard":
+            if spec.backend_type in ("shard", "vllm_shard"):
                 # The stage needs to know its place in the pipeline and where to
                 # hand off activations (the agent's loopback relay).
                 backend_kwargs.setdefault("device", self.device)
@@ -145,6 +146,7 @@ class CommandHandlers:
                     "num_stages": role.num_stages,
                     "is_first": role.is_first,
                     "is_last": role.is_last,
+                    "num_model_layers": role.num_model_layers,
                 }
                 backend_kwargs["relay_url"] = self.relay_url or ""
             backend = make_backend(

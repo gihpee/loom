@@ -631,6 +631,41 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.flush()
 
 
+def _build_vllm_executor(args, spec):
+    """Stand up the vLLM engine for this stage and return (executor, config).
+
+    Imported lazily: the transformers engine must keep working in images that
+    have no vLLM at all (and on CPU, where it cannot even be imported).
+    """
+    from transformers import AutoConfig
+
+    from loom_worker.vllm_stage.executor import VllmStageExecutor
+    from loom_worker.vllm_stage.runtime import (
+        build_kv_cache,
+        build_stage_runner,
+        stage_config_from_env,
+    )
+
+    config = AutoConfig.from_pretrained(spec.model_path)
+    if hasattr(config, "text_config"):
+        config = config.text_config
+    num_layers = args.num_model_layers or int(getattr(config, "num_hidden_layers"))
+    dtype = args.dtype if args.dtype in ("bfloat16", "float16") else "bfloat16"
+
+    runtime_config = stage_config_from_env(
+        model_path=spec.model_path,
+        start_layer=args.start_layer,
+        end_layer=args.end_layer,
+        num_layers=num_layers,
+        dtype=dtype,
+        vram_quota_bytes=args.vram_quota_bytes or None,
+    )
+    runner, vllm_config = build_stage_runner(runtime_config)
+    kv_manager, kv_cache_config = build_kv_cache(runner, vllm_config, runtime_config)
+    executor = VllmStageExecutor(runner, kv_manager, kv_cache_config, runtime_config)
+    return executor, config
+
+
 def _watch_parent(poll_s: float = 2.0) -> None:
     """Exit if the agent that spawned us is gone.
 
@@ -675,6 +710,25 @@ def main(argv=None) -> None:
     parser.add_argument(
         "--stage-timeout-s", type=float, default=float(os.environ.get("LOOM_STAGE_TIMEOUT_S", "120"))
     )
+    parser.add_argument(
+        "--engine",
+        choices=("torch", "vllm"),
+        default=os.environ.get("LOOM_STAGE_ENGINE", "torch"),
+        help="what runs the layers: transformers (portable) or vLLM (fast, CUDA only)",
+    )
+    parser.add_argument(
+        "--num-model-layers",
+        type=int,
+        default=int(os.environ.get("LOOM_NUM_MODEL_LAYERS", "0")),
+        help="layers in the whole model; the vLLM engine needs it to know if "
+        "this stage is the tail",
+    )
+    parser.add_argument(
+        "--vram-quota-bytes",
+        type=int,
+        default=int(os.environ.get("LOOM_VRAM_QUOTA_BYTES", "0")),
+        help="broker-granted share of the card, converted to vLLM's utilisation",
+    )
     args = parser.parse_args(argv)
 
     logging.basicConfig(
@@ -710,10 +764,16 @@ def main(argv=None) -> None:
         device=args.device,
         dtype=args.dtype,
     )
-    # Fetch only the safetensors files this stage's layers live in.
-    spec.model_path = resolve_model_path(args.weights_uri, shard=spec)
-    shard, config = build_shard(spec)
-    STATE["executor"] = ShardExecutor(shard)
+    if args.engine == "vllm":
+        # vLLM reads the checkpoint itself and needs the whole directory: it
+        # builds its own layer slice from the full weight index.
+        spec.model_path = resolve_model_path(args.weights_uri)
+        STATE["executor"], config = _build_vllm_executor(args, spec)
+    else:
+        # Fetch only the safetensors files this stage's layers live in.
+        spec.model_path = resolve_model_path(args.weights_uri, shard=spec)
+        shard, config = build_shard(spec)
+        STATE["executor"] = ShardExecutor(shard)
 
     if is_first or is_last:
         from transformers import AutoTokenizer

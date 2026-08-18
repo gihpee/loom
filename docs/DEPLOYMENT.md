@@ -286,6 +286,11 @@ curl -s localhost:8000/admin/models_view -H "X-Loom-Admin-Token: $LOOM_ADMIN_TOK
   Грубая оценка: `≈ 2 × RTT(воркер↔оркестратор)` на каждый переход. Держите
   узлы и оркестратор в одном регионе; 100 мс RTT — это уже единицы токенов в
   секунду.
+- **Есть более быстрый движок стадии.** `backend_type: "vllm_shard"` исполняет
+  слои на vLLM (paged attention, CUDA-графы) вместо transformers; нужен образ
+  `gihpee/loomworker-vllm` (`scripts/build_worker.sh --vllm`) и CUDA-узлы.
+  Механизм и порядок проверки — [VLLM_PIPELINE.md](VLLM_PIPELINE.md), готовый
+  каталог — `configs/catalog-qwen3-14b-vllm.json`.
 - **Скорость ниже, чем у vLLM**: shard-исполнитель на transformers, без paged
   attention и continuous batching, одна последовательность на запрос. Для
   моделей, влезающих на одну карту, оставляйте `"backend_type": "vllm"` — он

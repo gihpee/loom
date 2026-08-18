@@ -32,7 +32,14 @@ curl -s localhost:8010/admin/models_view | python3 -m json.tool
 ```bash
 bash scripts/build_worker.sh          # локально, под архитектуру этой машины
 bash scripts/build_worker.sh --push   # linux/amd64 в реестр (для GPU-хостов)
+bash scripts/build_worker.sh --vllm   # образ с vLLM-движком стадий (CUDA)
 ```
+
+Два образа отличаются только тем, чем считается стадия пайплайна:
+`gihpee/loomworker` — transformers (работает везде, включая CPU и Apple),
+`gihpee/loomworker-vllm` — vLLM с paged-кэшем и CUDA-графами
+([docs/VLLM_PIPELINE.md](docs/VLLM_PIPELINE.md)). Пул может состоять из тех и
+других одновременно.
 
 Образ должен быть той же архитектуры, что GPU-машины: собранный на Apple Silicon
 `arm64`-образ не запустится на `amd64`-сервере.

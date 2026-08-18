@@ -10,14 +10,18 @@ from loom_worker.backends.mlx import MlxBackend
 from loom_worker.backends.shard import ShardBackend
 from loom_worker.backends.sglang import SglangBackend
 from loom_worker.backends.vllm import VllmBackend
+from loom_worker.backends.vllm_shard import VllmShardBackend
 
 BACKENDS = {
     "vllm": VllmBackend,
     "sglang": SglangBackend,
     "mlx": MlxBackend,
-    # The only backend that can serve a PART of a model, i.e. run one stage of
-    # a pipeline spread over several nodes.
+    # The two backends that can serve a PART of a model, i.e. one stage of a
+    # pipeline spread over several nodes: `shard` runs the layers on
+    # transformers (portable, CPU included), `vllm_shard` on vLLM (CUDA only,
+    # paged KV cache and CUDA graphs).
     "shard": ShardBackend,
+    "vllm_shard": VllmShardBackend,
     # Test-only stub: lets the control plane and API be exercised end-to-end on
     # hosts without GPUs. Not a production backend.
     "echo": EchoBackend,
@@ -38,6 +42,7 @@ __all__ = [
     "SglangBackend",
     "MlxBackend",
     "ShardBackend",
+    "VllmShardBackend",
     "EchoBackend",
     "BACKENDS",
     "make_backend",

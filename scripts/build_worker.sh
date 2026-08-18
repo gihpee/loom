@@ -2,6 +2,7 @@
 # Build (and optionally push) the public worker image.
 #
 #   scripts/build_worker.sh                 # build for THIS machine, load locally
+#   scripts/build_worker.sh --vllm          # image with the vLLM stage engine
 #   scripts/build_worker.sh --push          # build linux/amd64 and push
 #   scripts/build_worker.sh --push --platform linux/amd64,linux/arm64
 #
@@ -22,7 +23,14 @@ while [ $# -gt 0 ]; do
     --platform) PLATFORM="$2"; shift 2 ;;
     --image) IMAGE="$2"; shift 2 ;;
     --cpu) DOCKERFILE="worker/Dockerfile.shard"; shift ;;
-    -h|--help) sed -n '2,12p' "$0"; exit 0 ;;
+    # Stages run on vLLM instead of transformers (CUDA only, see
+    # docs/VLLM_PIPELINE.md). Separate image and tag: it pins the vLLM release
+    # its engine patches were tested against.
+    --vllm)
+      DOCKERFILE="docker/worker.vllm.Dockerfile"
+      IMAGE="${LOOM_WORKER_VLLM_IMAGE:-gihpee/loomworker-vllm:latest}"
+      shift ;;
+    -h|--help) sed -n '2,13p' "$0"; exit 0 ;;
     *) echo "unknown option: $1"; exit 2 ;;
   esac
 done

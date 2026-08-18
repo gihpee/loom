@@ -187,8 +187,9 @@ async function viewModels() {
   return `<h2>Развернуть модель (архитектура определяется автоматически)</h2>
     <p><input id="m-repo" type="text" placeholder="HuggingFace repo, напр. Qwen/Qwen3-32B" style="width:320px">
        <select id="m-backend">
-         <option value="shard">shard — можно резать по слоям между узлами</option>
-         <option value="vllm">vllm — быстрее, но модель должна влезть на одну карту</option>
+         <option value="shard">shard — режется по слоям между узлами (transformers)</option>
+         <option value="vllm_shard">vllm_shard — то же, но слои считает vLLM (нужен образ loomworker-vllm)</option>
+         <option value="vllm">vllm — быстрее всех, но модель должна влезть на одну карту</option>
        </select>
        prio <input id="m-prio" type="text" value="1" style="width:50px">
        реплик <input id="m-k" type="text" value="1" style="width:50px">
