@@ -144,6 +144,14 @@ def build_stage_runner(config: StageRuntimeConfig):
             "worker-vllm image (see docs/VLLM_PIPELINE.md)"
         ) from exc
 
+    try:
+        from vllm.config import set_current_vllm_config
+    except ImportError as exc:  # pragma: no cover - requires vLLM
+        raise VllmIntegrationError(
+            "vllm.config.set_current_vllm_config is missing; the stage cannot "
+            "publish its config to vLLM's globals"
+        ) from exc
+
     device = torch.device("cuda:0")
     torch.cuda.set_device(device)
 
@@ -199,13 +207,26 @@ def build_stage_runner(config: StageRuntimeConfig):
         load_config=_construct(LoadConfig, load_format="auto"),
     )
 
+    # vLLM keeps "the config in force" in a global, and reads it in places that
+    # look unrelated: initialize_model_parallel() asks for it, and so do custom
+    # ops during forward. The stage process serves exactly one model, so the
+    # context is entered once and never left — closing it would break inference
+    # later with "Current vLLM config is not set".
+    config_scope = set_current_vllm_config(vllm_config)
+    config_scope.__enter__()
+
     if not parallel_state.model_parallel_is_initialized():
+        # A stage is a world of one. The rendezvous is local and exists only
+        # because vLLM's model code expects a torch.distributed group to be
+        # there; no traffic ever crosses it.
         os.environ.setdefault("RANK", "0")
         os.environ.setdefault("WORLD_SIZE", "1")
         os.environ.setdefault("LOCAL_RANK", "0")
         os.environ.setdefault("MASTER_ADDR", "127.0.0.1")
         os.environ.setdefault("MASTER_PORT", os.environ.get("LOOM_VLLM_NCCL_PORT", "29591"))
-        parallel_state.init_distributed_environment()
+        # Explicit values instead of the env:// guessing vLLM logs as
+        # "world_size=-1 rank=-1"; the backend stays vLLM's own default.
+        parallel_state.init_distributed_environment(world_size=1, rank=0, local_rank=0)
         parallel_state.initialize_model_parallel(
             tensor_model_parallel_size=1, pipeline_model_parallel_size=1
         )
@@ -220,6 +241,7 @@ def build_stage_runner(config: StageRuntimeConfig):
     runner = GPUModelRunner(vllm_config=vllm_config, device=device)
     with layer_range_for_model_build(config.start_layer, config.end_layer):
         runner.load_model()
+    runner._loom_config_scope = config_scope  # keep it alive for the process
     logger.info(
         "vLLM stage loaded: layers [%d, %d) of %d (first=%s last=%s, dtype=%s)",
         config.start_layer,
@@ -263,9 +285,15 @@ def build_kv_cache(runner, vllm_config, config: StageRuntimeConfig):
     kv_cache_config = generate_scheduler_kv_cache_config(kv_cache_configs)
     runner.initialize_kv_cache(kv_cache_config)
 
-    manager = KVCacheManager(
+    manager = _construct(
+        KVCacheManager,
+        required=("kv_cache_config", "max_model_len"),
         kv_cache_config=kv_cache_config,
         max_model_len=config.max_model_len,
+        # Both are mandatory in 0.27 and have no defaults: the scheduler's view
+        # of a block and the block size used for prefix hashing.
+        scheduler_block_size=config.kv_block_size,
+        hash_block_size=config.kv_block_size,
         enable_caching=False,
         use_eagle=False,
         log_stats=False,

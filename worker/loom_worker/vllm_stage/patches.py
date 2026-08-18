@@ -152,7 +152,6 @@ def install_stage_pipeline_group(*, start_layer: int, end_layer: int, num_layers
     """
     try:
         import vllm.distributed.parallel_state as parallel_state
-        from vllm.distributed.parallel_state import GroupCoordinator
     except ImportError as exc:  # pragma: no cover - requires vLLM
         raise VllmIntegrationError(
             "vllm.distributed.parallel_state is not importable; the pipeline "
@@ -166,8 +165,12 @@ def install_stage_pipeline_group(*, start_layer: int, end_layer: int, num_layers
             "initialize_model_parallel()"
         )
 
-    class StagePipelineGroup(GroupCoordinator):
-        """A one-process PP group whose position is the layer range it serves."""
+    # Retag the EXISTING group rather than building a second one. Constructing
+    # a GroupCoordinator re-enters torch.distributed and registers another
+    # group; all we actually need is for two properties to answer differently,
+    # and those live on the class.
+    class StagePipelineGroup(type(group)):
+        """The live PP group, with its position taken from the layer range."""
 
         @property
         def is_first_rank(self) -> bool:
@@ -177,18 +180,9 @@ def install_stage_pipeline_group(*, start_layer: int, end_layer: int, num_layers
         def is_last_rank(self) -> bool:
             return end_layer >= num_layers
 
-    import torch
-
-    parallel_state._PP = StagePipelineGroup(
-        group_ranks=[group.ranks],
-        local_rank=group.local_rank,
-        torch_distributed_backend=torch.distributed.get_backend(group.device_group),
-        use_device_communicator=group.use_device_communicator,
-        use_message_queue_broadcaster=getattr(group, "mq_broadcaster", None) is not None,
-        group_name="pp",
-    )
+    group.__class__ = StagePipelineGroup
     logger.info(
-        "pipeline group installed: layers [%d, %d) of %d -> first=%s last=%s",
+        "pipeline group retagged: layers [%d, %d) of %d -> first=%s last=%s",
         start_layer,
         end_layer,
         num_layers,

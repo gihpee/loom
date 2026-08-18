@@ -45,6 +45,8 @@ class StageRequest:
     generated: int = 0
     registered: bool = False
     vllm_request: object = None
+    # Full token history: 0.27's CachedRequestData wants it for the connector.
+    token_ids: List[int] = field(default_factory=list)
 
 
 class VllmStageExecutor:
@@ -122,6 +124,9 @@ class VllmStageExecutor:
         else:
             scheduler_output = self._decode_batch(state, token_ids)
 
+        if is_prefill:
+            state.token_ids = list(token_ids)
+
         outputs = self.runner.execute_model(
             scheduler_output=scheduler_output,
             intermediate_tensors=intermediate,
@@ -129,10 +134,24 @@ class VllmStageExecutor:
         state.generated += 1
 
         if not self.spec.is_last:
-            hidden_states = self._extract_hidden(outputs)
-            return hidden_states, None
-        logits = self._extract_logits(outputs)
-        return None, logits
+            # A non-final stage gets IntermediateTensors back — every tensor in
+            # it belongs to the next stage, not just the hidden states.
+            return self._outgoing_tensors(outputs), None
+
+        # The final stage returns None and parks its result: logits live in
+        # `execute_model_state` until sample_tokens() consumes it. Reading the
+        # logits and then NOT calling sample_tokens would make the next step
+        # fail with "State error", so the pair is done here, together.
+        state_after = getattr(self.runner, "execute_model_state", None)
+        logits = getattr(state_after, "logits", None) if state_after is not None else None
+        if logits is None:
+            logits = self._extract_logits(outputs)
+        else:
+            try:
+                self.runner.sample_tokens(None)  # clears the parked state
+            except Exception:
+                logger.exception("sample_tokens failed; the next step may refuse to run")
+        return None, self._last_position_logits(logits)
 
     def sample(
         self,
@@ -169,42 +188,83 @@ class VllmStageExecutor:
             generator = torch.Generator(device=probs.device).manual_seed(seed)
         return int(torch.multinomial(probs, 1, generator=generator).item())
 
-    def serialize(self, tensor) -> Tuple[bytes, List[int], str]:
+    # ------------------------------------------------------------- the wire
+    # The envelope between stages carries one tensor, a shape and a dtype
+    # string. A vLLM stage has to move a NAMED SET of tensors instead, so the
+    # set is stacked along a new leading axis and the names ride in the dtype
+    # field: "float32|hidden_states,residual". The transport, the relay and the
+    # orchestrator stay untouched, and a torch-engine pipeline is unaffected
+    # because it never produces a set.
+    WIRE_SEPARATOR = "|"
+
+    def serialize(self, payload) -> Tuple[bytes, List[int], str]:
         torch = self.torch
-        t = tensor.detach().to("cpu", dtype=torch.float32).contiguous()
-        return t.numpy().tobytes(), list(t.shape), "float32"
+        tensors = getattr(payload, "tensors", None)
+        if not isinstance(tensors, dict):
+            flat = payload.detach().to("cpu", dtype=torch.float32).contiguous()
+            return flat.numpy().tobytes(), list(flat.shape), "float32"
+
+        names = list(tensors)
+        stacked = torch.stack(
+            [tensors[name].detach().to("cpu", dtype=torch.float32).contiguous()
+             for name in names]
+        ).contiguous()
+        return (
+            stacked.numpy().tobytes(),
+            list(stacked.shape),
+            "float32" + self.WIRE_SEPARATOR + ",".join(names),
+        )
 
     def deserialize(self, data: bytes, shape: List[int], dtype: str):
         torch = self.torch
+        name, _, joined = dtype.partition(self.WIRE_SEPARATOR)
         by_name = {"float32": torch.float32, "float16": torch.float16, "bfloat16": torch.bfloat16}
-        wire = by_name.get(dtype, torch.float32)
-        flat = torch.frombuffer(bytearray(data), dtype=wire)
-        return flat.reshape(tuple(shape))
+        wire = by_name.get(name, torch.float32)
+        flat = torch.frombuffer(bytearray(data), dtype=wire).reshape(tuple(shape))
+        if not joined:
+            return flat
+        from vllm.sequence import IntermediateTensors
+
+        names = joined.split(",")
+        return IntermediateTensors({n: flat[i] for i, n in enumerate(names)})
 
     # -------------------------------------------------------------- internals
-    def _as_intermediate_tensors(self, hidden):
-        """Wrap incoming activations the way vLLM's forward expects them."""
+    def _as_intermediate_tensors(self, incoming):
+        """Put what arrived on this device, in this model's dtype."""
         from vllm.sequence import IntermediateTensors
 
         torch = self.torch
-        h = hidden
-        if h.dim() == 3:  # (batch, tokens, hidden) -> vLLM works on flat tokens
-            h = h.reshape(-1, h.shape[-1])
         device = getattr(self.runner, "device", None)
         dtype = getattr(getattr(self.runner, "model_config", None), "dtype", None)
-        h = h.to(device=device, dtype=dtype or torch.bfloat16)
-        return IntermediateTensors({"hidden_states": h})
+        dtype = dtype if isinstance(dtype, torch.dtype) else torch.bfloat16
+
+        def prepare(tensor):
+            # vLLM works on a flat token axis; a (batch, tokens, hidden) tensor
+            # from a torch-engine peer is folded down to it.
+            if tensor.dim() == 3:
+                tensor = tensor.reshape(-1, tensor.shape[-1])
+            return tensor.to(device=device, dtype=dtype)
+
+        tensors = getattr(incoming, "tensors", None)
+        if isinstance(tensors, dict):
+            return IntermediateTensors({k: prepare(v) for k, v in tensors.items()})
+        return IntermediateTensors({"hidden_states": prepare(incoming)})
 
     def _new_vllm_request(self, state: StageRequest, token_ids: List[int]):
         from vllm.sampling_params import SamplingParams
         from vllm.v1.request import Request as VllmRequest
 
-        return VllmRequest(
+        from loom_worker.vllm_stage.runtime import _construct
+
+        # Sampling happens on Loom's side; this object exists so the KV cache
+        # manager has something to account blocks against.
+        return _construct(
+            VllmRequest,
+            required=("request_id", "prompt_token_ids"),
             request_id=state.request_id,
             prompt_token_ids=token_ids,
             sampling_params=SamplingParams(max_tokens=1),
             pooling_params=None,
-            eos_token_id=None,
             arrival_time=state.created_at,
             block_hasher=getattr(self.runner, "request_block_hasher", None),
         )
@@ -229,7 +289,11 @@ class VllmStageExecutor:
                 f"LOOM_MAX_REQUESTS or LOOM_MAX_MODEL_LEN on this worker"
             )
 
-        new_request = NewRequestData(
+        from loom_worker.vllm_stage.runtime import _construct
+
+        new_request = _construct(
+            NewRequestData,
+            required=("req_id", "block_ids", "num_computed_tokens"),
             req_id=state.request_id,
             prompt_token_ids=token_ids,
             mm_features=[],
@@ -240,7 +304,9 @@ class VllmStageExecutor:
             lora_request=None,
             prompt_embeds=None,
         )
-        return SchedulerOutput(
+        return _construct(
+            SchedulerOutput,
+            required=("scheduled_new_reqs", "num_scheduled_tokens"),
             scheduled_new_reqs=[new_request],
             scheduled_cached_reqs=CachedRequestData.make_empty(),
             num_scheduled_tokens={state.request_id: len(token_ids)},
@@ -250,7 +316,6 @@ class VllmStageExecutor:
             num_common_prefix_blocks=[0] * len(self.kv_cache_config.kv_cache_groups),
             finished_req_ids=set(),
             free_encoder_mm_hashes=[],
-            kv_connector_metadata=None,
         )
 
     def _decode_batch(self, state: StageRequest, token_ids: List[int]):
@@ -269,15 +334,24 @@ class VllmStageExecutor:
                 f"request {state.request_id} ran out of KV blocks at "
                 f"{computed} tokens; raise LOOM_MAX_MODEL_LEN or shorten the context"
             )
-        cached = CachedRequestData(
+        from loom_worker.vllm_stage.runtime import _construct
+
+        state.token_ids.extend(token_ids[-1:])
+        cached = _construct(
+            CachedRequestData,
+            required=("req_ids", "new_block_ids", "num_computed_tokens"),
             req_ids=[state.request_id],
-            resumed_from_preemption=[False],
+            # A set of ids in 0.27, not a per-request flag list.
+            resumed_req_ids=set(),
             new_token_ids=[token_ids[-1:]],
+            all_token_ids={state.request_id: list(state.token_ids)},
             new_block_ids=[blocks.get_block_ids()],
             num_computed_tokens=[computed],
             num_output_tokens=[state.generated],
         )
-        return SchedulerOutput(
+        return _construct(
+            SchedulerOutput,
+            required=("scheduled_cached_reqs", "num_scheduled_tokens"),
             scheduled_new_reqs=[],
             scheduled_cached_reqs=cached,
             num_scheduled_tokens={state.request_id: 1},
@@ -287,39 +361,48 @@ class VllmStageExecutor:
             num_common_prefix_blocks=[0] * len(self.kv_cache_config.kv_cache_groups),
             finished_req_ids=set(),
             free_encoder_mm_hashes=[],
-            kv_connector_metadata=None,
         )
 
-    def _extract_hidden(self, outputs):
-        """Hidden states for the next stage, whatever shape vLLM returned them in."""
-        for attr in ("hidden_states", "last_hidden_state"):
-            value = getattr(outputs, attr, None)
-            if value is not None:
-                return value
-        if isinstance(outputs, dict) and "hidden_states" in outputs:
-            return outputs["hidden_states"]
-        if isinstance(outputs, (tuple, list)) and outputs:
-            return outputs[0]
+    def _outgoing_tensors(self, outputs):
+        """What the next stage must receive.
+
+        Llama-family models (Qwen3 included) carry BOTH `hidden_states` and
+        `residual` between stages: the residual stream is fused across layers,
+        and a stage handed only the hidden states would silently compute
+        something else. So whatever vLLM put in IntermediateTensors travels on
+        — the wire format below carries a named set, not one tensor.
+        """
+        tensors = getattr(outputs, "tensors", None)
+        if isinstance(tensors, dict) and tensors:
+            return outputs
+        if isinstance(outputs, dict) and outputs:
+            from vllm.sequence import IntermediateTensors
+
+            return IntermediateTensors(dict(outputs))
         raise RuntimeError(
-            "vLLM returned no hidden states for a middle stage; the pipeline "
-            "group patch is the first thing to check (see docs/VLLM_PIPELINE.md)"
+            "vLLM returned no intermediate tensors for a middle stage; the "
+            "pipeline group patch is what makes it do that "
+            "(see docs/VLLM_PIPELINE.md §3.3)"
         )
 
-    def _extract_logits(self, outputs):
-        """Logits of the last position, as the last stage needs for sampling."""
-        logits = getattr(outputs, "logits", None)
-        if logits is None and isinstance(outputs, dict):
-            logits = outputs.get("logits")
+    def _last_position_logits(self, logits):
         if logits is None:
             raise RuntimeError(
-                "vLLM returned no logits on the last stage; is_last_rank must be "
-                "True there (see docs/VLLM_PIPELINE.md)"
+                "vLLM produced no logits on the last stage; is_last_rank must "
+                "be True there (see docs/VLLM_PIPELINE.md §3.3)"
             )
         if logits.dim() == 3:
             logits = logits[0, -1]
         elif logits.dim() == 2:
             logits = logits[-1]
         return logits.float()
+
+    def _extract_logits(self, outputs):
+        """Fallback for releases where execute_model returns the logits itself."""
+        logits = getattr(outputs, "logits", None)
+        if logits is None and isinstance(outputs, dict):
+            logits = outputs.get("logits")
+        return logits
 
 
 class _SpecView:

@@ -55,26 +55,50 @@ class FakeKvManager:
 
 
 class FakeRunner:
+    """Mirrors vLLM 0.27's GPUModelRunner contract, which is unusual:
+
+    a non-final stage gets IntermediateTensors back, while the final one gets
+    None and parks its logits in `execute_model_state` until sample_tokens()
+    consumes them. Getting this wrong is not a crash but a hang on the NEXT
+    step ("State error"), so the fake reproduces it exactly.
+    """
+
     def __init__(self, *, is_last: bool, hidden_dim: int = 8, vocab: int = 32):
         self.is_last = is_last
         self.hidden_dim = hidden_dim
         self.vocab = vocab
         self.device = torch.device("cpu")
+        self.model_config = types.SimpleNamespace(dtype=torch.float32)
         self.requests = {}
         self.request_block_hasher = None
         self.seen = []
+        self.execute_model_state = None
+        self.sampled = 0
 
     def execute_model(self, *, scheduler_output, intermediate_tensors=None):
+        if self.execute_model_state is not None:
+            raise RuntimeError("State error: sample_tokens() must be called first")
         self.seen.append((scheduler_output, intermediate_tensors))
         tokens = scheduler_output.total_num_scheduled_tokens
-        out = types.SimpleNamespace()
         if self.is_last:
-            out.logits = torch.randn(tokens, self.vocab)
-            out.hidden_states = None
-        else:
-            out.hidden_states = torch.randn(tokens, self.hidden_dim)
-            out.logits = None
-        return out
+            self.execute_model_state = types.SimpleNamespace(
+                logits=torch.randn(tokens, self.vocab)
+            )
+            return None
+        from vllm.sequence import IntermediateTensors
+
+        # Llama-family models hand on the residual stream as well.
+        return IntermediateTensors(
+            {
+                "hidden_states": torch.randn(tokens, self.hidden_dim),
+                "residual": torch.randn(tokens, self.hidden_dim),
+            }
+        )
+
+    def sample_tokens(self, grammar_output):
+        self.sampled += 1
+        self.execute_model_state = None
+        return types.SimpleNamespace()
 
 
 def install_fake_vllm(monkeypatch):
@@ -99,8 +123,15 @@ def install_fake_vllm(monkeypatch):
         def __init__(self, **kw):
             self.__dict__.update(kw)
 
-    class IntermediateTensors(dict):
-        pass
+    class IntermediateTensors:
+        def __init__(self, tensors):
+            self.tensors = tensors
+
+        def __getitem__(self, key):
+            return self.tensors[key]
+
+        def items(self):
+            return self.tensors.items()
 
     class SchedulerOutput:
         def __init__(self, **kw):
@@ -177,7 +208,8 @@ def test_head_stage_prefills_then_decodes(executor_factory):
 
     hidden, logits = ex.forward(request_id="r1", positions=[0, 1, 2, 3], input_ids=prompt)
     assert logits is None, "a head that is not the tail returns hidden states"
-    assert hidden.shape[0] == len(prompt)
+    assert set(hidden.tensors) == {"hidden_states", "residual"}
+    assert hidden["hidden_states"].shape[0] == len(prompt)
     assert kv.calls[0] == ("allocate", "r1", len(prompt))
 
     ex.forward(request_id="r1", positions=[4], input_ids=[9])
@@ -201,13 +233,18 @@ def test_middle_stage_consumes_hidden_states(executor_factory):
     assert intermediate["hidden_states"].shape == (4, 8), "flattened to vLLM's token layout"
 
 
-def test_tail_stage_returns_logits_for_sampling(executor_factory):
-    ex, _runner, _kv = executor_factory(start=20, end=40, num_layers=40)
+def test_tail_stage_returns_logits_and_clears_the_parked_state(executor_factory):
+    """Reading the logits without sample_tokens() breaks the NEXT step."""
+    ex, runner, _kv = executor_factory(start=20, end=40, num_layers=40)
     hidden, logits = ex.forward(request_id="r3", positions=[0, 1], hidden=torch.randn(1, 2, 8))
     assert hidden is None
     assert logits.dim() == 1, "logits of the last position only"
     token = ex.sample(logits)
     assert isinstance(token, int) and 0 <= token < logits.shape[0]
+    assert runner.sampled == 1, "the parked state must be consumed"
+    assert runner.execute_model_state is None
+    # And the proof that it matters: a second step runs instead of refusing.
+    ex.forward(request_id="r3", positions=[2], hidden=torch.randn(1, 1, 8))
 
 
 def test_freeing_a_request_returns_its_blocks(executor_factory):
@@ -248,6 +285,29 @@ def test_activations_round_trip_through_the_wire_format(executor_factory):
     data, shape, dtype = ex.serialize(tensor)
     back = ex.deserialize(data, shape, dtype)
     assert torch.allclose(back, tensor, atol=1e-6)
+
+
+def test_the_residual_stream_survives_the_wire(executor_factory):
+    """Both tensors must reach the next stage, not just the hidden states.
+
+    Llama-family models fuse the residual across layers: a stage handed only
+    `hidden_states` computes something else entirely, and the answer would look
+    plausible while being wrong. The envelope carries one tensor, so the named
+    set is packed into it and the names ride in the dtype field.
+    """
+    from vllm.sequence import IntermediateTensors
+
+    ex, _runner, _kv = executor_factory()
+    payload = IntermediateTensors(
+        {"hidden_states": torch.randn(4, 8), "residual": torch.randn(4, 8)}
+    )
+    data, shape, dtype = ex.serialize(payload)
+    assert "hidden_states,residual" in dtype, "the names travel with the bytes"
+
+    back = ex.deserialize(data, shape, dtype)
+    assert set(back.tensors) == {"hidden_states", "residual"}
+    for name, tensor in payload.tensors.items():
+        assert torch.allclose(back[name], tensor, atol=1e-6), name
 
 
 # ------------------------------------------------------- wiring, no vLLM needed
