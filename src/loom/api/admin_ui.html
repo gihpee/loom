@@ -131,7 +131,12 @@ function renderTabs() {
   $("#tabs").innerHTML = TABS.map(t =>
     `<button class="${t===active?"active":""}" onclick="setTab('${t}')">${t}</button>`).join("");
 }
-function setTab(t) { active = t; localStorage.setItem("loom_tab", t); renderTabs(); refresh(); }
+function setTab(t) {
+  active = t;
+  localStorage.setItem("loom_tab", t);
+  renderTabs();
+  refresh({reset: true});
+}
 
 // ------------------------------------------------------------------ views
 async function viewNodes() {
@@ -219,7 +224,7 @@ async function deployModel() {
       `веса ~${s.weights_gb} GB · слоёв на карту: ` +
       Object.entries(s.layers_per_card).map(([k,v]) => `${k}=${v}`).join(", ") +
       ` (param_mem_ratio ${s.param_mem_ratio})`;
-    refresh();
+    refresh({reset: true});  // model added — start the form empty for the next one
   } catch (e) { lastDeploy = "error: " + e.message; $("#m-out").textContent = lastDeploy; }
 }
 async function removeModel(id) {
@@ -657,14 +662,51 @@ function renderHistory() {
 const VIEWS = {"Nodes":viewNodes, "Models":viewModels, "Keys":viewKeys,
                "Perf-map":viewPerfmap, "SLO / Rebalance":viewSlo, "Console":viewConsole};
 let timer = null;
-async function refresh() {
+
+function isEditing() {
+  // Is the user in a field right now? Re-rendering under their hands wipes a
+  // half-typed model name and snaps the dropdown back to its first option.
+  const el = document.activeElement;
+  if (!el || !el.closest || !el.closest("#view")) return false;
+  return ["INPUT", "SELECT", "TEXTAREA"].includes(el.tagName);
+}
+
+function formSnapshot() {
+  // Values keyed by element id, so they survive the innerHTML swap. Switching
+  // tabs is safe on its own: the ids of another view simply do not match.
+  const state = {};
+  document.querySelectorAll("#view input, #view select, #view textarea").forEach(el => {
+    if (!el.id) return;
+    state[el.id] = el.type === "checkbox" ? el.checked : el.value;
+  });
+  return state;
+}
+
+function restoreForm(state) {
+  document.querySelectorAll("#view input, #view select, #view textarea").forEach(el => {
+    if (!el.id || !(el.id in state)) return;
+    if (el.type === "checkbox") el.checked = state[el.id];
+    else el.value = state[el.id];
+  });
+}
+
+async function refresh(options) {
+  const opts = options || {};
   clearTimeout(timer);
+  // The auto-refresh must never fight the user for the keyboard.
+  if (opts.auto && isEditing()) {
+    $("#refreshed").textContent = "· пауза (ввод)";
+    timer = setTimeout(() => refresh({auto: true}), 3000);
+    return;
+  }
   try {
     $("#err").textContent = "";
+    const carried = opts.reset ? {} : formSnapshot();
     $("#view").innerHTML = await VIEWS[active]();
+    restoreForm(carried);
     $("#refreshed").textContent = "· " + new Date().toLocaleTimeString();
   } catch (e) { $("#err").textContent = e.message; }
-  if (active !== "Console") timer = setTimeout(refresh, 3000);
+  if (active !== "Console") timer = setTimeout(() => refresh({auto: true}), 3000);
 }
 renderTabs();
 refresh();

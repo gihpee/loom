@@ -86,3 +86,20 @@ def test_admin_views_respect_token(stack):
     assert ok.status_code == 200
     # The page itself is served without a token; it holds no data.
     assert call(stack, "get", "/admin/ui").status_code == 200
+
+
+def test_auto_refresh_does_not_fight_the_user_for_the_form():
+    """Typing a model name must survive the 3-second view refresh.
+
+    The Models and Keys tabs re-render on a timer, and the re-render replaces
+    the whole view — which used to wipe a half-typed HF repo and snap the
+    backend dropdown back to its first option, making the form unusable.
+    """
+    html = (Path(__file__).resolve().parent.parent / "src/loom/api/admin_ui.html").read_text()
+    # The timer yields while a field inside the view has focus...
+    assert "function isEditing()" in html
+    assert 'opts.auto && isEditing()' in html
+    # ...and values are carried across the swap for the moments it does render.
+    assert "function formSnapshot()" in html and "function restoreForm(" in html
+    # Switching tabs starts clean instead of inheriting another view's fields.
+    assert "refresh({reset: true})" in html
