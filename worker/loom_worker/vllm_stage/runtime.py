@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import os
 from dataclasses import dataclass
 from typing import Optional
@@ -43,8 +44,15 @@ class StageRuntimeConfig:
     gpu_memory_utilization: float = 0.85
     kv_block_size: int = 16
     max_num_seqs: int = 16
-    max_batched_tokens: int = 8192
-    enforce_eager: bool = False
+    max_batched_tokens: int = 4096
+    # Eager by default. vLLM's torch.compile pass allocated 1.45 GB for
+    # autotuning on the first request and OOMed a card that had already given
+    # its memory to weights and KV; it also stalls that request for minutes.
+    # Paged attention, FlashAttention and the fused kernels — the reasons to be
+    # on vLLM at all — do not depend on it.
+    enforce_eager: bool = True
+    # Kept aside for activations, workspaces and allocator fragmentation.
+    headroom_gb: float = 2.0
 
     @property
     def is_first(self) -> bool:
@@ -166,6 +174,7 @@ def build_stage_runner(config: StageRuntimeConfig):
         seed=0,
         max_model_len=config.max_model_len,
         max_logprobs=1,
+        enforce_eager=config.enforce_eager,
     )
     cache_config = _construct(
         CacheConfig,
@@ -257,10 +266,19 @@ def build_stage_runner(config: StageRuntimeConfig):
 def build_kv_cache(runner, vllm_config, config: StageRuntimeConfig):
     """Size and allocate the paged KV cache for this stage's layers only.
 
-    vLLM normally derives this from the whole model; a stage holds a slice, so
-    the layer names — and therefore the number of blocks that fit — are ours to
-    compute. This is where paged attention comes from: instead of one
-    contiguous cache per request, blocks are pooled and handed out on demand.
+    The arithmetic mirrors what vLLM does for a whole model, adapted to a
+    stage. It is worth spelling out, because getting it wrong does not fail at
+    startup — it fails on the first request, when there is nothing left for
+    activations:
+
+        budget = min(quota, total x utilisation)   what this model may use
+               - weights                           what it already took
+               - headroom                          activations, workspaces
+        budget = min(budget, what concurrency actually needs)
+
+    The last line matters on a big card: sizing the pool to "all remaining
+    memory" reserved 8.7 GB for 114k tokens of context nobody asked for, and
+    left 700 MB for the forward pass itself.
     """
     import torch
     from vllm.v1.core.kv_cache_manager import KVCacheManager
@@ -269,18 +287,48 @@ def build_kv_cache(runner, vllm_config, config: StageRuntimeConfig):
         get_kv_cache_configs,
     )
 
+    device_index = config_device_index()
+    free_memory, total_memory = torch.cuda.mem_get_info(device_index)
     kv_cache_specs = runner.get_kv_cache_spec()
-    free_memory, _total = torch.cuda.mem_get_info(config_device_index())
-    available = int(free_memory * config.gpu_memory_utilization)
+
+    weights = int(getattr(runner, "model_memory_usage", 0) or 0)
+    requested = int(total_memory * config.gpu_memory_utilization)
+    headroom = int(config.headroom_gb * GIB)
+    budget = requested - weights - headroom
+
+    needed = _kv_bytes_for_concurrency(kv_cache_specs, config)
+    capped_by = "need"
+    if needed and needed < budget:
+        budget = needed
+    else:
+        capped_by = "budget"
+    # Never take the last of what is actually free, whatever the arithmetic says.
+    budget = min(budget, int(free_memory - headroom))
+
     logger.info(
-        "KV cache budget: %.2f GB of %.2f GB free",
-        available / GIB,
+        "KV cache sizing: quota %.1f GB, weights %.1f GB, headroom %.1f GB, "
+        "free now %.1f GB -> %.1f GB for KV (limited by %s)",
+        requested / GIB,
+        weights / GIB,
+        headroom / GIB,
         free_memory / GIB,
+        budget / GIB,
+        capped_by,
     )
+    if budget <= 0:
+        raise VllmIntegrationError(
+            f"nothing left for the KV cache: the quota grants "
+            f"{requested / GIB:.1f} GB, the weights of layers "
+            f"[{config.start_layer}, {config.end_layer}) already take "
+            f"{weights / GIB:.1f} GB and {config.headroom_gb:.1f} GB is kept "
+            f"for activations. Give this model a bigger share "
+            f"(LOOM_PARAM_MEM_RATIO) or split the model over more nodes"
+        )
+
     kv_cache_configs = get_kv_cache_configs(
         vllm_config=vllm_config,
         kv_cache_specs=[kv_cache_specs],
-        available_memory=[available],
+        available_memory=[budget],
     )
     kv_cache_config = generate_scheduler_kv_cache_config(kv_cache_configs)
     runner.initialize_kv_cache(kv_cache_config)
@@ -299,13 +347,35 @@ def build_kv_cache(runner, vllm_config, config: StageRuntimeConfig):
         log_stats=False,
         enable_kv_cache_events=False,
     )
+    tokens = kv_cache_config.num_blocks * config.kv_block_size
     logger.info(
-        "KV cache ready: %d blocks x %d tokens = %d tokens of context in flight",
+        "KV cache ready: %d blocks x %d tokens = %d tokens of context "
+        "(%d requests of %d tokens)",
         kv_cache_config.num_blocks,
         config.kv_block_size,
-        kv_cache_config.num_blocks * config.kv_block_size,
+        tokens,
+        tokens // max(1, config.max_model_len),
+        config.max_model_len,
     )
     return manager, kv_cache_config
+
+
+def _kv_bytes_for_concurrency(kv_cache_specs, config: StageRuntimeConfig) -> int:
+    """How much cache this stage can actually put to use.
+
+    Pool size beyond `max_num_seqs` full-length requests is memory taken away
+    from the forward pass to hold context nobody can be serving.
+    """
+    per_block = 0
+    for spec in kv_cache_specs.values():
+        try:
+            per_block += int(spec.page_size_bytes)
+        except (AttributeError, TypeError):
+            return 0  # unknown layout: fall back to the memory budget
+    if per_block <= 0:
+        return 0
+    blocks_per_request = math.ceil(config.max_model_len / config.kv_block_size)
+    return per_block * blocks_per_request * max(1, config.max_num_seqs)
 
 
 def config_device_index() -> int:
@@ -346,6 +416,12 @@ def stage_config_from_env(
         gpu_memory_utilization=utilisation or 0.85,
         kv_block_size=int(os.environ.get("LOOM_KV_BLOCK_SIZE", "16")),
         max_num_seqs=int(os.environ.get("LOOM_MAX_REQUESTS", "16")),
-        enforce_eager=os.environ.get("LOOM_VLLM_EAGER", "").strip().lower()
-        in ("1", "true", "yes"),
+        max_batched_tokens=int(
+            os.environ.get("LOOM_MAX_BATCHED_TOKENS", "0")
+            or os.environ.get("LOOM_MAX_MODEL_LEN", "4096")
+        ),
+        # Opt IN to compilation, not out: it is the thing that OOMed the card.
+        enforce_eager=os.environ.get("LOOM_VLLM_COMPILE", "").strip().lower()
+        not in ("1", "true", "yes"),
+        headroom_gb=float(os.environ.get("LOOM_VLLM_HEADROOM_GB", "2.0")),
     )

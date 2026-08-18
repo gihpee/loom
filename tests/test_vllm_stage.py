@@ -473,3 +473,51 @@ def test_engine_check_reports_before_it_judges(monkeypatch, capsys):
     problems = capsys.readouterr().err
     assert "gpu_memory_utilization" in problems
     assert "runtime.py" in problems, "the report must say where to fix it"
+
+
+# ------------------------------------------------------------- memory sizing
+def test_kv_pool_leaves_room_for_the_forward_pass():
+    """Sizing the pool to "all remaining memory" is what OOMed a live A30.
+
+    The card had 23.6 GB: weights took 13.8, the pool took 8.7, and the first
+    request died allocating 1.45 GB for the forward pass. The budget now starts
+    from the quota rather than from whatever is free, subtracts the weights and
+    keeps a headroom — and is capped by what concurrency can actually use.
+    """
+    import types
+
+    from loom_worker.vllm_stage.runtime import StageRuntimeConfig, _kv_bytes_for_concurrency
+
+    GIB = 1024**3
+    config = StageRuntimeConfig(
+        model_path="/m", start_layer=0, end_layer=20, num_layers=40,
+        gpu_memory_utilization=0.90, max_model_len=4096, max_num_seqs=16,
+    )
+    assert config.enforce_eager is True, "compilation is opt-in after the OOM"
+    assert config.headroom_gb >= 1.0
+
+    # 20 layers of Qwen3-14B: 2 (K+V) x 8 kv heads x 128 head dim x 2 bytes x 16 tokens
+    per_block = 20 * 2 * 8 * 128 * 2 * 16
+    specs = {"layers": types.SimpleNamespace(page_size_bytes=per_block)}
+    needed = _kv_bytes_for_concurrency(specs, config)
+
+    total = 23.6 * GIB
+    weights = 13.76 * GIB
+    budget = int(total * config.gpu_memory_utilization) - weights - config.headroom_gb * GIB
+    taken = min(budget, needed)
+    left_free = total - weights - taken
+
+    assert taken < 6 * GIB, "the pool must not swallow the card"
+    assert left_free > 3 * GIB, "the forward pass needs somewhere to run"
+    # The pool still covers full-length requests for every slot.
+    assert needed >= config.max_num_seqs * config.max_model_len * per_block / 16 * 0.9
+
+
+def test_unknown_cache_layout_falls_back_to_the_memory_budget():
+    """A spec we cannot measure must not silently size the pool to zero."""
+    import types
+
+    from loom_worker.vllm_stage.runtime import StageRuntimeConfig, _kv_bytes_for_concurrency
+
+    config = StageRuntimeConfig(model_path="/m", start_layer=0, end_layer=2, num_layers=4)
+    assert _kv_bytes_for_concurrency({"x": types.SimpleNamespace()}, config) == 0
