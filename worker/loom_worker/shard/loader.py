@@ -118,6 +118,7 @@ class ShardModel:
         self.num_layers = spec.end_layer - spec.start_layer
         self.embed = None  # only on the first stage
         self.inner = None  # the skeleton's own model, driven per stage
+        self.compiled = None  # torch.compile wrapper around `inner`, if any
         self.shard_config = None  # config narrowed to this stage's layer count
         self.layers = None
         self.norm = None  # only on the last stage
@@ -220,9 +221,19 @@ class ShardModel:
             self.inner.embed_tokens = None
 
     def run_layers(self, hidden, **kwargs):
-        """Run this stage's layers over `hidden` (already embedded)."""
-        out = self.inner(inputs_embeds=hidden, **kwargs)
+        """Run this stage's layers over `hidden` (already embedded).
+
+        Uses the compiled model when one is installed, and the eager module
+        otherwise. Both are kept: compilation is an optimisation that must be
+        revocable at runtime, without reloading 14 GB of weights.
+        """
+        model = self.compiled if self.compiled is not None else self.inner
+        out = model(inputs_embeds=hidden, **kwargs)
         return out.last_hidden_state if hasattr(out, "last_hidden_state") else out[0]
+
+    def drop_compiled(self) -> None:
+        """Fall back to the eager module for the rest of this stage's life."""
+        self.compiled = None
 
     def _assert_materialised(self) -> None:
         """Fail loudly if any tensor is still meta or holds garbage.

@@ -61,21 +61,27 @@ class ShardExecutor:
         self.shard = shard
         self.spec = shard.spec
         on_gpu = str(self.spec.device).startswith("cuda")
-        # A preallocated (static) KV cache is what lets CUDA graphs capture the
-        # decode step: shapes and addresses stop moving. It costs memory per
-        # request up front, so it is the GPU default and off on CPU.
-        self.static_cache = _flag("LOOM_STATIC_CACHE", on_gpu) if static_cache is None else static_cache
+        # OFF by default, deliberately. Compiling a 20-layer stage of a 14B
+        # model costs minutes on the first request (and again on every new
+        # prompt length), while the CUDA graphs that would justify it are
+        # skipped anyway because transformers' StaticCache mutates its buffers
+        # in place. Enable with LOOM_COMPILE=1 to measure it on your own
+        # hardware; the runtime falls back to eager if it misbehaves.
+        self.compile_model = (
+            _flag("LOOM_COMPILE", False) if compile_model is None else compile_model
+        )
+        # A preallocated KV cache is what lets graphs capture the decode step,
+        # so it follows the compile switch. On its own it buys little and costs
+        # real VRAM plus a hard ceiling on context length.
+        self.static_cache = (
+            _flag("LOOM_STATIC_CACHE", self.compile_model)
+            if static_cache is None
+            else static_cache
+        )
         self.max_cache_len = int(
             max_cache_len
             if max_cache_len is not None
             else os.environ.get("LOOM_MAX_CACHE_LEN", "4096")
-        )
-        # Graphs only pay off with a static cache; without one every step
-        # retraces and compilation is a net loss.
-        self.compile_model = (
-            _flag("LOOM_COMPILE", on_gpu and self.static_cache)
-            if compile_model is None
-            else compile_model
         )
         self.max_requests = int(
             max_requests
@@ -139,22 +145,58 @@ class ShardExecutor:
         )
 
     def _compile(self) -> None:
-        """Wrap the stage model in torch.compile (CUDA graphs on the decode step).
+        """Install a torch.compile wrapper around the stage model.
 
-        Failure here is never fatal: a stage that cannot compile must still
-        serve, just slower. The first request pays the compilation cost.
+        Inductor without CUDA graphs is the default on purpose. `reduce-overhead`
+        captures graphs, and graph capture is incompatible with the way
+        transformers' StaticCache mutates its buffers in place: inductor reports
+        "skipping cudagraphs due to mutated inputs" and then generation dies with
+        "accessing tensor output of CUDAGraphs that has been overwritten" after
+        the first token. Anyone who wants to try graphs can still set
+        LOOM_COMPILE_MODE=reduce-overhead, and the runtime fallback below keeps
+        that experiment from taking the stage down.
+
+        Shapes stay dynamic (torch decides): pinning them recompiles on every
+        new prompt length, and a recompile in the middle of serving shows up as
+        a two-minute TTFT.
         """
         torch = self.torch
+        mode = os.environ.get("LOOM_COMPILE_MODE", "default")
         try:
-            self.shard.inner = torch.compile(
-                self.shard.inner,
-                mode=os.environ.get("LOOM_COMPILE_MODE", "reduce-overhead"),
-                dynamic=False,
+            self.shard.compiled = torch.compile(self.shard.inner, mode=mode)
+            logger.info(
+                "executor: model compiled (mode=%s; first request pays warm-up)", mode
             )
-            logger.info("executor: model compiled (first request pays warm-up)")
         except Exception:
             logger.exception("torch.compile failed; continuing without it")
-            self.compile_model = False
+            self._disable_compile()
+
+    def _disable_compile(self) -> None:
+        self.compile_model = False
+        self.shard.drop_compiled()
+
+    def _run_stage(self, hidden, **kwargs):
+        """Run the stage, degrading to eager execution if the compiled path fails.
+
+        A compilation problem must cost speed, not availability: on a GPU box we
+        cannot pre-test every model/driver/torch combination, so the first
+        failure switches this stage back to eager and the request is retried
+        instead of being returned as an error.
+        """
+        torch = self.torch
+        if self.shard.compiled is not None:
+            if hasattr(torch.compiler, "cudagraph_mark_step_begin"):
+                # Tells CUDA-graph memory management that a new iteration starts,
+                # so outputs of the previous one are not reused underneath us.
+                torch.compiler.cudagraph_mark_step_begin()
+            try:
+                return self.shard.run_layers(hidden, **kwargs)
+            except Exception:
+                logger.exception(
+                    "compiled forward failed; falling back to eager for this stage"
+                )
+                self._disable_compile()
+        return self.shard.run_layers(hidden, **kwargs)
 
     def _new_cache(self):
         from transformers import DynamicCache
@@ -217,6 +259,14 @@ class ShardExecutor:
             Otherwise: (hidden_states, None).
         """
         torch = self.torch
+        # A preallocated cache has a hard ceiling. Writing past it is not an
+        # exception on CUDA, it is corruption, so refuse before the kernel runs.
+        if self.static_cache and positions and positions[-1] >= self.max_cache_len:
+            raise RuntimeError(
+                f"context of {positions[-1] + 1} tokens exceeds the static KV cache "
+                f"({self.max_cache_len}); raise LOOM_MAX_CACHE_LEN or set "
+                f"LOOM_STATIC_CACHE=0 on the worker"
+            )
         state = self._state(request_id)
         # Concurrency policy: requests hold only their own cache, so they can
         # run side by side — that is what fills the pipeline bubble while
@@ -241,7 +291,7 @@ class ShardExecutor:
             # The model's own forward builds the attention mask, applies rotary
             # and drives the cache — all of which depend on the cache type and
             # are silently wrong if reimplemented by hand.
-            h = self.shard.run_layers(
+            h = self._run_stage(
                 h,
                 position_ids=pos,
                 cache_position=pos[0],

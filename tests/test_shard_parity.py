@@ -223,3 +223,89 @@ def test_activations_survive_the_wire_in_every_dtype(model_dir, monkeypatch):
         assert torch.allclose(back, hidden, atol=max(atol, 1e-6)), name
         expected_bytes = hidden.numel() * (4 if name == "float32" else 2)
         assert len(data) == expected_bytes
+
+
+def test_compilation_is_opt_in(model_dir, monkeypatch):
+    """Compiling a real stage costs minutes on the first request.
+
+    It stays off unless someone asks for it, so a fresh GPU box serves
+    immediately instead of stalling on inductor.
+    """
+    monkeypatch.delenv("LOOM_COMPILE", raising=False)
+    (ex,) = build_stages(model_dir, [(0, 6)])
+    assert ex.compile_model is False
+    assert ex.shard.compiled is None
+
+
+def test_a_broken_compiled_forward_degrades_to_eager(model_dir):
+    """A compile problem must cost speed, not availability.
+
+    This is the failure seen on a real A30: CUDA graphs and the static cache
+    disagreed, and every request died after one token. The stage must notice,
+    drop the compiled path and answer correctly.
+    """
+    (ex,) = build_stages(model_dir, [(0, 6)])
+    expected = ex.forward(
+        request_id="eager", positions=list(range(len(PROMPT))), input_ids=PROMPT
+    )[1]
+
+    calls = {"n": 0}
+
+    def exploding(*args, **kwargs):
+        calls["n"] += 1
+        raise RuntimeError(
+            "accessing tensor output of CUDAGraphs that has been overwritten"
+        )
+
+    ex.compile_model = True
+    ex.shard.compiled = exploding
+
+    logits = ex.forward(
+        request_id="after-compile", positions=list(range(len(PROMPT))), input_ids=PROMPT
+    )[1]
+    assert calls["n"] == 1, "the compiled path should be tried once"
+    assert ex.shard.compiled is None, "the broken compiled model must be dropped"
+    assert ex.compile_model is False
+    assert torch.allclose(logits, expected, atol=1e-5)
+
+    # And the next request goes straight to eager, without retrying the wreck.
+    again = ex.forward(request_id="next", positions=list(range(len(PROMPT))), input_ids=PROMPT)[1]
+    assert calls["n"] == 1
+    assert torch.allclose(again, expected, atol=1e-5)
+
+
+def test_static_cache_refuses_to_overflow(model_dir):
+    """Past the preallocated length CUDA would corrupt memory, not raise."""
+    shard, _ = build_shard(
+        ShardSpec(model_path=model_dir, start_layer=0, end_layer=6, is_first=True, is_last=True)
+    )
+    ex = ShardExecutor(shard, static_cache=True, max_cache_len=16, compile_model=False)
+    ok = ex.forward(request_id="fits", positions=list(range(5)), input_ids=PROMPT)[1]
+    assert ok is not None
+    with pytest.raises(RuntimeError, match="LOOM_MAX_CACHE_LEN"):
+        ex.forward(request_id="too-long", positions=[20], input_ids=[1])
+
+
+def test_defaults_are_the_plain_path(model_dir, monkeypatch):
+    """Out of the box a stage runs eager with a growing cache.
+
+    That is the configuration proven on real hardware; the static cache exists
+    to serve CUDA graphs and follows the compile switch, so it cannot silently
+    impose a context ceiling on a deployment that never asked for it.
+    """
+    for var in ("LOOM_COMPILE", "LOOM_STATIC_CACHE", "LOOM_MAX_REQUESTS"):
+        monkeypatch.delenv(var, raising=False)
+    (ex,) = build_stages(model_dir, [(0, 6)])
+    assert ex.compile_model is False
+    assert ex.static_cache is False
+    assert ex.max_requests == 64
+
+    # Asking for compilation pulls the preallocated cache in with it, and that
+    # in turn bounds concurrency (each request reserves its slot up front).
+    monkeypatch.setattr(ShardExecutor, "_compile", lambda self: None)
+    shard, _ = build_shard(
+        ShardSpec(model_path=model_dir, start_layer=0, end_layer=6, is_first=True, is_last=True)
+    )
+    with_compile = ShardExecutor(shard, compile_model=True)
+    assert with_compile.static_cache is True, "graphs need the preallocated cache"
+    assert with_compile.max_requests == 8, "preallocated caches bound concurrency"
