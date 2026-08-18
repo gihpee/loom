@@ -126,6 +126,9 @@ def handle_stage_message(msg: dict) -> None:
 
     positions = list(msg.get("positions") or [])
     hidden = _decode_tensor(executor, msg)
+    # Everything this stage adds to the token's latency: decode of the incoming
+    # tensor is already done, so this is the forward (plus sampling on the tail).
+    stage_started = time.perf_counter()
     try:
         out_hidden, logits = executor.forward(
             request_id=request_id, positions=positions, hidden=hidden
@@ -150,6 +153,7 @@ def handle_stage_message(msg: dict) -> None:
             top_p=sampling.get("top_p", 1.0),
             seed=sampling.get("seed"),
         )
+        compute_ms = (time.perf_counter() - stage_started) * 1000
         relay(
             {
                 "kind": "token",
@@ -157,9 +161,15 @@ def handle_stage_message(msg: dict) -> None:
                 "target_stage": 0,
                 "token_id": token,
                 "step": msg.get("step", 0),
+                # Carried home so the head can subtract compute from the round
+                # trip and see the transport on its own.
+                "compute_ms": compute_ms,
+                "upstream_ms": float(msg.get("upstream_ms") or 0.0),
+                "hops": int(msg.get("hops") or 0) + 1,
             }
         )
     else:
+        compute_ms = (time.perf_counter() - stage_started) * 1000
         relay(
             {
                 "kind": "activations",
@@ -168,6 +178,10 @@ def handle_stage_message(msg: dict) -> None:
                 "step": msg.get("step", 0),
                 "positions": positions,
                 "sampling": msg.get("sampling"),
+                "compute_ms": compute_ms,
+                # Accumulate so the tail carries the whole pipeline's compute.
+                "upstream_ms": float(msg.get("upstream_ms") or 0.0) + compute_ms,
+                "hops": int(msg.get("hops") or 0) + 1,
                 **_tensor_payload(executor, out_hidden),
             }
         )
@@ -203,18 +217,28 @@ def generate(
     started_at = time.perf_counter()
     first_token_at: Optional[float] = None
     token_times: List[float] = []
+    # Per-token latency split. `head_ms` is this stage's own forward; `peer_ms`
+    # is what the other stages reported doing; whatever is left of the round
+    # trip is transport — the wire, the two relays and the orchestrator hop.
+    head_times: List[float] = []
+    peer_times: List[float] = []
+    transport_times: List[float] = []
     try:
         positions = list(range(len(prompt_ids)))
         step_input = list(prompt_ids)
         sampling = {"temperature": temperature, "top_p": top_p}
         for step in range(max_tokens):
+            step_started = time.perf_counter()
             hidden, logits = executor.forward(
                 request_id=request_id, positions=positions, input_ids=step_input
             )
+            head_ms = (time.perf_counter() - step_started) * 1000
+            peer_ms = 0.0
             if topology["num_stages"] == 1:
                 token = executor.sample(
                     logits, temperature=temperature, top_p=top_p
                 )
+                head_ms = (time.perf_counter() - step_started) * 1000
             else:
                 relay(
                     {
@@ -224,6 +248,9 @@ def generate(
                         "step": step,
                         "positions": positions,
                         "sampling": sampling,
+                        "compute_ms": head_ms,
+                        "upstream_ms": head_ms,
+                        "hops": 1,
                         **_tensor_payload(executor, hidden),
                     }
                 )
@@ -231,8 +258,20 @@ def generate(
                 if msg.get("kind") == "error":
                     raise RuntimeError(msg.get("error", "pipeline error"))
                 token = int(msg["token_id"])
+                # What every stage after this one spent: the tail carries the
+                # running total plus its own.
+                peer_ms = float(msg.get("upstream_ms") or 0.0) - head_ms
+                peer_ms += float(msg.get("compute_ms") or 0.0)
 
             now = time.perf_counter()
+            head_times.append(head_ms)
+            peer_times.append(max(0.0, peer_ms))
+            # No clock comparison anywhere: a duration measured here minus
+            # durations measured there. Both sides use their own monotonic
+            # clock, so unsynchronised machines cannot skew this.
+            transport_times.append(
+                max(0.0, (now - step_started) * 1000 - head_ms - max(0.0, peer_ms))
+            )
             if first_token_at is None:
                 first_token_at = now
             token_times.append(now)
@@ -258,7 +297,15 @@ def generate(
         "prompt_tokens": len(prompt_ids),
         "completion_tokens": len(generated),
         "finish_reason": finish_reason,
-        "timings": _timings(started_at, first_token_at, token_times, len(prompt_ids)),
+        "timings": _timings(
+            started_at,
+            first_token_at,
+            token_times,
+            len(prompt_ids),
+            head_times=head_times,
+            peer_times=peer_times,
+            transport_times=transport_times,
+        ),
     }
 
 
@@ -274,6 +321,10 @@ def _timings(
     first_token_at: Optional[float],
     token_times: List[float],
     prompt_tokens: int,
+    *,
+    head_times: Optional[List[float]] = None,
+    peer_times: Optional[List[float]] = None,
+    transport_times: Optional[List[float]] = None,
 ) -> dict:
     """Per-request numbers, in the units people actually compare.
 
@@ -309,7 +360,49 @@ def _timings(
         "inter_token_ms_max": round(gaps[-1], 1) if gaps else 0.0,
         "stages": int(topology.get("num_stages", 1)),
         "pipeline_id": topology.get("pipeline_id", ""),
+        # Where each token's time actually goes. Decode steps only: the first
+        # entry is prefill, whose cost is already reported as ttft.
+        **_latency_split(head_times, peer_times, transport_times),
     }
+
+
+def _summary(values: Optional[List[float]], prefix: str) -> dict:
+    """p50/p95/mean for one leg of the split, rounded for reading."""
+    if not values:
+        return {}
+    ordered = sorted(values)
+    return {
+        f"{prefix}_ms_p50": round(_percentile(ordered, 0.50), 2),
+        f"{prefix}_ms_p95": round(_percentile(ordered, 0.95), 2),
+        f"{prefix}_ms_mean": round(sum(values) / len(values), 2),
+    }
+
+
+def _latency_split(
+    head_times: Optional[List[float]],
+    peer_times: Optional[List[float]],
+    transport_times: Optional[List[float]],
+) -> dict:
+    """Per-token breakdown: this stage, the other stages, and the wire.
+
+    Prefill is dropped from the samples: it is one long step whose cost is
+    already visible as ttft, and leaving it in drags every percentile.
+    """
+    decode = slice(1, None)
+    head = (head_times or [])[decode]
+    peer = (peer_times or [])[decode]
+    wire = (transport_times or [])[decode]
+    if not head:
+        return {}
+    split = {}
+    split.update(_summary(head, "head_compute"))
+    split.update(_summary(peer, "peer_compute"))
+    split.update(_summary(wire, "transport"))
+    total = sum(head) + sum(peer) + sum(wire)
+    if total > 0:
+        # The one number that decides what to optimise next.
+        split["transport_share"] = round(sum(wire) / total, 3)
+    return split
 
 
 def _as_token_ids(encoded) -> List[int]:

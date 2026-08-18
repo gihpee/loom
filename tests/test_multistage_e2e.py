@@ -263,3 +263,60 @@ def test_stream_closes_with_usage_and_timings(pipeline_stack, reference_completi
     assert closing["usage"]["completion_tokens"] == 8
     assert closing["timings"]["stages"] >= 1
     assert closing["choices"][0]["finish_reason"]
+
+
+def test_timings_split_a_token_into_compute_and_transport(pipeline_stack, reference_completion):
+    """Every stage reports its own duration; the head derives the wire time.
+
+    This is what turns "the pipeline got slower on separate machines" into an
+    actionable number: if transport dominates, no runtime work will help.
+    Durations are used rather than timestamps on purpose — the stages run on
+    different hosts, and comparing their clocks would put the measurement
+    error inside the measurement.
+    """
+    orch, _ = pipeline_stack
+    assert wait_until(lambda: bool(orch.controller.endpoints.candidates(MODEL_ID)), 90)
+
+    async def call(api):
+        return await api.post(
+            "/v1/chat/completions",
+            json={
+                "model": MODEL_ID,
+                "messages": [{"role": "user", "content": PROMPT}],
+                "max_tokens": 12,
+            },
+        )
+
+    t = orch.call_api(call).json()["timings"]
+
+    for key in (
+        "head_compute_ms_p50",
+        "peer_compute_ms_p50",
+        "transport_ms_p50",
+        "transport_share",
+    ):
+        assert key in t, f"{key} missing from timings"
+
+    assert t["head_compute_ms_p50"] > 0, "the head does run layers"
+    assert t["peer_compute_ms_p50"] > 0, "a two-stage pipeline has a second stage"
+    assert 0.0 <= t["transport_share"] <= 1.0
+
+    # The parts must add up to the interval the head measured independently.
+    parts = t["head_compute_ms_p50"] + t["peer_compute_ms_p50"] + t["transport_ms_p50"]
+    assert parts == pytest.approx(t["inter_token_ms_p50"], rel=0.35), (
+        f"split {parts:.2f} ms does not reconstruct the measured "
+        f"{t['inter_token_ms_p50']:.2f} ms"
+    )
+
+
+def test_single_stage_reports_no_peer_time(pipeline_stack, reference_completion):
+    """With one stage there is nobody to talk to, so transport must not appear."""
+    from loom_worker.shard.server import _latency_split
+
+    split = _latency_split([5.0, 4.0, 4.5], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0])
+    assert split["peer_compute_ms_p50"] == 0.0
+    assert split["transport_ms_p50"] == 0.0
+    assert split["transport_share"] == 0.0
+    # Prefill (the first sample) is excluded: it is one long step already
+    # reported as ttft, and it would drag every percentile.
+    assert split["head_compute_ms_mean"] == pytest.approx(4.25)

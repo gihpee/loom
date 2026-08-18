@@ -108,6 +108,16 @@ message StageEnvelope {
   repeated int32 positions = 14;
 
   string error = 15;          // for STAGE_ERROR
+
+  // --- timing instrumentation -------------------------------------------
+  // DURATIONS, not timestamps: the stages live on different machines, and
+  // subtracting clocks that are only NTP-close would put the measurement
+  // error inside the very number we are trying to read. Each stage reports
+  // how long IT spent, the head measures the round trip it can see, and
+  // transport falls out as the difference.
+  double compute_ms = 16;   // this stage's forward for this step
+  double upstream_ms = 17;  // compute already accounted for by earlier stages
+  int32 hops = 18;          // stages this message has passed through
 }
 
 message TunnelMessage {

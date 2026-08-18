@@ -49,6 +49,11 @@ def envelope_from_json(payload: dict, *, pipeline_id: str, model_id: str, from_s
         step=int(payload.get("step", 0)),
         token_id=int(payload.get("token_id", 0)),
         error=payload.get("error", ""),
+        # Latency instrumentation: durations measured by each stage on its own
+        # clock, so the head can split a token into compute and transport.
+        compute_ms=float(payload.get("compute_ms") or 0.0),
+        upstream_ms=float(payload.get("upstream_ms") or 0.0),
+        hops=int(payload.get("hops") or 0),
     )
     if payload.get("positions"):
         env.positions.extend(int(p) for p in payload["positions"])
@@ -74,6 +79,9 @@ def envelope_to_json(env) -> dict:
         "positions": list(env.positions),
         "token_id": env.token_id,
         "error": env.error,
+        "compute_ms": env.compute_ms,
+        "upstream_ms": env.upstream_ms,
+        "hops": env.hops,
     }
     if env.tensor:
         payload["tensor_b64"] = base64.b64encode(env.tensor).decode()

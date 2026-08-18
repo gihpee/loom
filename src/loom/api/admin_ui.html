@@ -535,12 +535,21 @@ function renderRunStats(run) {
     // The gap between the two clocks is the API hop + the worker tunnel.
     const overhead = run.totalMs - s.total_ms;
     const perHop = s.stages > 1 ? s.inter_token_ms_p50 / s.stages : null;
+    // Measured split, not arithmetic: every stage reports its own duration and
+    // the head subtracts them from the round trip it timed itself.
+    const split = s.transport_ms_p50 !== undefined ? `
+      <p style="margin-top:6px">на что уходит токен (p50 / p95):
+        <span class="dim">свои слои</span> ${num(s.head_compute_ms_p50)} / ${num(s.head_compute_ms_p95)} ms ·
+        <span class="dim">остальные стадии</span> ${num(s.peer_compute_ms_p50)} / ${num(s.peer_compute_ms_p95)} ms ·
+        <span class="${s.transport_share > 0.4 ? "bad" : "acc"}">транспорт</span>
+        ${num(s.transport_ms_p50)} / ${num(s.transport_ms_p95)} ms
+        <b>(${Math.round(100 * s.transport_share)}% времени)</b></p>` : "";
     serverBlock = `<p class="muted" style="margin-top:10px">по данным головы пайплайна:
       prefill ${ms(s.ttft_ms)} (${num(s.prompt_tokens_per_s)} tok/s) ·
       decode ${ms(s.decode_ms)} (${num(s.decode_tokens_per_s, 2)} tok/s) ·
       между токенами p50 ${num(s.inter_token_ms_p50)} / p95 ${num(s.inter_token_ms_p95)} / max ${num(s.inter_token_ms_max)} ms ·
       стадий ${s.stages}${perHop ? ` (≈ ${num(perHop)} ms на переход)` : ""} ·
-      накладные транспорта ${ms(Math.max(0, overhead))}</p>`;
+      накладные транспорта ${ms(Math.max(0, overhead))}</p>${split}`;
   } else {
     serverBlock = `<p class="muted" style="margin-top:10px">бэкенд не прислал timings —
       цифры измерены клиентом (vLLM-бэкенд или старый образ воркера)</p>`;
