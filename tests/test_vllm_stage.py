@@ -63,8 +63,9 @@ class FakeRunner:
     step ("State error"), so the fake reproduces it exactly.
     """
 
-    def __init__(self, *, is_last: bool, hidden_dim: int = 8, vocab: int = 32):
+    def __init__(self, *, is_last: bool, is_first: bool = True, hidden_dim: int = 8, vocab: int = 32):
         self.is_last = is_last
+        self.is_first = is_first
         self.hidden_dim = hidden_dim
         self.vocab = vocab
         self.device = torch.device("cpu")
@@ -74,10 +75,32 @@ class FakeRunner:
         self.seen = []
         self.execute_model_state = None
         self.sampled = 0
+        self.max_num_tokens = 4096
+        # vLLM copies arrivals INTO this buffer and asserts it exists; it is
+        # allocated during profile_run, which a Loom stage never performs.
+        self.intermediate_tensors = None
+        self.model = types.SimpleNamespace(
+            make_empty_intermediate_tensors=self._make_empty_intermediate_tensors
+        )
+
+    def _make_empty_intermediate_tensors(self, *, batch_size, dtype, device):
+        from vllm.sequence import IntermediateTensors
+
+        return IntermediateTensors(
+            {
+                key: torch.zeros((batch_size, self.hidden_dim), dtype=dtype, device=device)
+                for key in ("hidden_states", "residual")
+            }
+        )
 
     def execute_model(self, *, scheduler_output, intermediate_tensors=None):
         if self.execute_model_state is not None:
             raise RuntimeError("State error: sample_tokens() must be called first")
+        if not self.is_first and self.intermediate_tensors is None:
+            raise AssertionError(
+                "self.intermediate_tensors is None — the landing buffer was "
+                "never allocated (this is the real runner's assert)"
+            )
         self.seen.append((scheduler_output, intermediate_tensors))
         tokens = scheduler_output.total_num_scheduled_tokens
         if self.is_last:
@@ -192,7 +215,7 @@ def executor_factory(monkeypatch):
             end_layer=end,
             num_layers=num_layers,
         )
-        runner = FakeRunner(is_last=config.is_last)
+        runner = FakeRunner(is_last=config.is_last, is_first=config.is_first)
         kv = FakeKvManager(capacity_blocks=capacity)
         kv_cache_config = types.SimpleNamespace(kv_cache_groups=[object()], num_blocks=capacity)
         return VllmStageExecutor(runner, kv, kv_cache_config, config), runner, kv

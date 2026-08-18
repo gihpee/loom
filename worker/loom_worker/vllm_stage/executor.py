@@ -63,6 +63,45 @@ class VllmStageExecutor:
         self.spec = _SpecView(config)
         self._requests: Dict[str, StageRequest] = {}
         self._lock = threading.RLock()
+        self._prepare_incoming_buffer()
+
+    def _prepare_incoming_buffer(self) -> None:
+        """Give a non-first stage the landing buffer vLLM copies arrivals into.
+
+        `_preprocess` does not consume the tensors we hand it directly: it
+        copies them into `runner.intermediate_tensors`, a persistent buffer
+        sized for the largest batch, and asserts that buffer exists. vLLM
+        normally allocates it during profile_run — which a stage never
+        performs, so the assert fired on the first request instead.
+
+        Allocated here rather than lazily: it is a fixed cost (max batch x
+        hidden x one tensor per key), and a card that cannot spare it should
+        say so at startup, not mid-request.
+        """
+        if self.spec.is_first:
+            return  # the head embeds tokens; nothing arrives from upstream
+        if getattr(self.runner, "intermediate_tensors", None) is not None:
+            return
+        model = getattr(self.runner, "model", None)
+        factory = getattr(model, "make_empty_intermediate_tensors", None)
+        if factory is None:
+            logger.warning(
+                "this model exposes no make_empty_intermediate_tensors; "
+                "relying on vLLM to allocate the landing buffer itself"
+            )
+            return
+        max_tokens = int(getattr(self.runner, "max_num_tokens", 0) or self.config.max_model_len)
+        self.runner.intermediate_tensors = factory(
+            batch_size=max_tokens,
+            dtype=self.runner.model_config.dtype,
+            device=self.runner.device,
+        )
+        keys = list(self.runner.intermediate_tensors.tensors)
+        logger.info(
+            "stage inbox ready: %s for up to %d tokens",
+            ", ".join(keys),
+            max_tokens,
+        )
 
     # ------------------------------------------------------------- contract
     def active_requests(self) -> int:

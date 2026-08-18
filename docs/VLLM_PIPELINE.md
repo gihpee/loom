@@ -236,6 +236,22 @@ vLLM V1 исполняет `execute_model(scheduler_output, intermediate_tensors
 `State error: sample_tokens() must be called after execute_model() returns
 None`. То есть цена пропуска — не сразу видимая поломка.
 
+### У не-первой стадии должен быть «почтовый ящик»
+
+`_preprocess` не берёт переданные тензоры напрямую: он **копирует** их в
+постоянный буфер `runner.intermediate_tensors`, рассчитанный на самый большой
+батч, и делает `assert`, что буфер существует. vLLM создаёт его внутри
+`profile_run` — прогона, которого стадия Loom не выполняет, поэтому буфер
+аллоцируется явно на старте (`_prepare_incoming_buffer`). В логе:
+
+```
+stage inbox ready: hidden_states, residual for up to 4096 tokens
+```
+
+Аллокация на старте, а не лениво: цена фиксированная (макс. батч × hidden ×
+число ключей), и карта, которая её не тянет, должна сказать об этом при
+запуске, а не в середине запроса.
+
 ### Между стадиями едет не один тензор
 
 Модели семейства Llama (Qwen3 в том числе) объявляют
@@ -402,6 +418,7 @@ KV cache ready: N blocks x 16 tokens = M tokens of context in flight
 |---|---|
 | `vLLM is not importable` | воркер запущен из стандартного образа; нужен `gihpee/loomworker-vllm` |
 | `Current vLLM config is not set` | подъём вышел за пределы `set_current_vllm_config`; контекст открывается один раз на процесс и не закрывается — его нужен и forward |
+| `assert self.intermediate_tensors is not None` | у не-первой стадии не аллоцирован почтовый ящик; его создаёт `profile_run`, который мы не запускаем (см. §5a) |
 | `State error: sample_tokens() must be called` | на последней стадии прочитали логиты и не вызвали `sample_tokens` (см. §5a) |
 | `ValidationError: Unexpected keyword argument` при сборке конфига | поле уехало между релизами vLLM. Необязательные отбрасываются сами (в логе `this vLLM release does not take ...`); если упало — значит потеряно поле из `required` в `_construct`, чинить в `runtime.py` |
 | `get_pp_indices is gone` / `is not importable` при старте | версия vLLM разъехалась с патчами (§3); чинить в `patches.py`, проверки в Dockerfile покажут, что именно переехало |
