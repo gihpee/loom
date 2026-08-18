@@ -55,6 +55,48 @@ class StageRuntimeConfig:
         return self.end_layer >= self.num_layers
 
 
+def _accepted_fields(cls) -> set:
+    """Which keyword arguments this vLLM config class actually takes."""
+    import dataclasses
+    import inspect
+
+    try:
+        return {f.name for f in dataclasses.fields(cls)}
+    except TypeError:
+        return set(inspect.signature(cls.__init__).parameters) - {"self"}
+
+
+def _construct(cls, *, required=(), **kwargs):
+    """Build a vLLM config, dropping keys this release no longer knows.
+
+    vLLM's config dataclasses gain and lose fields between releases (0.27
+    dropped `swap_space` from CacheConfig, for example), and a stray keyword
+    aborts the whole start — after the checkpoint has already been downloaded.
+    Optional keys are therefore dropped with a warning.
+
+    `required` names the keys whose loss would change behaviour rather than
+    just cosmetics — the VRAM quota, the context length. Those raise instead:
+    silently serving with vLLM's own defaults would mean ignoring the broker's
+    grant, and that shows up much later as an OOM nobody can explain.
+    """
+    accepted = _accepted_fields(cls)
+    missing_required = [k for k in required if k not in accepted]
+    if missing_required:
+        raise VllmIntegrationError(
+            f"{cls.__name__} in this vLLM release does not accept "
+            f"{missing_required}; loom_worker/vllm_stage/runtime.py must be "
+            f"updated for it (see docs/VLLM_PIPELINE.md)"
+        )
+    dropped = sorted(k for k in kwargs if k not in accepted)
+    if dropped:
+        logger.warning(
+            "%s: this vLLM release does not take %s — continuing without them",
+            cls.__name__,
+            ", ".join(dropped),
+        )
+    return cls(**{k: v for k, v in kwargs.items() if k in accepted})
+
+
 def build_stage_runner(config: StageRuntimeConfig):
     """Create a GPUModelRunner holding only `[start_layer, end_layer)`.
 
@@ -86,7 +128,9 @@ def build_stage_runner(config: StageRuntimeConfig):
     device = torch.device("cuda:0")
     torch.cuda.set_device(device)
 
-    model_config = ModelConfig(
+    model_config = _construct(
+        ModelConfig,
+        required=("model", "max_model_len", "dtype"),
         model=config.model_path,
         tokenizer=config.model_path,
         tokenizer_mode="auto",
@@ -96,7 +140,11 @@ def build_stage_runner(config: StageRuntimeConfig):
         max_model_len=config.max_model_len,
         max_logprobs=1,
     )
-    cache_config = CacheConfig(
+    cache_config = _construct(
+        CacheConfig,
+        # The broker's grant lives in this one field; losing it would hand the
+        # whole card to one model.
+        required=("gpu_memory_utilization", "block_size"),
         block_size=config.kv_block_size,
         gpu_memory_utilization=config.gpu_memory_utilization,
         swap_space=0,
@@ -104,25 +152,31 @@ def build_stage_runner(config: StageRuntimeConfig):
     )
     # One card per stage: the parallelism Loom cares about lives between nodes,
     # and vLLM is told it is alone so it never tries to talk to peers itself.
-    parallel_config = ParallelConfig(
+    parallel_config = _construct(
+        ParallelConfig,
+        required=("pipeline_parallel_size", "tensor_parallel_size"),
         pipeline_parallel_size=1,
         tensor_parallel_size=1,
         distributed_executor_backend=None,
     )
-    scheduler_config = SchedulerConfig(
+    scheduler_config = _construct(
+        SchedulerConfig,
+        required=("max_num_seqs", "max_model_len"),
         max_num_batched_tokens=max(config.max_batched_tokens, config.max_model_len),
         max_num_seqs=config.max_num_seqs,
         max_model_len=config.max_model_len,
         is_encoder_decoder=False,
         enable_chunked_prefill=False,
     )
-    vllm_config = VllmConfig(
+    vllm_config = _construct(
+        VllmConfig,
+        required=("model_config", "cache_config"),
         model_config=model_config,
         cache_config=cache_config,
         parallel_config=parallel_config,
         scheduler_config=scheduler_config,
-        device_config=DeviceConfig(device=device),
-        load_config=LoadConfig(load_format="auto"),
+        device_config=_construct(DeviceConfig, device=device),
+        load_config=_construct(LoadConfig, load_format="auto"),
     )
 
     if not parallel_state.model_parallel_is_initialized():

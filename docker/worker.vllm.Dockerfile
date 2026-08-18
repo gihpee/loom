@@ -35,7 +35,14 @@ from vllm.v1.core.sched.output import SchedulerOutput, NewRequestData, CachedReq
 from vllm.v1.core.kv_cache_manager import KVCacheManager;\
 from vllm.model_executor.model_loader import default_loader;\
 from vllm.distributed.parallel_state import GroupCoordinator;\
+from vllm.config import ModelConfig, CacheConfig, ParallelConfig, SchedulerConfig, VllmConfig;\
+import dataclasses as d;\
+f=lambda c: {x.name for x in d.fields(c)};\
 assert hasattr(u, 'get_pp_indices'), 'get_pp_indices moved';\
+assert {'gpu_memory_utilization','block_size'} <= f(CacheConfig), 'CacheConfig lost the VRAM knob';\
+assert {'model','max_model_len','dtype'} <= f(ModelConfig), 'ModelConfig fields moved';\
+assert {'max_num_seqs','max_model_len'} <= f(SchedulerConfig), 'SchedulerConfig fields moved';\
+assert {'pipeline_parallel_size','tensor_parallel_size'} <= f(ParallelConfig), 'ParallelConfig fields moved';\
 print('vLLM in image:', vllm.__version__)"
 
 ENV LOOM_LOG_LEVEL=INFO \

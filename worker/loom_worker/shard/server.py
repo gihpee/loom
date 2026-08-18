@@ -31,7 +31,12 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Dict, List, Optional
 
 from loom_worker.shard.executor import ShardExecutor
-from loom_worker.shard.loader import ShardSpec, build_shard, resolve_model_path
+from loom_worker.shard.loader import (
+    ShardSpec,
+    build_shard,
+    build_stage_checkpoint_view,
+    resolve_model_path,
+)
 
 logger = logging.getLogger("loom_worker.shard.server")
 
@@ -765,9 +770,11 @@ def main(argv=None) -> None:
         dtype=args.dtype,
     )
     if args.engine == "vllm":
-        # vLLM reads the checkpoint itself and needs the whole directory: it
-        # builds its own layer slice from the full weight index.
-        spec.model_path = resolve_model_path(args.weights_uri)
+        # Same selective download as the torch engine, then a view directory
+        # whose index mentions only the files we fetched — vLLM opens every
+        # file the index lists, so the index has to match what is on disk.
+        spec.model_path = resolve_model_path(args.weights_uri, shard=spec)
+        spec.model_path = build_stage_checkpoint_view(spec.model_path, spec)
         STATE["executor"], config = _build_vllm_executor(args, spec)
     else:
         # Fetch only the safetensors files this stage's layers live in.

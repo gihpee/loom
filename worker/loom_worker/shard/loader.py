@@ -360,6 +360,100 @@ def resolve_model_path(
     )
 
 
+def build_stage_checkpoint_view(model_path: str, shard: ShardSpec) -> str:
+    """Present a stage-sized checkpoint to an engine that reads files itself.
+
+    Our own loader picks tensors out of whatever files are on disk, so it is
+    happy with a partial download. vLLM is not: it enumerates every file listed
+    in `model.safetensors.index.json` and opens it, so a missing file is an
+    error rather than a saving.
+
+    So we build a view directory: symlinks to the metadata and to the weight
+    files this stage needs, plus an index rewritten to mention only those. vLLM
+    then sees a complete, self-consistent checkpoint that happens to contain
+    just this stage's layers, and downloads shrink from the whole model to the
+    stage's share.
+
+    Returns the original path unchanged when there is nothing to prune (a
+    single-file checkpoint, or key naming we do not recognise).
+    """
+    source = Path(model_path)
+    index_file = source / "model.safetensors.index.json"
+    if not index_file.exists():
+        return model_path
+
+    index = json.loads(index_file.read_text())
+    weight_map = index.get("weight_map") or {}
+    tie = False
+    config_file = source / "config.json"
+    if config_file.exists():
+        raw = json.loads(config_file.read_text())
+        tie = bool(
+            raw.get("tie_word_embeddings", raw.get("text_config", {}).get(
+                "tie_word_embeddings", False
+            ))
+        )
+    needed = needed_weight_files(
+        weight_map,
+        start_layer=shard.start_layer,
+        end_layer=shard.end_layer,
+        is_first=shard.is_first,
+        is_last=shard.is_last,
+        tie_word_embeddings=tie,
+    )
+    all_files = sorted(set(weight_map.values()))
+    if not needed or set(needed) == set(all_files):
+        return model_path
+
+    view = _stage_view_dir(source, shard)
+    view.mkdir(parents=True, exist_ok=True)
+    keep = set(needed)
+    for entry in source.iterdir():
+        if entry.name == index_file.name:
+            continue
+        if entry.suffix == ".safetensors" and entry.name not in keep:
+            continue  # another stage's weights
+        _link(entry, view / entry.name)
+
+    pruned = dict(index)
+    pruned["weight_map"] = {k: v for k, v in weight_map.items() if v in keep}
+    (view / index_file.name).write_text(json.dumps(pruned))
+    logger.info(
+        "stage checkpoint view: %d of %d weight files, %d of %d tensors -> %s",
+        len(needed),
+        len(all_files),
+        len(pruned["weight_map"]),
+        len(weight_map),
+        view,
+    )
+    return str(view)
+
+
+def _stage_view_dir(source: Path, shard: ShardSpec) -> Path:
+    """Where a stage's view lives: beside the cache, keyed by its layer range."""
+    root = os.environ.get("LOOM_STAGE_VIEW_DIR")
+    if root:
+        base = Path(root)
+    else:
+        base = Path(
+            os.environ.get("HF_HOME", str(Path.home() / ".cache" / "huggingface"))
+        ) / "loom-stage-views"
+    tag = f"{source.name}-{shard.start_layer}-{shard.end_layer}"
+    return base / tag
+
+
+def _link(source: Path, target: Path) -> None:
+    """Symlink into the cache; copy only if the filesystem refuses links."""
+    if target.exists() or target.is_symlink():
+        target.unlink()
+    try:
+        target.symlink_to(source.resolve())
+    except OSError:
+        import shutil
+
+        shutil.copy2(source, target)
+
+
 def _weight_patterns_for_shard(path: Path, shard: ShardSpec) -> List[str]:
     """Which safetensors files to fetch for this stage (all, if unsure)."""
     index = path / "model.safetensors.index.json"

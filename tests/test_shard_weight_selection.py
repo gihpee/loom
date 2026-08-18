@@ -217,3 +217,54 @@ def test_head_stage_has_embeddings_but_no_head(sharded_model):
     assert shard.embed is not None
     assert shard.lm_head is None and shard.norm is None
     assert len(shard.layers) == 3
+
+
+# --------------------------------------------------- checkpoint view for vLLM
+def test_stage_view_lists_only_the_files_it_kept(sharded_model, tmp_path, monkeypatch):
+    """An engine that opens every file in the index must see a matching index.
+
+    Our own loader picks tensors out of whatever is on disk, so a partial
+    download is fine for it. vLLM enumerates the index and opens each file, so
+    the stage gets a view directory: symlinks to what it needs plus an index
+    rewritten to mention only that. Without this the vLLM engine downloaded the
+    whole checkpoint on every node — the exact waste the layer split avoids.
+    """
+    from loom_worker.shard.loader import build_stage_checkpoint_view
+
+    monkeypatch.setenv("LOOM_STAGE_VIEW_DIR", str(tmp_path / "views"))
+    spec = stage_spec(sharded_model, 3, LAYERS, index=1)
+    view = Path(build_stage_checkpoint_view(str(sharded_model), spec))
+    assert view != sharded_model, "a multi-file checkpoint should be pruned"
+
+    index = json.loads((view / "model.safetensors.index.json").read_text())
+    listed = set(index["weight_map"].values())
+    present = {f.name for f in view.glob("*.safetensors")}
+    assert listed == present, "the index must not mention files that are absent"
+
+    full = json.loads((sharded_model / "model.safetensors.index.json").read_text())
+    assert listed < set(full["weight_map"].values()), "some files should be skipped"
+    # Metadata the engine needs to build the model at all comes along.
+    assert (view / "config.json").exists()
+
+    # And the view is loadable: the tensors of this stage's layers are all there.
+    shard, _ = build_shard(stage_spec(view, 3, LAYERS, index=1))
+    assert len(shard.layers) == LAYERS - 3
+
+
+def test_single_file_checkpoint_needs_no_view(tmp_path):
+    """Nothing to prune, so the engine is pointed at the original directory."""
+    from loom_worker.shard.loader import build_stage_checkpoint_view
+
+    (tmp_path / "model.safetensors").write_bytes(b"")
+    spec = ShardSpec(model_path=str(tmp_path), start_layer=0, end_layer=1,
+                     is_first=True, is_last=True)
+    assert build_stage_checkpoint_view(str(tmp_path), spec) == str(tmp_path)
+
+
+def test_a_stage_that_needs_everything_gets_the_original(sharded_model, tmp_path, monkeypatch):
+    """One stage covering the whole model has nothing to gain from a view."""
+    from loom_worker.shard.loader import build_stage_checkpoint_view
+
+    monkeypatch.setenv("LOOM_STAGE_VIEW_DIR", str(tmp_path / "views"))
+    whole = stage_spec(sharded_model, 0, LAYERS, num_stages=1, index=0)
+    assert build_stage_checkpoint_view(str(sharded_model), whole) == str(sharded_model)

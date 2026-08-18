@@ -280,3 +280,59 @@ def test_backend_refuses_to_run_on_a_non_cuda_node():
     )
     with pytest.raises(NotImplementedError, match="CUDA"):
         backend.prepare()
+
+
+# ------------------------------------------- surviving vLLM's moving config API
+def test_unknown_config_fields_are_dropped_not_fatal():
+    """vLLM 0.27 removed CacheConfig.swap_space; that must not abort the start.
+
+    The stage had already spent half an hour downloading the checkpoint when
+    the constructor rejected one stale keyword. Optional fields are dropped
+    with a warning instead.
+    """
+    import dataclasses
+
+    from loom_worker.vllm_stage.runtime import _construct
+
+    @dataclasses.dataclass
+    class NewerCacheConfig:
+        block_size: int = 16
+        gpu_memory_utilization: float = 0.9
+        cache_dtype: str = "auto"
+        # note: no swap_space, as in vLLM 0.27
+
+    built = _construct(
+        NewerCacheConfig,
+        required=("gpu_memory_utilization", "block_size"),
+        block_size=32,
+        gpu_memory_utilization=0.75,
+        swap_space=0,          # gone in this release
+        cache_dtype="auto",
+    )
+    assert built.block_size == 32
+    assert built.gpu_memory_utilization == 0.75
+
+
+def test_losing_a_field_that_carries_the_quota_is_fatal():
+    """Dropping the VRAM knob would silently hand the whole card to one model.
+
+    That surfaces much later as an OOM nobody can trace, so it raises here with
+    the file to fix.
+    """
+    import dataclasses
+
+    from loom_worker.vllm_stage.patches import VllmIntegrationError
+    from loom_worker.vllm_stage.runtime import _construct
+
+    @dataclasses.dataclass
+    class RenamedCacheConfig:
+        block_size: int = 16
+        memory_fraction: float = 0.9  # the quota knob under a new name
+
+    with pytest.raises(VllmIntegrationError, match="gpu_memory_utilization"):
+        _construct(
+            RenamedCacheConfig,
+            required=("gpu_memory_utilization", "block_size"),
+            block_size=16,
+            gpu_memory_utilization=0.75,
+        )
