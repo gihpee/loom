@@ -617,6 +617,7 @@ async function sendChat() {
 
   const totalMs = performance.now() - t0;
   const run = buildRun({body, noThink, totalMs, firstChunkAt, t0, chunkTimes, usage, timings, reason, text});
+  lastRun = run;  // full resolution, for the single-run export
   $("#c-stats").innerHTML = renderRunStats(run);
   pushRun(run);
   $("#c-hist").innerHTML = renderHistory();
@@ -667,7 +668,61 @@ function buildRun({body, noThink, totalMs, firstChunkAt, t0, chunkTimes, usage, 
     gapP95: pct(sortedGaps, 0.95),
     gaps,
     server: timings || null,
+    series: runSeries(timings, chunkTimes, t0),
   };
+}
+
+// One shape for the charts and the export, whatever measured it.
+//
+// The head stage's own series is preferred and is the honest one: it times
+// each token where it is produced. The client's is a fallback for backends
+// that send no timings — and it measures something slightly different, because
+// several tokens can arrive in one network chunk, which flattens the cadence.
+// `source` says which is which, so an exported file is never ambiguous.
+function runSeries(timings, chunkTimes, t0) {
+  const s = timings && timings.series;
+  if (s && s.t_ms && s.t_ms.length > 1) {
+    return {
+      source: "head-stage",
+      everyNTokens: s.every_n_tokens || 1,
+      tokens: s.tokens || s.t_ms.length,
+      t_ms: s.t_ms,
+      gap_ms: s.gap_ms,
+      head_ms: s.head_ms || [],
+      peer_ms: s.peer_ms || [],
+      wire_ms: s.wire_ms || [],
+    };
+  }
+  if (chunkTimes.length > 1) {
+    const t = chunkTimes.map(x => Math.round((x - t0) * 10) / 10);
+    const gap = t.map((v, i) => i === 0 ? v : Math.round((t[i] - t[i-1]) * 100) / 100);
+    return {source: "client-chunks", everyNTokens: 1, tokens: t.length,
+            t_ms: t, gap_ms: gap, head_ms: [], peer_ms: [], wire_ms: []};
+  }
+  return null;
+}
+
+// Instantaneous rate, token by token. A gap of 200 ms is 5 tok/s at that
+// moment; averaging the whole request hides everything that varies.
+function seriesRates(series) {
+  const n = series.everyNTokens || 1;
+  // Index 0 is the prefill, whose "rate" is not a decode rate at all.
+  return series.gap_ms.slice(1).map(g => g > 0 ? (1000 * n) / g : 0);
+}
+
+// A per-token rate is jagged even on a perfectly steady pipeline, so the raw
+// line is drawn faintly and a centred moving average is drawn over it. The
+// window scales with the run: a fixed one either erases a short answer or
+// leaves a long one unreadable.
+function smoothed(values, window) {
+  const w = window || Math.max(3, Math.round(values.length / 25));
+  const half = Math.floor(w / 2);
+  return values.map((_, i) => {
+    const from = Math.max(0, i - half), to = Math.min(values.length, i + half + 1);
+    let sum = 0;
+    for (let j = from; j < to; j++) sum += values[j];
+    return sum / (to - from);
+  });
 }
 
 function ms(v) { return v === null || v === undefined ? "—" : (v >= 1000 ? (v/1000).toFixed(2) + " s" : v.toFixed(0) + " ms"); }
@@ -680,12 +735,178 @@ function card(label, value, hint) {
     ${hint ? `<div class="muted">${hint}</div>` : ""}</div>`;
 }
 
+
+// ------------------------------------------------------------------ charts
+// A sparkline is enough to spot a spike; reading a rate off one is not
+// possible. These carry axes, because the question here is "how many tok/s at
+// second 12", not "is the shape bumpy".
+function lineChart(sets, {xs, yLabel, xLabel, height}) {
+  const w = 760, h = height || 200, padL = 46, padR = 10, padT = 10, padB = 26;
+  const all = sets.flatMap(s => s.values).filter(v => isFinite(v));
+  if (!all.length || xs.length < 2) return "";
+  const yMax = Math.max(...all) * 1.08 || 1;
+  const xMax = Math.max(...xs) || 1;
+  const px = v => padL + (v / xMax) * (w - padL - padR);
+  const py = v => h - padB - (Math.max(0, v) / yMax) * (h - padT - padB);
+
+  const ticksY = [0, 0.25, 0.5, 0.75, 1].map(f => {
+    const v = yMax * f, y = py(v);
+    return `<line x1="${padL}" y1="${y.toFixed(1)}" x2="${w - padR}" y2="${y.toFixed(1)}"
+              stroke="var(--line)" stroke-width="0.5"/>
+            <text x="${padL - 6}" y="${(y + 3.5).toFixed(1)}" text-anchor="end"
+              font-size="9" fill="var(--muted)">${v >= 10 ? v.toFixed(0) : v.toFixed(1)}</text>`;
+  }).join("");
+  const ticksX = [0, 0.25, 0.5, 0.75, 1].map(f => {
+    const v = xMax * f, x = px(v);
+    return `<text x="${x.toFixed(1)}" y="${h - 8}" text-anchor="middle"
+              font-size="9" fill="var(--muted)">${(v / 1000).toFixed(1)}s</text>`;
+  }).join("");
+  const lines = sets.map(s => {
+    const pts = s.values.map((v, i) =>
+      `${px(xs[i]).toFixed(1)},${py(v).toFixed(1)}`).join(" ");
+    return `<polyline points="${pts}" fill="none" stroke="${s.color}"
+              stroke-width="${s.width || 1.5}" opacity="${s.opacity || 1}"/>`;
+  }).join("");
+  const legend = sets.filter(s => s.label).map((s, i) =>
+    `<g transform="translate(${padL + 6 + i * 132}, ${padT + 8})">
+       <line x1="0" y1="0" x2="14" y2="0" stroke="${s.color}" stroke-width="2"
+         opacity="${s.opacity || 1}"/>
+       <text x="19" y="3.5" font-size="10" fill="var(--muted)">${esc(s.label)}</text></g>`).join("");
+
+  return `<svg viewBox="0 0 ${w} ${h}" style="width:100%;max-width:${w}px;height:auto;
+      background:var(--panel);border:1px solid var(--line);border-radius:6px">
+      ${ticksY}${ticksX}
+      <text x="10" y="${padT + 4}" font-size="9" fill="var(--muted)">${esc(yLabel)}</text>
+      <text x="${w - padR}" y="${h - 8}" text-anchor="end" font-size="9"
+        fill="var(--muted)">${esc(xLabel || "время запроса")}</text>
+      ${lines}${legend}
+    </svg>`;
+}
+
+function renderSeriesCharts(run) {
+  const s = run.series;
+  if (!s || !s.t_ms || s.t_ms.length < 3) return "";
+  const rates = seriesRates(s);
+  const xs = s.t_ms.slice(1);              // drop the prefill point
+  if (rates.length < 2) return "";
+  // Tokens divided by the time they took — NOT the mean of the per-token
+  // rates. Averaging rates weights a 1 ms token the same as a 100 ms one and
+  // comes out higher than the request actually ran; this line has to agree
+  // with the tokens/s card above it or one of the two is lying.
+  const n = s.everyNTokens || 1;
+  const decodeMs = s.gap_ms.slice(1).reduce((a, b) => a + b, 0);
+  const avg = decodeMs > 0 ? (1000 * n * rates.length) / decodeMs : 0;
+
+  const rateChart = lineChart([
+    {values: rates, color: "var(--acc)", width: 1, opacity: 0.28, label: "мгновенно"},
+    {values: smoothed(rates), color: "var(--ok)", width: 2, label: "скользящее среднее"},
+    {values: rates.map(() => avg), color: "var(--muted)", width: 1, opacity: 0.6,
+     label: `за весь прогон ${avg.toFixed(2)}`},
+  ], {xs, yLabel: "tok/s", xLabel: "время от начала запроса"});
+
+  // The split is only worth drawing when the head stage reported it; the
+  // client's own clock cannot see inside a pipeline.
+  let splitChart = "";
+  if (s.head_ms.length > 1) {
+    const drop = a => a.slice(1);
+    splitChart = `<h2 style="margin-top:16px">Из чего складывается токен (ms)</h2>` +
+      lineChart([
+        {values: smoothed(drop(s.head_ms)), color: "var(--acc)", width: 1.6, label: "свои слои"},
+        {values: smoothed(drop(s.peer_ms)), color: "var(--warn)", width: 1.6, label: "остальные стадии"},
+        {values: smoothed(drop(s.wire_ms)), color: "var(--ok)", width: 1.6, label: "транспорт"},
+      ], {xs, yLabel: "ms", xLabel: "время от начала запроса", height: 170}) +
+      `<p class="muted">сглажено; сумма трёх линий — это интервал между токенами</p>`;
+  }
+
+  const sampled = (s.everyNTokens || 1) > 1
+    ? ` <span class="warn">точки прорежены: 1 на ${s.everyNTokens} токенов</span>` : "";
+  const origin = s.source === "head-stage"
+    ? "замерено головой пайплайна"
+    : "замерено клиентом по чанкам стрима — несколько токенов могут прийти одной пачкой";
+
+  return `<h2 style="margin-top:16px">Скорость по ходу генерации</h2>
+    ${rateChart}
+    <p class="muted">${origin}${sampled}</p>
+    ${splitChart}`;
+}
+
+// ------------------------------------------------------------------ export
+// The charts answer the questions this UI thought to ask. Handing over the
+// numbers themselves is what lets somebody ask a different one — overlay two
+// runs, compare a three-node split against a two-node one, plot it elsewhere.
+function downloadJson(filename, payload) {
+  const blob = new Blob([JSON.stringify(payload, null, 2)], {type: "application/json"});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+function runStamp(run) {
+  const d = new Date(run.at);
+  const two = n => String(n).padStart(2, "0");
+  return `${d.getFullYear()}${two(d.getMonth()+1)}${two(d.getDate())}-` +
+         `${two(d.getHours())}${two(d.getMinutes())}${two(d.getSeconds())}`;
+}
+
+function exportRun(run) {
+  return {
+    schema: "loom.run.v1",
+    at: new Date(run.at).toISOString(),
+    model: run.model,
+    stages: run.server ? run.server.stages : null,
+    pipeline_id: run.server ? run.server.pipeline_id : null,
+    stream: run.stream,
+    no_think: run.noThink,
+    max_tokens: run.maxTokens,
+    finish_reason: run.reason,
+    prompt_tokens: run.promptTokens,
+    completion_tokens: run.completionTokens,
+    client: {
+      total_ms: run.totalMs,
+      ttft_ms: run.clientTtftMs,
+      decode_tokens_per_s: run.clientDecodeTps,
+      tokens_per_s: run.clientTps,
+    },
+    server: run.server || null,
+    // Parallel arrays, index-aligned. Index 0 is the prefill: gap_ms[0] is the
+    // time to first token, not a decode interval.
+    series: run.series || null,
+  };
+}
+
+function exportLastRun() {
+  if (!lastRun) return;
+  downloadJson(`loom-run-${runStamp(lastRun)}.json`, exportRun(lastRun));
+}
+
+function exportAllRuns() {
+  const runs = loadRuns();
+  if (!runs.length) return;
+  downloadJson(`loom-runs-${runStamp(runs[0])}.json`, {
+    schema: "loom.runs.v1",
+    exported_at: new Date().toISOString(),
+    runs: runs.map(exportRun),
+  });
+}
+
 function renderRunStats(run) {
   const s = run.server;
-  const tps = run.clientDecodeTps !== null ? run.clientDecodeTps : (s ? s.decode_tokens_per_s : null);
+  // The head stage's number, not the client's, for the same reason the
+  // inter-token figures below prefer it: several tokens can arrive in one
+  // network chunk, which shortens the decode window the client can see and
+  // inflates its rate. On a slow pipeline the two agree; on a fast one the
+  // client reads high — and it would then disagree with the chart underneath,
+  // which is plotted from the head's own series.
+  const tps = s ? s.decode_tokens_per_s : run.clientDecodeTps;
   const ttft = run.clientTtftMs !== null ? run.clientTtftMs : (s ? s.ttft_ms : null);
   const cards = [
-    card("tokens/s (decode)", num(tps, 2), "без учёта prefill"),
+    card("tokens/s (decode)", num(tps, 2),
+         s ? "без prefill · голова" : "без prefill · клиент"),
     card("TTFT", ms(ttft), "до первого токена"),
     card("время ответа", ms(run.totalMs), run.stream ? "клиент, весь стрим" : "клиент, весь запрос"),
     card("токенов", `${run.completionTokens ?? "—"}`,
@@ -725,9 +946,12 @@ function renderRunStats(run) {
   const spark = run.gaps.length > 1
     ? `<h2 style="margin-top:16px">Приход токенов клиенту (ms между чанками)</h2>${sparkline(run.gaps)}`
     : "";
-  return `<h2 style="margin-top:16px">Статистика запроса</h2>
+  const download = run.series
+    ? `<button class="action" style="margin-left:8px;padding:2px 8px"
+         onclick="exportLastRun()">скачать JSON</button>` : "";
+  return `<h2 style="margin-top:16px">Статистика запроса${download}</h2>
     <div style="display:flex;gap:8px;flex-wrap:wrap">${cards.join("")}</div>
-    ${serverBlock}${spark}`;
+    ${serverBlock}${renderSeriesCharts(run)}${spark}`;
 }
 
 // ------------------------------------------------------------------ charts
@@ -773,13 +997,39 @@ const HIST_KEY = "loom_console_runs";
 function loadRuns() {
   try { return JSON.parse(localStorage.getItem(HIST_KEY) || "[]"); } catch (e) { return []; }
 }
+let lastRun = null;
+// Points kept per stored run. The full series stays in memory for the run on
+// screen; history keeps enough shape to overlay runs against each other
+// without 20 of them filling the localStorage quota.
+const HIST_SERIES_POINTS = 400;
+
+function thinSeries(series, limit) {
+  if (!series || !series.t_ms || series.t_ms.length <= limit) return series;
+  const step = Math.ceil(series.t_ms.length / limit);
+  const take = a => (a && a.length) ? a.filter((_, i) => i % step === 0) : [];
+  return {
+    ...series,
+    everyNTokens: (series.everyNTokens || 1) * step,
+    t_ms: take(series.t_ms), gap_ms: take(series.gap_ms),
+    head_ms: take(series.head_ms), peer_ms: take(series.peer_ms),
+    wire_ms: take(series.wire_ms),
+  };
+}
+
 function pushRun(run) {
-  // Keep the raw gap series out of storage: it is per-run detail, and 20 runs
-  // of it would blow past the localStorage quota.
+  // The raw client gap series is per-run detail the history does not use.
   const {gaps, ...slim} = run;
+  slim.series = thinSeries(run.series, HIST_SERIES_POINTS);
   const runs = loadRuns();
   runs.unshift(slim);
-  localStorage.setItem(HIST_KEY, JSON.stringify(runs.slice(0, 20)));
+  // A quota error must not cost the user their history: drop the oldest runs
+  // until it fits rather than failing the write.
+  for (let keep = Math.min(20, runs.length); keep >= 1; keep--) {
+    try {
+      localStorage.setItem(HIST_KEY, JSON.stringify(runs.slice(0, keep)));
+      return;
+    } catch (e) { /* quota: try again with fewer runs */ }
+  }
 }
 function clearRuns() { localStorage.removeItem(HIST_KEY); $("#c-hist").innerHTML = renderHistory(); }
 
@@ -799,14 +1049,19 @@ function renderHistory() {
     if (own !== null && own !== undefined) return {label: runLabel(r), value: own};
     return {label: runLabel(r), value: r.server ? r.server[serverKey] : null};
   });
-  const tps = pick("clientDecodeTps", "decode_tokens_per_s");
+  // Same clock as the cards and the charts, so a run compared here is the run
+  // that was reported above.
+  const tps = runs.map(r => ({
+    label: runLabel(r),
+    value: r.server ? r.server.decode_tokens_per_s : r.clientDecodeTps,
+  }));
   const ttft = pick("clientTtftMs", "ttft_ms");
   const rows = runs.map(r => [
     new Date(r.at).toLocaleTimeString(),
     esc(r.model) + (r.noThink ? ` <span class="dim">no-think</span>` : "") +
       (r.stream ? ` <span class="dim">stream</span>` : ""),
     `${r.completionTokens ?? "—"}${r.promptTokens !== null && r.promptTokens !== undefined ? ` <span class="dim">+${r.promptTokens} prompt</span>` : ""}`,
-    num(r.clientDecodeTps, 2),
+    num(r.server ? r.server.decode_tokens_per_s : r.clientDecodeTps, 2),
     ms(r.clientTtftMs),
     ms(r.totalMs),
     r.server ? `${num(r.server.inter_token_ms_p50)} / ${num(r.server.inter_token_ms_p95)}` : "—",
@@ -814,7 +1069,10 @@ function renderHistory() {
     r.reason === "length" ? `<span class="warn">length</span>` : `<span class="dim">${esc(r.reason || "—")}</span>`,
   ]);
   return `<h2 style="margin-top:20px">Сравнение прогонов
-      <button class="action danger" style="margin-left:8px;padding:2px 8px" onclick="clearRuns()">очистить</button></h2>
+      <button class="action" style="margin-left:8px;padding:2px 8px"
+        onclick="exportAllRuns()">скачать все JSON</button>
+      <button class="action danger" style="margin-left:4px;padding:2px 8px" onclick="clearRuns()">очистить</button></h2>
+    <p class="muted">в JSON — ряды по токенам всех прогонов, чтобы накладывать их друг на друга</p>
     <p class="muted">tokens/s (decode) — больше лучше</p>${barChart(tps, "tok/s", "--ok")}
     <p class="muted">TTFT — меньше лучше</p>${barChart(ttft, "ms", "--warn")}
     ` + table(["время","модель","токенов","tok/s","TTFT","всего","между токенами p50/p95","стадий","finish"], rows);

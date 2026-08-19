@@ -320,3 +320,75 @@ def test_single_stage_reports_no_peer_time(pipeline_stack, reference_completion)
     # Prefill (the first sample) is excluded: it is one long step already
     # reported as ttft, and it would drag every percentile.
     assert split["head_compute_ms_mean"] == pytest.approx(4.25)
+
+
+def test_timings_carry_the_per_token_series(pipeline_stack, reference_completion):
+    """Percentiles cannot show a rate drifting, stalling, or one stage lagging.
+
+    The summary answers "what did a token cost on average"; a benchmark asks
+    "when did it change". Both come from the same measurements, so the series
+    is the same numbers unsummarised — and it is what the admin UI plots and
+    exports for someone to overlay two runs elsewhere.
+    """
+    orch, _ = pipeline_stack
+    assert wait_until(lambda: bool(orch.controller.endpoints.candidates(MODEL_ID)), 90)
+    want = 12
+
+    async def call(api):
+        return await api.post(
+            "/v1/chat/completions",
+            json={
+                "model": MODEL_ID,
+                "messages": [{"role": "user", "content": PROMPT}],
+                "max_tokens": want,
+            },
+        )
+
+    t = orch.call_api(call).json()["timings"]
+    series = t["series"]
+
+    # Parallel arrays, index-aligned, one point per token.
+    lengths = {key: len(series[key]) for key in
+               ("t_ms", "gap_ms", "head_ms", "peer_ms", "wire_ms")}
+    assert len(set(lengths.values())) == 1, f"ragged series: {lengths}"
+    assert 1 < len(series["t_ms"]) <= want
+    assert series["tokens"] == len(series["t_ms"]), "no thinning at this length"
+    assert series["every_n_tokens"] == 1
+
+    # Index 0 is the prefill, so its gap IS the time to first token.
+    assert series["gap_ms"][0] == pytest.approx(t["ttft_ms"], rel=0.02)
+    # Time only moves forward, and the last point is the end of the request.
+    assert series["t_ms"] == sorted(series["t_ms"])
+    assert series["t_ms"][-1] == pytest.approx(t["total_ms"], rel=0.02)
+
+    # Each decode point reconstructs its own interval from its own parts —
+    # the same identity the percentiles satisfy, held token by token.
+    for i in range(1, len(series["t_ms"])):
+        parts = series["head_ms"][i] + series["peer_ms"][i] + series["wire_ms"][i]
+        assert parts == pytest.approx(series["gap_ms"][i], rel=0.35, abs=2.0), (
+            f"token {i}: split {parts:.2f} ms does not reconstruct "
+            f"{series['gap_ms'][i]:.2f} ms"
+        )
+
+
+def test_a_long_run_is_thinned_instead_of_growing_without_bound(monkeypatch):
+    """One closing chunk must stay something the tunnel will carry."""
+    from loom_worker.shard import server as stage_server
+
+    monkeypatch.setattr(stage_server, "SERIES_MAX_POINTS", 10)
+    token_times = [1.0 + 0.1 * i for i in range(250)]
+    per_step = [5.0] * 250
+    series = stage_server._timing_series(
+        1.0, token_times, per_step, per_step, per_step
+    )
+    assert series["tokens"] == 250
+    assert len(series["t_ms"]) <= 10
+    assert series["every_n_tokens"] == 25, "the reader must know a point spans 25 tokens"
+    # Thinned gaps still describe the span between the points that remain.
+    assert series["gap_ms"][1] == pytest.approx(2500.0, rel=0.01)
+
+
+def test_an_empty_run_has_no_series():
+    from loom_worker.shard.server import _timing_series
+
+    assert _timing_series(1.0, [], [], [], []) == {}

@@ -441,6 +441,62 @@ def _timings(
         # Where each token's time actually goes. Decode steps only: the first
         # entry is prefill, whose cost is already reported as ttft.
         **_latency_split(head_times, peer_times, transport_times),
+        # The same measurements unsummarised, token by token. Percentiles say
+        # what a request cost on average; they cannot show a rate drifting down
+        # as the context grows, a stall in the middle, or the moment one stage
+        # started lagging. That needs the series itself.
+        "series": _timing_series(
+            started_at, token_times, head_times, peer_times, transport_times
+        ),
+    }
+
+
+# A long answer is a long series. Capped so one closing chunk cannot grow past
+# what the tunnel will carry; the cap is far above any interactive request.
+SERIES_MAX_POINTS = int(os.environ.get("LOOM_TIMING_SERIES_MAX", "4096"))
+
+
+def _timing_series(
+    started_at: float,
+    token_times: List[float],
+    head_times: Optional[List[float]],
+    peer_times: Optional[List[float]],
+    transport_times: Optional[List[float]],
+) -> dict:
+    """Per-token measurements as parallel arrays, aligned by index.
+
+    Index 0 is the first token, so `gap_ms[0]` is the prefill (it equals ttft)
+    and `head_ms[0]` is the prefill's compute. Consumers wanting steady-state
+    decode drop index 0, exactly as the percentiles above do.
+
+    Parallel arrays rather than a list of objects: the payload is a third of
+    the size and it is what a plotting library wants anyway.
+    """
+    if not token_times:
+        return {}
+    count = len(token_times)
+    step = max(1, -(-count // SERIES_MAX_POINTS))  # ceil division
+    keep = range(0, count, step)
+
+    def at(values: Optional[List[float]], index: int) -> float:
+        if not values or index >= len(values):
+            return 0.0
+        return round(values[index], 2)
+
+    elapsed, gaps = [], []
+    for i in keep:
+        elapsed.append(round((token_times[i] - started_at) * 1000, 1))
+        previous = token_times[i - step] if i >= step else started_at
+        gaps.append(round((token_times[i] - previous) * 1000, 2))
+    return {
+        "t_ms": elapsed,          # since the request started
+        "gap_ms": gaps,           # since the previous point
+        "head_ms": [at(head_times, i) for i in keep],
+        "peer_ms": [at(peer_times, i) for i in keep],
+        "wire_ms": [at(transport_times, i) for i in keep],
+        "tokens": count,
+        # >1 means points were sampled every Nth token, so gap_ms spans N tokens.
+        "every_n_tokens": step,
     }
 
 
