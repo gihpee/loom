@@ -18,6 +18,8 @@ from loom_worker.backends.base import BackendAdapter
 
 
 class ShardBackend(BackendAdapter):
+
+    serves_partial_shard = True
     def __init__(
         self,
         *,

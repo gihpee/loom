@@ -158,8 +158,15 @@ class CommandHandlers:
                 start_layer=spec.start_layer,
                 end_layer=spec.end_layer,
                 vram_quota_bytes=spec.vram_quota_bytes,
+                num_model_layers=role.num_model_layers,
                 **backend_kwargs,
             )
+            if role.is_multi_stage and not backend.serves_partial_shard:
+                raise NotImplementedError(
+                    f"backend '{spec.backend_type}' serves whole models only "
+                    f"and cannot be one of {role.num_stages} pipeline stages. "
+                    f"Deploy this model with 'shard' or 'vllm_shard'"
+                )
             shard = ShardState(spec=spec, backend=backend, status=ShardStatus.LOADING)
             self.state.put(spec.model_id, shard)
             backend.prepare()

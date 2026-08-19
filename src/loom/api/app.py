@@ -355,6 +355,10 @@ def create_app(controller: MultiModelController) -> FastAPI:
         ...]} for an exact placement, or {"model_id": "...", "auto": true} to
         let the broker choose. The order of `stages` is the pipeline order:
         the first one is the head stage.
+
+        Optional `backend_type` overrides the catalog entry's for this
+        deployment — the same checkpoint served whole by `vllm` or split by
+        `shard`, chosen per run rather than per catalog file.
         """
         if _admin_forbidden(x_loom_admin_token):
             return _error(403, "invalid admin token")
@@ -369,7 +373,10 @@ def create_app(controller: MultiModelController) -> FastAPI:
             return _error(400, "give 'stages' for a manual placement, or auto=true")
         try:
             placement = await controller.deploy(
-                model_id, stages=stages, force=bool(raw.get("force"))
+                model_id,
+                stages=stages,
+                backend_type=(raw.get("backend_type") or "").strip() or None,
+                force=bool(raw.get("force")),
             )
         except PlacementError as exc:
             return _error(400, str(exc))

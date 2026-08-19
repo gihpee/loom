@@ -63,10 +63,24 @@ class VllmBackend(BackendAdapter):
         ]
 
     def prepare(self) -> None:
+        # `vllm serve` loads the model named by weights_uri — the whole of it.
+        # It has no idea a layer range was requested, so a partial shard here
+        # does not fail, it QUIETLY SERVES THE WRONG THING: stage 0 of a
+        # three-way split would have loaded all 36 layers and answered complete
+        # requests while the other two stages failed. Checking only for a
+        # non-zero start missed exactly that case.
+        if self.num_model_layers and self.end_layer < self.num_model_layers:
+            raise NotImplementedError(
+                f"the 'vllm' backend serves whole models only, but this shard "
+                f"is layers [{self.start_layer}, {self.end_layer}) of "
+                f"{self.num_model_layers}. Deploy the model with the 'shard' "
+                f"or 'vllm_shard' backend to split it across nodes"
+            )
         if self.start_layer != 0:
             raise NotImplementedError(
-                "vLLM adapter v0 serves full models only; partial shard "
-                f"[{self.start_layer}, {self.end_layer}) is not supported yet"
+                f"the 'vllm' backend serves whole models only; this shard "
+                f"starts at layer {self.start_layer}. Deploy with 'shard' or "
+                f"'vllm_shard' to split a model across nodes"
             )
 
     def _spawn(self) -> None:

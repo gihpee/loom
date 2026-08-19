@@ -33,6 +33,12 @@ def pick_free_port() -> int:
 class BackendAdapter(abc.ABC):
     """Lifecycle: prepare() -> start() -> [serving] -> stop()."""
 
+    # Can this backend serve PART of a model — one stage of a pipeline spread
+    # over several nodes? Most cannot: `vllm serve`, `sglang` and `mlx` each
+    # load a whole model and answer complete requests. Only `shard` and
+    # `vllm_shard` understand a layer range.
+    serves_partial_shard: bool = False
+
     def __init__(
         self,
         *,
@@ -42,11 +48,15 @@ class BackendAdapter(abc.ABC):
         end_layer: int,
         vram_quota_bytes: int,
         port: Optional[int] = None,
+        num_model_layers: int = 0,
     ) -> None:
         self.model_id = model_id
         self.weights_uri = weights_uri
         self.start_layer = start_layer
         self.end_layer = end_layer
+        # Depth of the WHOLE model. A layer range alone cannot tell a full
+        # shard from a partial one: [0, 12) looks like a beginning either way.
+        self.num_model_layers = num_model_layers
         self.vram_quota_bytes = vram_quota_bytes
         self.port = port or pick_free_port()
 

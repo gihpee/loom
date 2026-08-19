@@ -241,6 +241,7 @@ async function removeModel(id) {
 // needs the split pinned by hand and identical between runs.
 function depKey(nodeId) { return String(nodeId).replace(/[^A-Za-z0-9_-]/g, "_"); }
 let depNodeIds = [];
+let depSplittable = {};
 let depMsg = "";
 
 async function viewDeploy() {
@@ -260,6 +261,17 @@ async function viewDeploy() {
     `<option value="${esc(m.model_id)}" ${m.model_id===chosen.model_id?"selected":""}>` +
     `${esc(m.model_id)} — ${m.num_layers} слоёв, ~${m.weights_gb} GB</option>`).join("");
 
+  // Backend is a property of the RUN, not of the catalog entry: the same
+  // checkpoint is served whole by `vllm` and split by `shard`. Backends that
+  // cannot be a pipeline stage are labelled, because picking one and ticking
+  // two nodes is exactly how three nodes end up downloading a checkpoint each
+  // only to refuse the load.
+  const backends = data.backends.map(b =>
+    `<option value="${esc(b.name)}" ${b.name===chosen.backend_type?"selected":""}>` +
+    `${esc(b.name)}${b.splits ? "" : " — только целиком, на одну ноду"}</option>`).join("");
+  depSplittable = {};
+  data.backends.forEach(b => { depSplittable[b.name] = b.splits; });
+
   const rows = data.nodes.map((n, i) => {
     const k = depKey(n.node_id);
     const ceiling = chosen.max_layers_per_node[n.node_id] || 0;
@@ -276,7 +288,7 @@ async function viewDeploy() {
   });
 
   const current = chosen.deployed
-    ? `<p>сейчас развёрнута: <b>${chosen.placement.mode === "manual"
+    ? `<p>сейчас развёрнута на <b>${esc(chosen.backend_type)}</b>: <b>${chosen.placement.mode === "manual"
         ? chosen.placement.stages.map(s => `${esc(s.node_id)}[${s.start_layer}:${s.end_layer}]`).join(" → ")
         : "auto (брокер выбирает сам)"}</b>
        <button class="action danger" onclick="undeployModel('${esc(chosen.model_id)}')">снять</button></p>`
@@ -284,6 +296,7 @@ async function viewDeploy() {
 
   return `<h2>Deploy — ручная раскладка по нодам</h2>
     <p>модель <select id="dep-model" onchange="refresh({reset:true})">${options}</select>
+       бэкенд <select id="dep-backend" onchange="depTotal()">${backends}</select>
        <span class="dim">${chosen.num_layers} слоёв · param_mem_ratio ${data.param_mem_ratio}</span></p>
     ${current}
     <p><button class="action" onclick="depEven()">разделить поровну между отмеченными</button>
@@ -327,6 +340,14 @@ function depTotal() {
   if (!picked.length) { el.className = "dim"; el.textContent = "отметьте ноды и укажите слои"; return; }
   const sum = picked.reduce((a, s) => a + s.layers, 0);
   const chain = picked.map(s => `${s.node_id}=${s.layers}`).join(" + ");
+  const backendEl = document.querySelector("#dep-backend");
+  const backend = backendEl ? backendEl.value : "";
+  if (picked.length > 1 && depSplittable[backend] === false) {
+    el.className = "bad";
+    el.textContent = `бэкенд ${backend} обслуживает модель только целиком — ` +
+      `на ${picked.length} нод его не разложить. Выберите shard или vllm_shard`;
+    return;
+  }
   if (sum === total) { el.className = "ok"; el.textContent = `${chain} = ${sum} из ${total} ✓`; }
   else { el.className = "bad"; el.textContent = `${chain} = ${sum}, а нужно ровно ${total}`; }
 }
@@ -350,13 +371,16 @@ async function depDeploy(force) {
   depMsg = "разворачиваю… (первый запуск скачивает веса, это долго)";
   document.querySelector("#dep-out").textContent = depMsg;
   try {
+    const backendEl = document.querySelector("#dep-backend");
     const r = await api("/admin/deploy", {method:"POST", body: JSON.stringify({
       model_id: sel.value,
+      backend_type: backendEl ? backendEl.value : undefined,
       stages: picked.map(s => ({node_id: s.node_id, layers: s.layers})),
       force: !!force,
     })});
-    depMsg = "развёрнута: " + r.placement.stages
-      .map(s => `${s.node_id}[${s.start_layer}:${s.end_layer}] (${s.layers} слоёв)`).join(" → ");
+    depMsg = "развёрнута на " + (r.placement.backend_type || "бэкенде из каталога") + ": " +
+      r.placement.stages
+        .map(s => `${s.node_id}[${s.start_layer}:${s.end_layer}] (${s.layers} слоёв)`).join(" → ");
   } catch (e) { depMsg = "ошибка: " + e.message; }
   document.querySelector("#dep-out").textContent = depMsg;
   refresh();

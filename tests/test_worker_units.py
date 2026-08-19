@@ -150,3 +150,44 @@ def test_unknown_gpus_do_not_all_look_alike_forever():
     # Longest match wins: "a40" is a substring of "RTX A4000".
     assert match_gpu_specs("NVIDIA RTX A4000", 16.0)["tflops_fp16"] == 76.0
     assert match_gpu_specs("NVIDIA A40", 48.0)["tflops_fp16"] == 149.0
+
+
+# ------------------------------------------- a backend that cannot be a stage
+def test_the_vllm_adapter_refuses_a_partial_shard_that_starts_at_zero():
+    """The dangerous half of the stand's failure.
+
+    Stages 1 and 2 of a three-way split raised on arrival, which is loud and
+    fine. Stage 0 got layers [0, 12) and passed the old check, because it only
+    looked at start_layer. `vllm serve` ignores the layer range entirely — it
+    would have loaded all 36 layers and answered complete requests as if it
+    were the whole model, while the rest of the pipeline was down.
+    """
+    backend = VllmBackend(
+        model_id="qwen3-8b",
+        weights_uri="Qwen/Qwen3-8B",
+        start_layer=0,
+        end_layer=12,
+        num_model_layers=36,
+        vram_quota_bytes=9 * 1024**3,
+    )
+    with pytest.raises(NotImplementedError, match=r"layers \[0, 12\) of 36"):
+        backend.prepare()
+
+
+def test_the_vllm_adapter_accepts_a_whole_model():
+    backend = VllmBackend(
+        model_id="qwen3-8b",
+        weights_uri="Qwen/Qwen3-8B",
+        start_layer=0,
+        end_layer=36,
+        num_model_layers=36,
+        vram_quota_bytes=9 * 1024**3,
+    )
+    backend.prepare()  # no exception
+
+
+def test_only_the_layer_aware_backends_claim_to_serve_a_stage():
+    from loom_worker.backends import BACKENDS
+
+    splits = {name for name, cls in BACKENDS.items() if cls.serves_partial_shard}
+    assert splits == {"shard", "vllm_shard", "echo"}

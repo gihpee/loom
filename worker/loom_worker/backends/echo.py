@@ -19,6 +19,11 @@ from loom_worker.backends.base import BackendAdapter
 
 
 class EchoBackend(BackendAdapter):
+
+    # A stub, so it "serves" any layer range asked of it. That is what lets
+    # the control plane, the tunnel and multi-stage placement be tested on
+    # machines with no GPU.
+    serves_partial_shard = True
     def __init__(self, *, startup_delay_s: float = 0.0, **kwargs) -> None:
         super().__init__(**kwargs)
         self.startup_delay_s = startup_delay_s

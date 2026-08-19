@@ -20,6 +20,8 @@ from loom_worker.backends.shard import ShardBackend
 class VllmShardBackend(ShardBackend):
     """A `shard` stage whose engine is vLLM."""
 
+    serves_partial_shard = True
+
     def __init__(self, *, num_model_layers: int = 0, **kwargs) -> None:
         super().__init__(**kwargs)
         # The tail stage is the one holding the last layer, and only the whole

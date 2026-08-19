@@ -29,6 +29,8 @@ from loom.orchestrator.config import OrchestratorConfig
 from loom.orchestrator.gateway import WorkerSession, new_meta
 from loom.orchestrator.pool import ModelInstance, NodeDescriptor, SchedulerPool
 from loom.orchestrator.placement import (
+    KNOWN_BACKENDS,
+    SHARDABLE_BACKENDS,
     Placement,
     PlacementError,
     Stage,
@@ -37,6 +39,7 @@ from loom.orchestrator.placement import (
     is_complete_pipeline,
     max_layers_for,
     quota_for_layers,
+    check_backend_can_split,
     stages_as_allocation,
     stages_from_request,
 )
@@ -401,6 +404,7 @@ class MultiModelController:
         model_id: str,
         *,
         stages: Optional[List[dict]] = None,
+        backend_type: Optional[str] = None,
         force: bool = False,
     ) -> Placement:
         """Put a model on the stand, by hand or by broker.
@@ -409,6 +413,10 @@ class MultiModelController:
         counts, in this order. Omitted means the broker chooses, which is what
         Loom does in production but cannot be used for a measurement.
 
+        `backend_type` overrides the catalog entry's for this deployment, so
+        the same model can be served whole by `vllm` on one run and split by
+        `shard` on the next without editing a catalog file.
+
         Raises PlacementError with a message meant to be shown to the operator;
         nothing is changed when it does.
         """
@@ -416,12 +424,22 @@ class MultiModelController:
         if spec is None:
             raise PlacementError(f"model '{model_id}' is not in the catalog")
 
+        effective_backend = backend_type or spec.backend_type
+        if backend_type and backend_type not in KNOWN_BACKENDS:
+            raise PlacementError(
+                f"unknown backend '{backend_type}'; known: "
+                + ", ".join(sorted(KNOWN_BACKENDS))
+            )
+
         if stages is None:
-            placement = Placement.auto(model_id)
+            placement = Placement.auto(model_id, backend_type=backend_type)
         else:
             parsed = stages_from_request(
                 stages, num_model_layers=spec.model_info.num_layers
             )
+            # Before anything about VRAM or nodes: can this backend be a stage
+            # at all? Getting this wrong costs a checkpoint download per node.
+            check_backend_can_split(effective_backend, len(parsed))
             unknown = [s.node_id for s in parsed if s.node_id not in self.nodes]
             if unknown:
                 raise PlacementError(
@@ -443,7 +461,7 @@ class MultiModelController:
                     + "; ".join(problems)
                     + ". Move layers to another node, or send force=true to try anyway"
                 )
-            placement = Placement.manual(model_id, parsed)
+            placement = Placement.manual(model_id, parsed, backend_type=backend_type)
 
         self.placements[model_id] = placement
         # A deliberate placement deserves a clean attempt: an earlier failure
@@ -452,6 +470,14 @@ class MultiModelController:
             self.deploy_failures.pop(key, None)
         await self.rebalance(reason=f"deploy {model_id}")
         return placement
+
+    def backend_for(self, model_id: str) -> str:
+        """The backend this deployment runs on: the override, else the catalog."""
+        placement = self.placements.get(model_id)
+        spec = self.registry.get(model_id)
+        if placement is not None and placement.backend_type:
+            return placement.backend_type
+        return spec.backend_type if spec is not None else ""
 
     async def undeploy(self, model_id: str) -> bool:
         """Take a model off the stand; it stays in the catalog."""
@@ -652,7 +678,7 @@ class MultiModelController:
                         model_id=model_id,
                         start_layer=start,
                         end_layer=end,
-                        backend_type=spec.backend_type,
+                        backend_type=self.backend_for(model_id),
                         weights_uri=spec.weights_uri,
                         vram_quota_bytes=quota,
                         meta=meta,
@@ -1045,7 +1071,8 @@ class MultiModelController:
                 {
                     "model_id": spec.model_id,
                     "num_layers": info.num_layers,
-                    "backend_type": spec.backend_type,
+                    "backend_type": self.backend_for(spec.model_id),
+                    "catalog_backend_type": spec.backend_type,
                     "weights_gb": round(
                         (
                             info.num_layers * per_layer
@@ -1074,6 +1101,12 @@ class MultiModelController:
             "nodes": nodes,
             "models": models,
             "param_mem_ratio": self.config.param_mem_ratio,
+            # Which backends can be one stage of a multi-node pipeline. The
+            # form greys out the rest as soon as a second node is ticked.
+            "backends": [
+                {"name": name, "splits": name in SHARDABLE_BACKENDS}
+                for name in sorted(KNOWN_BACKENDS)
+            ],
         }
 
     def perfmap_view(self, model_id: str) -> Optional[dict]:

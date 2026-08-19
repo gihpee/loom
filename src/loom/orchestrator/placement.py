@@ -29,6 +29,23 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Sequence, Tuple
 
 
+# Backends that understand a layer range, i.e. can be ONE stage of a pipeline
+# spread over several nodes. Everything else — `vllm`, `sglang`, `mlx` — loads
+# a whole model and answers complete requests.
+#
+# The worker holds the same truth in loom_worker/backends (`serves_partial_shard`)
+# and enforces it again on arrival; this copy exists so the orchestrator can
+# refuse an impossible split immediately, instead of letting three nodes
+# discover it separately after downloading a checkpoint each.
+SHARDABLE_BACKENDS = frozenset({"shard", "vllm_shard", "echo"})
+
+# Every backend a worker can be asked for. Validating the name here turns a
+# typo into a message on the deploy form instead of a NACK from three nodes.
+KNOWN_BACKENDS = frozenset(
+    {"shard", "vllm_shard", "vllm", "sglang", "mlx", "echo"}
+)
+
+
 class PlacementError(ValueError):
     """A placement that cannot be honoured, with a message meant for a human."""
 
@@ -56,19 +73,37 @@ class Stage:
 
 @dataclass
 class Placement:
-    """Where one model runs. `stages` is empty exactly when mode is auto."""
+    """Where one model runs. `stages` is empty exactly when mode is auto.
+
+    `backend_type` overrides the catalog entry's own for this deployment. The
+    catalog says what a model IS; how to run it is a property of the run — the
+    same checkpoint is served whole by `vllm` and split by `shard`, and a
+    measurement wants to switch between them without editing a catalog file
+    and restarting the orchestrator.
+    """
 
     model_id: str
     mode: str = "auto"  # "auto" | "manual"
     stages: List[Stage] = field(default_factory=list)
+    backend_type: Optional[str] = None
 
     @classmethod
-    def auto(cls, model_id: str) -> "Placement":
-        return cls(model_id=model_id, mode="auto")
+    def auto(cls, model_id: str, backend_type: Optional[str] = None) -> "Placement":
+        return cls(model_id=model_id, mode="auto", backend_type=backend_type)
 
     @classmethod
-    def manual(cls, model_id: str, stages: Sequence[Stage]) -> "Placement":
-        return cls(model_id=model_id, mode="manual", stages=list(stages))
+    def manual(
+        cls,
+        model_id: str,
+        stages: Sequence[Stage],
+        backend_type: Optional[str] = None,
+    ) -> "Placement":
+        return cls(
+            model_id=model_id,
+            mode="manual",
+            stages=list(stages),
+            backend_type=backend_type,
+        )
 
     @property
     def is_manual(self) -> bool:
@@ -82,6 +117,7 @@ class Placement:
             "model_id": self.model_id,
             "mode": self.mode,
             "stages": [stage.as_dict() for stage in self.stages],
+            "backend_type": self.backend_type,
         }
 
 
@@ -177,6 +213,26 @@ def _validate_chain(stages: Sequence[Stage], *, num_model_layers: int) -> None:
             f"({abs(short)} {'missing' if short > 0 else 'too many'}); "
             f"the numbers must add up to exactly {num_model_layers}"
         )
+
+
+def check_backend_can_split(backend_type: str, num_stages: int) -> None:
+    """Refuse a split the backend cannot perform, before anything downloads.
+
+    This is the failure the stand hit: a catalog entry with `backend_type:
+    "vllm"` was placed across three nodes. Two of them raised on arrival; the
+    third was handed layers [0, 12) and would have been *fine* — `vllm serve`
+    ignores the range and loads all 36 layers, so a third of a pipeline would
+    have quietly answered complete requests. Catching it here means one clear
+    message instead of three nodes each downloading a checkpoint to find out.
+    """
+    if num_stages <= 1 or backend_type in SHARDABLE_BACKENDS:
+        return
+    raise PlacementError(
+        f"backend '{backend_type}' serves whole models only and cannot be "
+        f"split across {num_stages} nodes. Choose 'shard' (transformers, runs "
+        f"anywhere) or 'vllm_shard' (vLLM, CUDA only) for this deployment, or "
+        f"place the model on a single node"
+    )
 
 
 def is_complete_pipeline(stages: Sequence[Stage], *, num_model_layers: int) -> bool:

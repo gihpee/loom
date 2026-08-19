@@ -495,3 +495,100 @@ def test_one_node_then_two_through_the_running_stack():
         for w in workers:
             w.stop()
         orch.stop()
+
+
+# ------------------------------------------------- backend has to be able to split
+def test_a_whole_model_backend_cannot_be_split_across_nodes():
+    """The stand's failure, caught where it costs nothing.
+
+    A catalog entry with backend_type "vllm" was placed on three nodes. Two
+    refused on arrival; the third was handed layers [0, 12) and would have been
+    fine — `vllm serve` ignores the range and loads all 36 layers, so a third
+    of a pipeline would have quietly answered complete requests.
+    """
+    controller = controller_with("catalog-demo.json")
+    model_id = controller.registry.list()[0].model_id
+    layers = controller.registry.get(model_id).model_info.num_layers
+    with pytest.raises(PlacementError, match="serves whole models only"):
+        asyncio.run(
+            controller.deploy(
+                model_id,
+                backend_type="vllm",
+                stages=[
+                    {"node_id": "n1", "layers": layers // 2},
+                    {"node_id": "n2", "layers": layers - layers // 2},
+                ],
+            )
+        )
+    assert controller.placements == {}
+
+
+def test_a_whole_model_backend_on_one_node_is_fine():
+    controller = controller_with("catalog-demo.json")
+    model_id = controller.registry.list()[0].model_id
+    layers = controller.registry.get(model_id).model_info.num_layers
+    placement = asyncio.run(
+        controller.deploy(
+            model_id, backend_type="vllm", stages=[{"node_id": "n1", "layers": layers}]
+        )
+    )
+    assert placement.backend_type == "vllm"
+    assert controller.backend_for(model_id) == "vllm"
+
+
+def test_the_backend_can_be_chosen_per_run_without_touching_the_catalog():
+    """A catalog entry says what a model is; the run says how to serve it."""
+    controller = controller_with("catalog-demo.json")
+    spec = controller.registry.list()[0]
+    layers = spec.model_info.num_layers
+    catalog_backend = spec.backend_type
+
+    asyncio.run(
+        controller.deploy(
+            spec.model_id,
+            backend_type="shard",
+            stages=[
+                {"node_id": "n1", "layers": layers // 2},
+                {"node_id": "n2", "layers": layers - layers // 2},
+            ],
+        )
+    )
+    assert controller.backend_for(spec.model_id) == "shard"
+    assert controller.registry.get(spec.model_id).backend_type == catalog_backend, (
+        "the catalog entry must not be rewritten by a deployment"
+    )
+
+
+def test_no_override_keeps_the_catalog_backend():
+    controller = controller_with("catalog-demo.json")
+    spec = controller.registry.list()[0]
+    layers = spec.model_info.num_layers
+    asyncio.run(controller.deploy(spec.model_id, stages=[{"node_id": "n1", "layers": layers}]))
+    assert controller.backend_for(spec.model_id) == spec.backend_type
+
+
+def test_an_unknown_backend_name_is_refused():
+    controller = controller_with("catalog-demo.json")
+    model_id = controller.registry.list()[0].model_id
+    layers = controller.registry.get(model_id).model_info.num_layers
+    with pytest.raises(PlacementError, match="unknown backend 'vlmm'"):
+        asyncio.run(
+            controller.deploy(
+                model_id, backend_type="vlmm", stages=[{"node_id": "n1", "layers": layers}]
+            )
+        )
+
+
+def test_the_deploy_command_carries_the_chosen_backend():
+    """What actually reaches the worker is the override, not the catalog."""
+    controller = controller_with("catalog-demo.json")
+    spec = controller.registry.list()[0]
+    layers = spec.model_info.num_layers
+    asyncio.run(
+        controller.deploy(spec.model_id, backend_type="shard", stages=[{"node_id": "n1", "layers": layers}])
+    )
+    assert controller.backend_for(spec.model_id) == "shard"
+    view = controller.placement_view()["models"]
+    row = next(m for m in view if m["model_id"] == spec.model_id)
+    assert row["backend_type"] == "shard"
+    assert row["catalog_backend_type"] == spec.backend_type
