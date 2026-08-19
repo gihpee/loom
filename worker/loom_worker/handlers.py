@@ -6,9 +6,11 @@ No placement/routing decisions are made here.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import threading
+import urllib.request
 from typing import Callable, List, Optional
 
 from loom_worker.backends import make_backend
@@ -300,16 +302,41 @@ class CommandHandlers:
             watchdog.set_quota(req.vram_quota_bytes)
         return self._ack(command_id, True)
 
+    def _stage_stats(self, shard) -> dict:
+        """Ask the stage what it has measured about itself.
+
+        Cheap (loopback, one small GET) and best-effort: telemetry must never
+        be the thing that breaks, so a stage that does not answer simply
+        reports nothing and the planner keeps its own estimate.
+        """
+        backend = shard.backend
+        if backend is None or shard.status != ShardStatus.SERVING:
+            return {}
+        try:
+            with urllib.request.urlopen(
+                backend.local_url() + backend.health_path(), timeout=1.0
+            ) as response:
+                return json.loads(response.read() or b"{}") or {}
+        except Exception:
+            return {}
+
     def telemetry_report(self) -> gateway_pb2.WorkerMessage:
         shards = []
         for model_id, shard in self.state.snapshot().items():
             port = shard.backend.port if shard.backend is not None else 0
+            stats = self._stage_stats(shard)
             shards.append(
                 worker_control_pb2.ShardTelemetry(
                     model_id=model_id,
                     start_layer=shard.spec.start_layer,
                     end_layer=shard.spec.end_layer,
-                    current_requests=0,  # v0: request counting lands with metrics
+                    # What this node actually costs per layer, measured on the
+                    # real model. The scheduler splits layers in proportion to
+                    # node speed, and without this it has only a spec table —
+                    # which does not know every card and cannot know that a
+                    # given one is throttled, shared or on a slow link.
+                    avg_layer_latency_ms=float(stats.get("layer_latency_ms") or 0.0),
+                    current_requests=int(stats.get("active_requests") or 0),
                     healthy=shard.status == ShardStatus.SERVING,
                     status=shard.status.value,
                     local_port=port if shard.status == ShardStatus.SERVING else 0,

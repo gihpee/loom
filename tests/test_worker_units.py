@@ -106,3 +106,47 @@ def test_watchdog_leaves_within_quota_backend_alone():
     finally:
         watchdog.stop()
         backend.stop()
+
+
+# ------------------------------------------------- what a node knows about itself
+def test_stage_reports_its_measured_speed_only_once_it_means_something():
+    """Per-layer ms is what the scheduler splits layers by.
+
+    A warm-up sample is worse than no sample: it would tell the planner this
+    node is slow and move layers away permanently. So the stage stays silent
+    until it has seen enough steps.
+    """
+    from loom_worker.shard.server import StageSpeed
+
+    speed = StageSpeed()
+    assert speed.snapshot() is None
+    for _ in range(4):
+        speed.record(compute_ms=40.0, num_layers=20)
+    assert speed.snapshot() is None, "four samples is still warm-up"
+
+    for _ in range(20):
+        speed.record(compute_ms=40.0, num_layers=20)
+    assert speed.snapshot() == pytest.approx(2.0, rel=0.05)
+
+
+def test_a_single_slow_step_does_not_redefine_the_node():
+    """One 300 ms hiccup must not cost this node its layers."""
+    from loom_worker.shard.server import StageSpeed
+
+    speed = StageSpeed()
+    for _ in range(40):
+        speed.record(compute_ms=40.0, num_layers=20)
+    steady = speed.snapshot()
+    speed.record(compute_ms=6000.0, num_layers=20)
+    assert speed.snapshot() < steady * 2
+
+
+def test_unknown_gpus_do_not_all_look_alike_forever():
+    """The spec table is a starting guess, and it says so in the logs."""
+    from loom_worker.hwinfo import match_gpu_specs
+
+    # The card the stand actually runs, previously unknown to the table.
+    assert match_gpu_specs("NVIDIA A30", 24.0)["tflops_fp16"] == 165.0
+    # Longest match wins: "a40" is a substring of "RTX A4000".
+    assert match_gpu_specs("NVIDIA RTX A4000", 16.0)["tflops_fp16"] == 76.0
+    assert match_gpu_specs("NVIDIA A40", 48.0)["tflops_fp16"] == 149.0

@@ -16,6 +16,7 @@ import pytest
 
 from loom.orchestrator.config import OrchestratorConfig
 from loom.orchestrator.controller import MultiModelController
+from loom.orchestrator.placement import Placement
 from loom.orchestrator.registry import ModelRegistry
 
 CONFIGS = Path(__file__).resolve().parent.parent / "configs"
@@ -25,7 +26,13 @@ GIB = 1024**3
 def make_controller(**overrides):
     registry = ModelRegistry.from_catalog_file(CONFIGS / "catalog-demo.json")
     config = OrchestratorConfig(registry=registry, rebalance_interval_s=3600.0, **overrides)
-    return MultiModelController(config)
+    controller = MultiModelController(config)
+    # These tests are about the retry cooldown, not about placement. A catalog
+    # entry no longer deploys itself (see test_placement.py), so they opt into
+    # brokered placement explicitly and carry on.
+    for spec in registry.list():
+        controller.placements[spec.model_id] = Placement.auto(spec.model_id)
+    return controller
 
 
 def telemetry(model_id: str, status: str):

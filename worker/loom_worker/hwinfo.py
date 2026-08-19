@@ -21,12 +21,15 @@ explicit overrides for testing (LOOM_DEVICE, LOOM_MEMORY_GB, ...).
 
 from __future__ import annotations
 
+import logging
 import os
 import platform
 import shutil
 import subprocess
 from dataclasses import dataclass
 from typing import Dict, Optional, Tuple
+
+logger = logging.getLogger("loom_worker.hwinfo")
 
 GIB = 1024**3
 
@@ -44,6 +47,13 @@ _GPU_DB: Dict[str, Dict[str, float]] = {
     "l4": {"tflops_fp16": 121.0, "bandwidth_gbps": 300.0},
     "a10g": {"tflops_fp16": 125.0, "bandwidth_gbps": 600.0},
     "a10": {"tflops_fp16": 125.0, "bandwidth_gbps": 600.0},
+    "a30": {"tflops_fp16": 165.0, "bandwidth_gbps": 933.0},
+    "a16": {"tflops_fp16": 35.9, "bandwidth_gbps": 200.0},
+    "a2": {"tflops_fp16": 18.0, "bandwidth_gbps": 200.0},
+    "rtx a6000": {"tflops_fp16": 155.0, "bandwidth_gbps": 768.0},
+    "rtx a5000": {"tflops_fp16": 111.0, "bandwidth_gbps": 768.0},
+    "rtx a4500": {"tflops_fp16": 94.0, "bandwidth_gbps": 640.0},
+    "rtx a4000": {"tflops_fp16": 76.0, "bandwidth_gbps": 448.0},
     "a6000": {"tflops_fp16": 155.0, "bandwidth_gbps": 768.0},
     "a40": {"tflops_fp16": 149.0, "bandwidth_gbps": 696.0},
     "v100": {"tflops_fp16": 112.0, "bandwidth_gbps": 900.0},
@@ -82,15 +92,33 @@ class DetectedHardware:
 
 
 def match_gpu_specs(name: str, vram_gb: float) -> Dict[str, float]:
-    """Map a device name to peak FP16 TFLOPs and memory bandwidth."""
+    """Map a device name to peak FP16 TFLOPs and memory bandwidth.
+
+    Longest key first, because the keys are substrings and short ones swallow
+    long ones: "a40" sits inside "RTX A4000", which made a 76 TFLOPS card
+    report itself as a 149 TFLOPS one — and the scheduler then handed it twice
+    the layers it could keep up with.
+
+    An unmatched card gets `_FALLBACK_GPU`, which is a guess and looks the same
+    for every unknown device. Two different unknown cards therefore appear
+    identical to the planner; the measured ms-per-layer that stages report back
+    is what eventually corrects that (see loom/planning/layer_allocation.py).
+    """
     key = name.lower()
     if "a100" in key and ("80" in key or vram_gb >= 60):
         return _GPU_DB["a100-80g"]
     if "a100" in key:
         return _GPU_DB["a100-40g"]
-    for sub, spec in _GPU_DB.items():
+    for sub in sorted(_GPU_DB, key=len, reverse=True):
         if sub in key:
-            return spec
+            return _GPU_DB[sub]
+    logger.warning(
+        "unknown GPU %r: scheduling with generic %.0f TFLOPS / %.0f GB/s until "
+        "this node reports its measured speed",
+        name,
+        _FALLBACK_GPU["tflops_fp16"],
+        _FALLBACK_GPU["bandwidth_gbps"],
+    )
     return dict(_FALLBACK_GPU)
 
 

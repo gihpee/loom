@@ -48,7 +48,7 @@
 </header>
 <main id="view"></main>
 <script>
-const TABS = ["Nodes","Models","Keys","Perf-map","SLO / Rebalance","Console"];
+const TABS = ["Nodes","Models","Deploy","Keys","Perf-map","SLO / Rebalance","Console"];
 let active = localStorage.getItem("loom_tab") || "Nodes";
 let perfModel = null;
 const $ = s => document.querySelector(s);
@@ -189,7 +189,9 @@ async function viewModels() {
       `<button class="action danger" onclick="removeModel('${esc(mid)}')">remove</button>`,
     ];
   });
-  return `<h2>Развернуть модель (архитектура определяется автоматически)</h2>
+  return `<h2>Добавить модель в каталог (архитектура определяется автоматически)</h2>
+    <p class="dim">Добавление НЕ запускает модель на нодах — это делается на вкладке
+       <b>Deploy</b>, где выбираются ноды и число слоёв на каждую.</p>
     <p><input id="m-repo" type="text" placeholder="HuggingFace repo, напр. Qwen/Qwen3-32B" style="width:320px">
        <select id="m-backend">
          <option value="shard">shard — режется по слоям между узлами (transformers)</option>
@@ -198,12 +200,12 @@ async function viewModels() {
        </select>
        prio <input id="m-prio" type="text" value="1" style="width:50px">
        реплик <input id="m-k" type="text" value="1" style="width:50px">
-       <button class="action" onclick="deployModel()">deploy</button></p>
+       <button class="action" onclick="deployModel()">в каталог</button></p>
     <pre id="m-out" class="muted">${esc(lastDeploy)}</pre>
-    <h2>Каталог + раскладка Phase-1</h2>` +
+    <h2>Каталог</h2>` +
     table(["model","prio/qps/price","k (act/target)","shape","placement (стадии пайплайна)","endpoints",""], rows);
 }
-let lastDeploy = "— укажите HF-имя модели и нажмите deploy —";
+let lastDeploy = "— укажите HF-имя модели, затем разверните её на вкладке Deploy —";
 async function deployModel() {
   const repo = $("#m-repo").value.trim();
   if (!repo) { lastDeploy = "укажите repo"; $("#m-out").textContent = lastDeploy; return; }
@@ -230,6 +232,142 @@ async function deployModel() {
 async function removeModel(id) {
   try { await api("/admin/models/" + encodeURIComponent(id), {method:"DELETE"}); refresh(); }
   catch (e) { $("#err").textContent = e.message; }
+}
+
+// ------------------------------------------------------------------ deploy
+// Hand placement: which nodes run a model and how many layers each gets.
+// The broker normally decides this, which is right for a marketplace and
+// useless for a measurement — comparing one node against two against three
+// needs the split pinned by hand and identical between runs.
+function depKey(nodeId) { return String(nodeId).replace(/[^A-Za-z0-9_-]/g, "_"); }
+let depNodeIds = [];
+let depMsg = "";
+
+async function viewDeploy() {
+  const data = await api("/admin/placement");
+  depNodeIds = data.nodes.map(n => n.node_id);
+  if (!data.models.length) {
+    return `<h2>Deploy</h2><p class="dim">каталог пуст — добавьте модель на вкладке Models</p>`;
+  }
+  if (!data.nodes.length) {
+    return `<h2>Deploy</h2><p class="dim">нет подключённых нод</p>`;
+  }
+  const sel = document.querySelector("#dep-model");
+  const chosenId = (sel && sel.value) || data.models[0].model_id;
+  const chosen = data.models.find(m => m.model_id === chosenId) || data.models[0];
+
+  const options = data.models.map(m =>
+    `<option value="${esc(m.model_id)}" ${m.model_id===chosen.model_id?"selected":""}>` +
+    `${esc(m.model_id)} — ${m.num_layers} слоёв, ~${m.weights_gb} GB</option>`).join("");
+
+  const rows = data.nodes.map((n, i) => {
+    const k = depKey(n.node_id);
+    const ceiling = chosen.max_layers_per_node[n.node_id] || 0;
+    const busy = n.busy_with.length ? `<span class="warn">занята: ${n.busy_with.map(esc).join(", ")}</span>` : `<span class="dim">свободна</span>`;
+    return [
+      `<input type="checkbox" id="dep-on-${k}" onchange="depTotal()">`,
+      `<input type="text" id="dep-ord-${k}" value="${i+1}" style="width:36px" onchange="depTotal()">`,
+      esc(n.node_id),
+      `${esc(n.gpu_name || n.device)} · ${n.vram_free_gb} / ${n.vram_total_gb} GB`,
+      `<span class="dim">${ceiling}</span>`,
+      `<input type="text" id="dep-lay-${k}" value="0" style="width:60px" onchange="depTotal()" oninput="depTotal()">`,
+      busy,
+    ];
+  });
+
+  const current = chosen.deployed
+    ? `<p>сейчас развёрнута: <b>${chosen.placement.mode === "manual"
+        ? chosen.placement.stages.map(s => `${esc(s.node_id)}[${s.start_layer}:${s.end_layer}]`).join(" → ")
+        : "auto (брокер выбирает сам)"}</b>
+       <button class="action danger" onclick="undeployModel('${esc(chosen.model_id)}')">снять</button></p>`
+    : `<p class="dim">не развёрнута</p>`;
+
+  return `<h2>Deploy — ручная раскладка по нодам</h2>
+    <p>модель <select id="dep-model" onchange="refresh({reset:true})">${options}</select>
+       <span class="dim">${chosen.num_layers} слоёв · param_mem_ratio ${data.param_mem_ratio}</span></p>
+    ${current}
+    <p><button class="action" onclick="depEven()">разделить поровну между отмеченными</button>
+       <button class="action" onclick="depDeploy()">развернуть</button>
+       <button class="action" onclick="depDeploy(true)">развернуть, игнорируя оценку VRAM</button></p>
+    <p id="dep-total" class="dim">отметьте ноды и укажите слои</p>
+    <pre id="dep-out" class="muted">${esc(depMsg)}</pre>` +
+    table(["","№","node","GPU · VRAM свободно","влезет слоёв","слоёв","состояние"], rows);
+}
+
+function depSelected() {
+  // Checked nodes, in the stage order the operator typed. Order is not
+  // cosmetic: stage 0 owns the embeddings and answers clients, so on nodes of
+  // different speed it decides which card carries them.
+  return depNodeIds
+    .map(id => {
+      const k = depKey(id);
+      const on = document.querySelector("#dep-on-" + k);
+      if (!on || !on.checked) return null;
+      const layers = parseInt((document.querySelector("#dep-lay-" + k) || {}).value, 10);
+      const order = parseFloat((document.querySelector("#dep-ord-" + k) || {}).value);
+      return {node_id: id, layers: isNaN(layers) ? 0 : layers, order: isNaN(order) ? 999 : order};
+    })
+    .filter(Boolean)
+    .sort((a, b) => a.order - b.order);
+}
+
+function depModelLayers() {
+  const sel = document.querySelector("#dep-model");
+  if (!sel) return 0;
+  const text = sel.options[sel.selectedIndex].textContent;
+  const match = text.match(/—\s*(\d+)\s*слоёв/);
+  return match ? parseInt(match[1], 10) : 0;
+}
+
+function depTotal() {
+  const el = document.querySelector("#dep-total");
+  if (!el) return;
+  const picked = depSelected();
+  const total = depModelLayers();
+  if (!picked.length) { el.className = "dim"; el.textContent = "отметьте ноды и укажите слои"; return; }
+  const sum = picked.reduce((a, s) => a + s.layers, 0);
+  const chain = picked.map(s => `${s.node_id}=${s.layers}`).join(" + ");
+  if (sum === total) { el.className = "ok"; el.textContent = `${chain} = ${sum} из ${total} ✓`; }
+  else { el.className = "bad"; el.textContent = `${chain} = ${sum}, а нужно ровно ${total}`; }
+}
+
+function depEven() {
+  const picked = depSelected();
+  const total = depModelLayers();
+  if (!picked.length || !total) return;
+  const base = Math.floor(total / picked.length), extra = total % picked.length;
+  picked.forEach((s, i) => {
+    const el = document.querySelector("#dep-lay-" + depKey(s.node_id));
+    if (el) el.value = base + (i < extra ? 1 : 0);
+  });
+  depTotal();
+}
+
+async function depDeploy(force) {
+  const sel = document.querySelector("#dep-model");
+  const picked = depSelected();
+  if (!sel || !picked.length) { depMsg = "отметьте хотя бы одну ноду"; document.querySelector("#dep-out").textContent = depMsg; return; }
+  depMsg = "разворачиваю… (первый запуск скачивает веса, это долго)";
+  document.querySelector("#dep-out").textContent = depMsg;
+  try {
+    const r = await api("/admin/deploy", {method:"POST", body: JSON.stringify({
+      model_id: sel.value,
+      stages: picked.map(s => ({node_id: s.node_id, layers: s.layers})),
+      force: !!force,
+    })});
+    depMsg = "развёрнута: " + r.placement.stages
+      .map(s => `${s.node_id}[${s.start_layer}:${s.end_layer}] (${s.layers} слоёв)`).join(" → ");
+  } catch (e) { depMsg = "ошибка: " + e.message; }
+  document.querySelector("#dep-out").textContent = depMsg;
+  refresh();
+}
+
+async function undeployModel(id) {
+  try {
+    await api("/admin/deploy/" + encodeURIComponent(id), {method:"DELETE"});
+    depMsg = "снята: " + id;
+  } catch (e) { depMsg = "ошибка: " + e.message; }
+  refresh();
 }
 
 async function viewKeys() {
@@ -659,7 +797,7 @@ function renderHistory() {
 }
 
 // ------------------------------------------------------------------ refresh
-const VIEWS = {"Nodes":viewNodes, "Models":viewModels, "Keys":viewKeys,
+const VIEWS = {"Nodes":viewNodes, "Models":viewModels, "Deploy":viewDeploy, "Keys":viewKeys,
                "Perf-map":viewPerfmap, "SLO / Rebalance":viewSlo, "Console":viewConsole};
 let timer = null;
 
@@ -704,6 +842,7 @@ async function refresh(options) {
     const carried = opts.reset ? {} : formSnapshot();
     $("#view").innerHTML = await VIEWS[active]();
     restoreForm(carried);
+    if (active === "Deploy") depTotal();  // the line is derived from the inputs
     $("#refreshed").textContent = "· " + new Date().toLocaleTimeString();
   } catch (e) { $("#err").textContent = e.message; }
   if (active !== "Console") timer = setTimeout(() => refresh({auto: true}), 3000);

@@ -30,6 +30,7 @@ from loom.orchestrator.controller import MultiModelController  # noqa: E402
 from loom.orchestrator.gateway import ControlGatewayServicer  # noqa: E402
 from loom.orchestrator.keys import KeyStore  # noqa: E402
 from loom.orchestrator.server import serve_grpc  # noqa: E402
+from loom.orchestrator.placement import Placement  # noqa: E402
 from loom.orchestrator.tunnel import DataPlaneServicer, TunnelHub  # noqa: E402
 
 GIB = 1024**3
@@ -44,7 +45,17 @@ def free_port() -> int:
 class OrchestratorHarness:
     """Orchestrator gRPC server (control + data plane) in an asyncio thread."""
 
-    def __init__(self, registry, *, keystore_path=None) -> None:
+    def __init__(self, registry, *, keystore_path=None, auto_deploy=True) -> None:
+        """`auto_deploy` mirrors what production does NOT do.
+
+        A catalog entry is an offer, not an order: nothing runs until someone
+        deploys it, which is why restarting the orchestrator no longer brings
+        models up on its own. Most tests here predate that and are about the
+        broker, self-healing or the SLO loop, so they opt every catalog model
+        into brokered placement and carry on. Tests about placement itself pass
+        auto_deploy=False and deploy explicitly.
+        """
+        self.auto_deploy = auto_deploy
         self.grpc_port = free_port()
         self.config = OrchestratorConfig(
             registry=registry,
@@ -66,6 +77,9 @@ class OrchestratorHarness:
         self.loop = asyncio.new_event_loop()
         self.controller = MultiModelController(self.config, tunnel=self.tunnel)
         self.controller.keystore = self.keystore
+        if auto_deploy:
+            for spec in registry.list():
+                self.controller.placements[spec.model_id] = Placement.auto(spec.model_id)
         self.servicer = ControlGatewayServicer(
             keystore=self.keystore, controller=self.controller
         )

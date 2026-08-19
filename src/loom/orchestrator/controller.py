@@ -28,6 +28,18 @@ from loom.orchestrator.broker import BrokerPlan, PoolNode, ResourceBroker
 from loom.orchestrator.config import OrchestratorConfig
 from loom.orchestrator.gateway import WorkerSession, new_meta
 from loom.orchestrator.pool import ModelInstance, NodeDescriptor, SchedulerPool
+from loom.orchestrator.placement import (
+    Placement,
+    PlacementError,
+    Stage,
+    describe,
+    fit_report,
+    is_complete_pipeline,
+    max_layers_for,
+    quota_for_layers,
+    stages_as_allocation,
+    stages_from_request,
+)
 from loom.orchestrator.registry import ModelSpec
 from loom.perfmap import InMemoryPerfMapStore, PerfMapStore, ShardPerf, sync_perfmap_to_scheduler
 from loom.orchestrator.tunnel import TunnelHub
@@ -100,6 +112,12 @@ class MultiModelController:
         self.nodes: Dict[str, NodeDescriptor] = {}
         self.sessions: Dict[str, WorkerSession] = {}
         self.deployed: Deployment = {}
+        # model_id -> Placement. A model in the catalog is a model that MAY
+        # run; it runs only once someone deploys it. Deliberately not
+        # persisted: after a restart the stand comes up idle and the next
+        # measurement says what it wants, instead of the orchestrator
+        # resurrecting whatever happened to be running last time.
+        self.placements: Dict[str, Placement] = {}
         # (model, node) -> when the current deploy attempt was issued. A worker
         # heartbeat still describing the PREVIOUS attempt must not be mistaken
         # for a fresh failure — that turns one bad start into a launch storm.
@@ -261,6 +279,7 @@ class MultiModelController:
                         num_stages,
                         session.node_id,
                     )
+                    self._adopt_running_model(shard.model_id)
                 if stage_index == 0:
                     handle = f"tunnel://{session.node_id}:{shard.local_port}"
                     known = {ep.base_url for ep in self.endpoints.candidates(shard.model_id)}
@@ -295,7 +314,160 @@ class MultiModelController:
                 )
 
     # ------------------------------------------------------------- admin (catalog)
+    # --------------------------------------------------------------- placement
+    def _adopt_running_model(self, model_id: str) -> None:
+        """Take ownership of stages that were already running.
+
+        An orchestrator restart forgets everything; the workers do not. Their
+        heartbeats say what is loaded and where, and re-syncing from that is
+        how the routing table comes back. But a re-synced deployment with no
+        placement behind it is worse than none: the very next rebalance sees a
+        model nobody asked for and tears down a healthy pipeline.
+
+        So a complete pipeline found running is adopted as the placement it
+        evidently is. Restarting the orchestrator then changes nothing on the
+        GPUs — the nodes reconnect, the experiment keeps running, and the
+        operator can still take it down from the UI. What restarting does NOT
+        do any more is start anything that was not already up.
+        """
+        if self.placements.get(model_id) is not None:
+            return  # somebody already said where this model belongs
+        spec = self.registry.get(model_id)
+        if spec is None:
+            return
+        found = [
+            (node_id, entry[1], entry[2])
+            for (mid, node_id), entry in self.deployed.items()
+            if mid == model_id
+        ]
+        stages = [
+            Stage(node_id=node_id, start_layer=start, end_layer=end)
+            for node_id, start, end in sorted(found, key=lambda f: f[1])
+        ]
+        if not is_complete_pipeline(stages, num_model_layers=spec.model_info.num_layers):
+            return  # a fragment so far: wait for the other stages' heartbeats
+
+        placement = Placement.manual(model_id, stages)
+        self.placements[model_id] = placement
+        # Re-synced entries carry no quota (telemetry does not report one).
+        # Filling it in with what this placement would ask for keeps the next
+        # rebalance from seeing a difference and redeploying a healthy shard.
+        grants = self._manual_grants(spec, placement)
+        for index, stage in enumerate(stages):
+            key = (model_id, stage.node_id)
+            entry = self.deployed.get(key)
+            if entry is None:
+                continue
+            self.deployed[key] = (
+                grants.get(stage.node_id, entry[0]),
+                stage.start_layer,
+                stage.end_layer,
+                entry[3],
+                index,
+                len(stages),
+            )
+        logger.info(
+            "adopted %s as it was already running: %s",
+            model_id,
+            describe(placement),
+        )
+
+    def _manual_grants(self, spec: ModelSpec, placement: Placement) -> Dict[str, int]:
+        """VRAM to ask each hand-placed stage for.
+
+        The broker is out of the loop here, but the worker still needs a number:
+        it is what the quota watchdog enforces and what a vLLM stage sizes its
+        KV cache from. Derived from the layers actually assigned, so a stage
+        that was given four layers does not reserve the card.
+        """
+        info = spec.model_info
+        per_layer = info.decoder_layer_io_bytes(roofline=False)
+        last = len(placement.stages) - 1
+        return {
+            stage.node_id: quota_for_layers(
+                num_layers=stage.num_layers,
+                is_first=index == 0,
+                is_last=index == last,
+                per_layer_param_bytes=per_layer,
+                embedding_param_bytes=info.embedding_io_bytes,
+                tie_embedding=bool(info.tie_embedding),
+                param_mem_ratio=self.config.param_mem_ratio,
+            )
+            for index, stage in enumerate(placement.stages)
+        }
+
+    async def deploy(
+        self,
+        model_id: str,
+        *,
+        stages: Optional[List[dict]] = None,
+        force: bool = False,
+    ) -> Placement:
+        """Put a model on the stand, by hand or by broker.
+
+        `stages` given means an exact placement: these nodes, these layer
+        counts, in this order. Omitted means the broker chooses, which is what
+        Loom does in production but cannot be used for a measurement.
+
+        Raises PlacementError with a message meant to be shown to the operator;
+        nothing is changed when it does.
+        """
+        spec = self.registry.get(model_id)
+        if spec is None:
+            raise PlacementError(f"model '{model_id}' is not in the catalog")
+
+        if stages is None:
+            placement = Placement.auto(model_id)
+        else:
+            parsed = stages_from_request(
+                stages, num_model_layers=spec.model_info.num_layers
+            )
+            unknown = [s.node_id for s in parsed if s.node_id not in self.nodes]
+            if unknown:
+                raise PlacementError(
+                    f"not connected right now: {', '.join(unknown)}. "
+                    f"Connected nodes: {', '.join(sorted(self.nodes)) or 'none'}"
+                )
+            info = spec.model_info
+            problems = fit_report(
+                parsed,
+                node_vram={n: d.vram_free_bytes for n, d in self.nodes.items()},
+                per_layer_param_bytes=info.decoder_layer_io_bytes(roofline=False),
+                embedding_param_bytes=info.embedding_io_bytes,
+                tie_embedding=bool(info.tie_embedding),
+                param_mem_ratio=self.config.param_mem_ratio,
+            )
+            if problems and not force:
+                raise PlacementError(
+                    "this split does not fit: "
+                    + "; ".join(problems)
+                    + ". Move layers to another node, or send force=true to try anyway"
+                )
+            placement = Placement.manual(model_id, parsed)
+
+        self.placements[model_id] = placement
+        # A deliberate placement deserves a clean attempt: an earlier failure
+        # on one of these nodes must not silently hold it back for minutes.
+        for key in [k for k in self.deploy_failures if k[0] == model_id]:
+            self.deploy_failures.pop(key, None)
+        await self.rebalance(reason=f"deploy {model_id}")
+        return placement
+
+    async def undeploy(self, model_id: str) -> bool:
+        """Take a model off the stand; it stays in the catalog."""
+        if self.placements.pop(model_id, None) is None:
+            return False
+        await self.rebalance(reason=f"undeploy {model_id}")
+        return True
+
     async def add_model(self, spec: ModelSpec) -> None:
+        """Put a model in the catalog. It does NOT start running.
+
+        Adding used to mean deploying, which made the catalog a list of things
+        currently on the GPUs and made every orchestrator restart re-launch
+        them. Now it means the model is available; `deploy()` decides where and
+        whether it runs.
+        """
         self.registry.add(spec)
         await self.rebalance(reason=f"model-added {spec.model_id}")
 
@@ -303,6 +475,7 @@ class MultiModelController:
         spec = self.registry.remove(model_id)
         if spec is None:
             return False
+        self.placements.pop(model_id, None)
         await self.rebalance(reason=f"model-removed {model_id}")
         return True
 
@@ -312,6 +485,24 @@ class MultiModelController:
             previous: Dict[str, Dict[str, int]] = {}
             for (model_id, node_id), entry in self.deployed.items():
                 previous.setdefault(model_id, {})[node_id] = entry[0]
+            # Only models someone asked to run reach the broker. A catalog
+            # entry with no placement is an offer, not an order — which is why
+            # restarting the orchestrator no longer brings a model up on its
+            # own. Hand-placed models skip the broker entirely: their nodes and
+            # layer counts were chosen by a human and must not be second-
+            # guessed by a plan.
+            auto_specs = [
+                spec
+                for spec in self.registry.list()
+                if (placement := self.placements.get(spec.model_id)) is not None
+                and not placement.is_manual
+            ]
+            manual_nodes = {
+                node_id
+                for placement in self.placements.values()
+                if placement.is_manual
+                for node_id in placement.node_ids()
+            }
             plan = self.broker.plan(
                 [
                     PoolNode(
@@ -321,8 +512,9 @@ class MultiModelController:
                         tflops_fp16=d.hardware.tflops_fp16,
                     )
                     for d in self.nodes.values()
+                    if d.node_id not in manual_nodes
                 ],
-                self.registry.list(),
+                auto_specs,
                 previous=previous,
                 score_boosts=dict(self.slo_boosts),
             )
@@ -340,19 +532,28 @@ class MultiModelController:
             # so inter-stage activations can be routed.
             pipeline_routes: Dict[str, Dict[int, str]] = {}
             for spec in self.registry.list():
-                grants = plan.allocations.get(spec.model_id) or {}
-                if not grants:
+                placement = self.placements.get(spec.model_id)
+                if placement is None:
                     self.pool.drop(spec.model_id)
                     continue
-                self.pool.rebuild(spec, grants, self.nodes)
-                allocation = self.pool.shard_plan(spec.model_id)
-                pipelines = build_pipelines(allocation, spec.model_info.num_layers)
-                if not pipelines and allocation:
-                    logger.warning(
-                        "[Rebalance] %s: allocation %s forms no complete pipeline",
-                        spec.model_id,
-                        allocation,
-                    )
+                if placement.is_manual:
+                    grants = self._manual_grants(spec, placement)
+                    pipelines = [stages_as_allocation(placement)]
+                    self.pool.drop(spec.model_id)  # the broker owns no part of this
+                else:
+                    grants = plan.allocations.get(spec.model_id) or {}
+                    if not grants:
+                        self.pool.drop(spec.model_id)
+                        continue
+                    self.pool.rebuild(spec, grants, self.nodes)
+                    allocation = self.pool.shard_plan(spec.model_id)
+                    pipelines = build_pipelines(allocation, spec.model_info.num_layers)
+                    if not pipelines and allocation:
+                        logger.warning(
+                            "[Rebalance] %s: allocation %s forms no complete pipeline",
+                            spec.model_id,
+                            allocation,
+                        )
                 for idx, stages in enumerate(pipelines):
                     pipeline_id = f"{spec.model_id}#{idx}"
                     pipeline_routes[pipeline_id] = {}
@@ -744,17 +945,34 @@ class MultiModelController:
                 pipelines_actual = instance.scheduler.node_manager.num_full_pipelines(
                     spec.model_info.num_layers
                 )
+            # What is actually deployed, whichever way it was placed. Reading
+            # this off the scheduler pool used to be equivalent; it is not any
+            # more, because a hand-placed model skips the pool entirely and
+            # would have shown up here as running nowhere.
+            placed = sorted(
+                (
+                    (node_id, entry)
+                    for (mid, node_id), entry in self.deployed.items()
+                    if mid == spec.model_id
+                ),
+                key=lambda item: item[1][4],  # stage index
+            )
             placement = [
                 {
                     "node_id": node_id,
-                    "layers": [start, end],
-                    "vram_quota_gb": round(
-                        self.deployed.get((spec.model_id, node_id), (0, 0, 0))[0] / GIB, 2
-                    ),
+                    "layers": [entry[1], entry[2]],
+                    "vram_quota_gb": round(entry[0] / GIB, 2),
+                    "stage": entry[4],
                     "status": self.shard_status.get((spec.model_id, node_id), ("unknown", 0))[0],
                 }
-                for node_id, start, end in self.pool.shard_plan(spec.model_id)
+                for node_id, entry in placed
             ]
+            model_placement = self.placements.get(spec.model_id)
+            if model_placement is not None and model_placement.is_manual:
+                # A hand-placed model has no scheduler instance to count, and
+                # reporting "0 of 1 pipelines" next to two serving stages reads
+                # as a fault. One placement is one pipeline, by definition.
+                pipelines_actual = 1 if len(placement) == len(model_placement.stages) else 0
             out[spec.model_id] = {
                 "priority": spec.priority,
                 "demand_qps": spec.demand_qps,
@@ -766,6 +984,8 @@ class MultiModelController:
                 "num_layers": spec.model_info.num_layers,
                 "backend_type": spec.backend_type,
                 "placement": placement,
+                "deployed": model_placement is not None,
+                "placement_mode": model_placement.mode if model_placement else None,
                 "endpoints": [
                     {"node_id": ep.node_id, "url": ep.base_url, "inflight": ep.metrics.inflight}
                     for ep in self.endpoints.candidates(spec.model_id)
@@ -791,6 +1011,70 @@ class MultiModelController:
                 ],
             }
         return {"models": out}
+
+    def placement_view(self) -> dict:
+        """Everything the deploy form needs, computed in one place.
+
+        The form should not have to know the capacity formula to tell an
+        operator that 30 layers will not fit on a 24 GB card, so the answer
+        carries a per-node layer ceiling for every catalog model alongside the
+        current placements.
+        """
+        nodes = []
+        for node_id, descriptor in sorted(self.nodes.items()):
+            nodes.append(
+                {
+                    "node_id": node_id,
+                    "gpu_name": descriptor.hardware.gpu_name,
+                    "device": descriptor.hardware.device,
+                    "vram_free_gb": round(descriptor.vram_free_bytes / GIB, 1),
+                    "vram_total_gb": round(descriptor.vram_total_bytes / GIB, 1),
+                    "region": descriptor.region,
+                    "busy_with": sorted(
+                        {m for (m, n) in self.deployed if n == node_id}
+                    ),
+                }
+            )
+
+        models = []
+        for spec in self.registry.list():
+            info = spec.model_info
+            per_layer = info.decoder_layer_io_bytes(roofline=False)
+            placement = self.placements.get(spec.model_id)
+            models.append(
+                {
+                    "model_id": spec.model_id,
+                    "num_layers": info.num_layers,
+                    "backend_type": spec.backend_type,
+                    "weights_gb": round(
+                        (
+                            info.num_layers * per_layer
+                            + (1 if info.tie_embedding else 2) * info.embedding_io_bytes
+                        )
+                        / GIB,
+                        1,
+                    ),
+                    "deployed": placement is not None,
+                    "placement": placement.as_dict() if placement else None,
+                    # Layers each node could hold for THIS model: the ceiling
+                    # the form validates against before anything downloads.
+                    "max_layers_per_node": {
+                        node_id: max_layers_for(
+                            descriptor.vram_free_bytes,
+                            per_layer_param_bytes=per_layer,
+                            embedding_param_bytes=info.embedding_io_bytes,
+                            tie_embedding=bool(info.tie_embedding),
+                            param_mem_ratio=self.config.param_mem_ratio,
+                        )
+                        for node_id, descriptor in self.nodes.items()
+                    },
+                }
+            )
+        return {
+            "nodes": nodes,
+            "models": models,
+            "param_mem_ratio": self.config.param_mem_ratio,
+        }
 
     def perfmap_view(self, model_id: str) -> Optional[dict]:
         """What Phase-2 sees for a model: τ (per-shard latency) and ρ (RTT)."""

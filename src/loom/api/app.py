@@ -19,6 +19,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingRes
 
 from loom.logging_config import get_logger
 from loom.orchestrator.controller import MultiModelController
+from loom.orchestrator.placement import PlacementError
 from loom.orchestrator.model_resolver import ModelResolveError, spec_from_hf
 from loom.orchestrator.registry import ModelSpec
 from loom.orchestrator.tunnel import TunnelError
@@ -336,6 +337,54 @@ def create_app(controller: MultiModelController) -> FastAPI:
             return _error(400, f"bad model spec: {exc}")
         await controller.add_model(spec)
         return {"added": spec.model_id, "score": spec.score()}
+
+    @app.get("/admin/placement")
+    async def admin_placement(x_loom_admin_token: str | None = Header(default=None)):
+        """What is deployed, and what the deploy form needs to offer choices."""
+        if _admin_forbidden(x_loom_admin_token):
+            return _error(403, "invalid admin token")
+        return controller.placement_view()
+
+    @app.post("/admin/deploy")
+    async def admin_deploy(
+        request: Request, x_loom_admin_token: str | None = Header(default=None)
+    ):
+        """Put a model on chosen nodes with chosen layer counts.
+
+        Body: {"model_id": "...", "stages": [{"node_id": "n1", "layers": 20},
+        ...]} for an exact placement, or {"model_id": "...", "auto": true} to
+        let the broker choose. The order of `stages` is the pipeline order:
+        the first one is the head stage.
+        """
+        if _admin_forbidden(x_loom_admin_token):
+            return _error(403, "invalid admin token")
+        raw = await request.json()
+        model_id = (raw.get("model_id") or "").strip()
+        if not model_id:
+            return _error(400, "'model_id' is required")
+        stages = raw.get("stages")
+        if raw.get("auto"):
+            stages = None
+        elif stages is None:
+            return _error(400, "give 'stages' for a manual placement, or auto=true")
+        try:
+            placement = await controller.deploy(
+                model_id, stages=stages, force=bool(raw.get("force"))
+            )
+        except PlacementError as exc:
+            return _error(400, str(exc))
+        return {"deployed": model_id, "placement": placement.as_dict()}
+
+    @app.delete("/admin/deploy/{model_id}")
+    async def admin_undeploy(
+        model_id: str, x_loom_admin_token: str | None = Header(default=None)
+    ):
+        """Stop a model and free its VRAM; it stays in the catalog."""
+        if _admin_forbidden(x_loom_admin_token):
+            return _error(403, "invalid admin token")
+        if not await controller.undeploy(model_id):
+            return _error(404, f"model '{model_id}' is not deployed")
+        return {"undeployed": model_id}
 
     @app.post("/admin/quota")
     async def admin_set_quota(

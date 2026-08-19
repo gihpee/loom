@@ -2,8 +2,11 @@
 # Original: src/scheduling/layer_allocation.py — Phase-1 DP
 # (DynamicProgrammingLayerAllocator, состояние dp(i, open_residuals, finished_pipes)),
 # GreedyLayerAllocator и water-filling ребалансировка pipeline'ов.
-# Изменения: только переименованы импорты под неймспейс loom. Математика DP и
-# water-filling не менялась. Capacity (c_i) по-прежнему запрашивается через
+# Изменения: переименованы импорты под неймспейс loom. Математика DP и
+# water-filling не менялась; изменён ИСТОЧНИК мощности узла F_i — если узел уже
+# обслуживал токены, берётся измеренное им ms/слой (_measured_compute_powers),
+# а табличные TFLOPS остаются оценкой для холодного старта. Capacity (c_i)
+# по-прежнему запрашивается через
 # node.get_decoder_layer_capacity(), но в Loom этот метод делегирует в явный
 # входной параметр ShardCapacity, переданный Resource Broker
 # (см. loom/planning/capacity.py и loom/planning/node.py), а не вычисляется из
@@ -342,6 +345,16 @@ class BaseLayerAllocator:
                 else node.hardware.memory_bandwidth_gbps
             )
 
+        measured = _measured_compute_powers(nodes)
+        if measured is not None:
+            logger.info(
+                "rebalancing on measured speed: %s",
+                ", ".join(
+                    f"{n.node_id}={n.avg_layer_latency_ms:.1f}ms/layer" for n in nodes
+                ),
+            )
+            compute_powers = measured
+
         if sum(caps) < total_layers:
             raise ValueError(f"Total capacity {sum(caps)} is less than total layers {total_layers}")
 
@@ -587,6 +600,32 @@ class BaseLayerAllocator:
             end_layer = min(proposed_start_layer + adjusted_capacity, self.num_total_layers)
 
         return end_layer
+
+
+
+def _measured_compute_powers(nodes: List[Node]) -> Optional[List[float]]:
+    """Hosting power from what the nodes measured, or None to use the spec table.
+
+    Splitting layers in proportion to `hardware.tflops_fp16` assumes the table
+    knows every card and that every card of a given type performs alike.
+    Neither holds: a device the table has never heard of takes a generic
+    fallback value, so two very different GPUs come out identical and get
+    identical layer counts — which is how a pair of nodes that differ fourfold
+    in practice ended up with twenty layers each, the slow one taking 143 ms of
+    a 198 ms token.
+
+    A node that has served real tokens knows better. Power is the reciprocal of
+    measured ms-per-layer, so water-filling gives the fast node proportionally
+    more layers, still capped by what its VRAM can hold.
+
+    All or nothing: mixing a measured node with an estimated one would compare
+    numbers on different scales, and the estimate would win or lose for the
+    wrong reason.
+    """
+    latencies = [node.avg_layer_latency_ms for node in nodes]
+    if any(latency is None or latency <= 0 for latency in latencies):
+        return None
+    return [1.0 / float(latency) for latency in latencies]
 
 
 class GreedyLayerAllocator(BaseLayerAllocator):

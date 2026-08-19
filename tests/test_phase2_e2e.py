@@ -75,8 +75,12 @@ def test_two_models_share_pool_then_high_priority_evicts_low(stack):
     nodes_b = {ep.node_id for ep in controller.endpoints.candidates("demo-model-b")}
     assert nodes_a and nodes_b and nodes_a.isdisjoint(nodes_b)
 
-    # Stage 2: deploy high-priority model C via the admin path.
-    orch.submit(controller.add_model(model_c_spec()))
+    # Stage 2: deploy high-priority model C via the admin path. Adding it to
+    # the catalog is now only an offer — the deploy is a second, explicit step,
+    # and this one lets the broker choose (that is what is under test).
+    spec_c = model_c_spec()
+    orch.submit(controller.add_model(spec_c))
+    orch.submit(controller.deploy(spec_c.model_id))
 
     assert wait_until(
         lambda: serving_models(controller) == {"demo-model-a", "demo-model-c"}, 40

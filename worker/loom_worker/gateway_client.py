@@ -120,8 +120,27 @@ class GatewayClient:
                 self._outbox = None
             outbox.put(_CLOSE)  # release the generator if it is still blocked
 
+    # A silent stream that is actually dead looks exactly like a healthy idle
+    # one. Keepalive pings are what tell them apart: without them this agent
+    # blocks forever in `for control_msg in stream`, never raises, never
+    # reconnects, and the node quietly vanishes from the orchestrator — most
+    # visibly after an orchestrator restart, where the connection dies without
+    # a clean close ever reaching us.
+    CHANNEL_OPTIONS = [
+        ("grpc.keepalive_time_ms", 20000),
+        ("grpc.keepalive_timeout_ms", 10000),
+        ("grpc.keepalive_permit_without_calls", 1),
+        ("grpc.http2.max_pings_without_data", 0),
+        # Come back fast after the orchestrator goes away, and do not let the
+        # backoff grow into minutes of an idle stand during a demo.
+        ("grpc.initial_reconnect_backoff_ms", 500),
+        ("grpc.max_reconnect_backoff_ms", 5000),
+    ]
+
     def _serve_stream(self, outbox: "queue.Queue[object]") -> None:
-        with grpc.insecure_channel(self.orchestrator_addr) as channel:
+        with grpc.insecure_channel(
+            self.orchestrator_addr, options=self.CHANNEL_OPTIONS
+        ) as channel:
             stub = gateway_pb2_grpc.ControlGatewayStub(channel)
             stream = stub.Attach(self._request_iter(outbox))
             for control_msg in stream:

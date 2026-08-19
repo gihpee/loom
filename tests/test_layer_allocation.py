@@ -100,3 +100,61 @@ def test_water_filling_respects_compute_proportionality():
     allocator.adjust_pipeline_layers([fast, slow])
     assert fast.num_current_layers + slow.num_current_layers == 30
     assert fast.num_current_layers > slow.num_current_layers
+
+
+# ------------------------------------------ splitting by what nodes measured
+def test_two_cards_the_spec_table_cannot_tell_apart_still_split_by_speed():
+    """The stand's actual failure, in miniature.
+
+    Both nodes were an unknown model to the GPU table, so both took the same
+    generic TFLOPS figure, so water-filling gave them the same number of
+    layers — while one of them was four times slower in practice and ended up
+    owning 143 ms of a 198 ms token. Identical spec, different measured speed:
+    the split must follow the measurement.
+    """
+    mi = ModelInfo(**make_model_info_kwargs(num_layers=40))
+    fast = make_node("fast", mi, quota_layers=40, tflops=50.0)
+    slow = make_node("slow", mi, quota_layers=40, tflops=50.0)
+    fast.set_layer_latency_ms(1.72)          # measured on the real model
+    slow.set_layer_latency_ms(7.15)
+
+    manager = NodeManager(initial_nodes=[fast, slow])
+    allocator = GreedyLayerAllocator(model_info=mi, node_management=manager)
+    allocator.adjust_pipeline_layers([fast, slow])
+
+    fast_layers = fast.end_layer - fast.start_layer
+    slow_layers = slow.end_layer - slow.start_layer
+    assert fast_layers + slow_layers == 40, "every layer must still be hosted"
+    assert fast_layers > slow_layers * 2, (
+        f"the fast node took {fast_layers} layers and the slow one {slow_layers}; "
+        "the split ignored the measurement"
+    )
+    # And the point of it: the token gets cheaper than the even split was.
+    even = 20 * 1.72 + 20 * 7.15
+    now = fast_layers * 1.72 + slow_layers * 7.15
+    assert now < even * 0.85
+
+
+def test_without_measurements_the_spec_table_still_decides():
+    """Cold start has nothing else to go on, and must keep working."""
+    mi = ModelInfo(**make_model_info_kwargs(num_layers=40))
+    strong = make_node("strong", mi, quota_layers=40, tflops=200.0)
+    weak = make_node("weak", mi, quota_layers=40, tflops=50.0)
+
+    manager = NodeManager(initial_nodes=[strong, weak])
+    allocator = GreedyLayerAllocator(model_info=mi, node_management=manager)
+    allocator.adjust_pipeline_layers([strong, weak])
+    assert strong.end_layer - strong.start_layer > weak.end_layer - weak.start_layer
+
+
+def test_one_measured_node_is_not_mixed_with_an_estimated_one():
+    """Half-measured input would compare numbers on different scales."""
+    from loom.planning.layer_allocation import _measured_compute_powers
+
+    mi = ModelInfo(**make_model_info_kwargs(num_layers=40))
+    a = make_node("a", mi, quota_layers=40)
+    b = make_node("b", mi, quota_layers=40)
+    a.set_layer_latency_ms(2.0)
+    assert _measured_compute_powers([a, b]) is None
+    b.set_layer_latency_ms(4.0)
+    assert _measured_compute_powers([a, b]) == [0.5, 0.25]

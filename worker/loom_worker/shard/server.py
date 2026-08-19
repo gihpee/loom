@@ -17,18 +17,20 @@ HTTP surface (loopback only):
 from __future__ import annotations
 
 import argparse
+import collections
 import json
 import logging
 import os
 import queue
 import signal
+import statistics
 import threading
 import time
 import urllib.error
 import urllib.request
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Dict, List, Optional
+from typing import Deque, Dict, List, Optional
 
 from loom_worker.shard.executor import ShardExecutor
 from loom_worker.shard.loader import (
@@ -94,6 +96,50 @@ def _decode_tensor(executor: ShardExecutor, payload: dict):
     return executor.deserialize(
         base64.b64decode(payload["tensor_b64"]), payload["shape"], payload["dtype"]
     )
+
+
+# --------------------------------------------------------- measured speed
+# Per-LAYER compute time, averaged over recent steps. The scheduler splits a
+# model between nodes in proportion to how fast they are, and until this
+# existed it had only a spec table to go on: an A30 that is missing from that
+# table looks exactly like any other unknown card, so two nodes that differ
+# fourfold in reality were handed twenty layers each. A number the node
+# measured on the real model beats any table.
+class StageSpeed:
+    """Median ms per layer over recent steps.
+
+    Median, not a moving average, and the difference matters here. This number
+    decides how many layers this node is given, and that decision persists.
+    With an EMA a single 300 ms hiccup — a GC pause, a contended card, one
+    prefill among decodes — dragged the estimate an order of magnitude and
+    would have moved layers off a perfectly good node. The median simply does
+    not see one bad sample among many.
+    """
+
+    WINDOW = 64
+    MIN_SAMPLES = 8
+
+    def __init__(self) -> None:
+        self._samples: Deque[float] = collections.deque(maxlen=self.WINDOW)
+        self._lock = threading.Lock()
+
+    def record(self, compute_ms: float, num_layers: int) -> None:
+        if num_layers <= 0 or compute_ms <= 0:
+            return
+        with self._lock:
+            self._samples.append(compute_ms / num_layers)
+
+    def snapshot(self) -> Optional[float]:
+        with self._lock:
+            # A handful of steps is warm-up, and a warm-up number is worse than
+            # none: it would tell the planner this node is slow and cost it its
+            # layers. Silence keeps the planner on its own estimate.
+            if len(self._samples) < self.MIN_SAMPLES:
+                return None
+            return statistics.median(self._samples)
+
+
+SPEED = StageSpeed()
 
 
 # ---------------------------------------------------------------- stage inbox
@@ -174,6 +220,7 @@ def handle_stage_message(msg: dict) -> None:
         )
         return
 
+    layers = STATE.get("layer_range") or [0, 0]
     if topology["is_last"]:
         sampling = msg.get("sampling") or {}
         token = executor.sample(
@@ -183,6 +230,7 @@ def handle_stage_message(msg: dict) -> None:
             seed=sampling.get("seed"),
         )
         compute_ms = (time.perf_counter() - stage_started) * 1000
+        SPEED.record(compute_ms, layers[1] - layers[0])
         relay(
             {
                 "kind": "token",
@@ -199,6 +247,7 @@ def handle_stage_message(msg: dict) -> None:
         )
     else:
         compute_ms = (time.perf_counter() - stage_started) * 1000
+        SPEED.record(compute_ms, layers[1] - layers[0])
         relay(
             {
                 "kind": "activations",
@@ -514,6 +563,10 @@ class Handler(BaseHTTPRequestHandler):
                     "active_requests": (
                         STATE["executor"].active_requests() if ready else 0
                     ),
+                    # None until enough steps have been seen; the planner then
+                    # keeps using its roofline estimate instead of a warm-up
+                    # number.
+                    "layer_latency_ms": SPEED.snapshot(),
                 },
             )
         else:

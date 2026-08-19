@@ -36,6 +36,17 @@ async def serve_grpc(
         options=[
             ("grpc.max_send_message_length", MAX_MESSAGE_BYTES),
             ("grpc.max_receive_message_length", MAX_MESSAGE_BYTES),
+            # Both control streams are long-lived and mostly silent, which is
+            # exactly the traffic pattern NATs and tunnels drop without telling
+            # anyone. Without keepalive a worker can sit reading a stream whose
+            # other end is long gone — it never errors, so it never reconnects,
+            # and the node simply disappears from the orchestrator's view.
+            ("grpc.keepalive_time_ms", 20000),
+            ("grpc.keepalive_timeout_ms", 10000),
+            ("grpc.keepalive_permit_without_calls", 1),
+            # The server must not scold clients for pinging at that rate.
+            ("grpc.http2.min_ping_interval_without_data_ms", 10000),
+            ("grpc.http2.max_pings_without_data", 0),
         ]
     )
     gateway_pb2_grpc.add_ControlGatewayServicer_to_server(control, server)
