@@ -670,6 +670,7 @@ def _build_vllm_executor(args, spec):
     from loom_worker.vllm_stage.runtime import (
         build_kv_cache,
         build_stage_runner,
+        capture_cuda_graphs,
         stage_config_from_env,
     )
 
@@ -689,6 +690,8 @@ def _build_vllm_executor(args, spec):
     )
     runner, vllm_config = build_stage_runner(runtime_config)
     kv_manager, kv_cache_config = build_kv_cache(runner, vllm_config, runtime_config)
+    # After the KV cache exists: capture replays real kernels and needs it.
+    capture_cuda_graphs(runner, runtime_config)
     executor = VllmStageExecutor(runner, kv_manager, kv_cache_config, runtime_config)
     return executor, config
 

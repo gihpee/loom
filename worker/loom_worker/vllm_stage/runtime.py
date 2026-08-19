@@ -10,9 +10,11 @@
 
 from __future__ import annotations
 
+import functools
 import logging
 import math
 import os
+import time
 from dataclasses import dataclass
 from typing import Optional
 
@@ -53,6 +55,13 @@ class StageRuntimeConfig:
     enforce_eager: bool = True
     # Kept aside for activations, workspaces and allocator fragmentation.
     headroom_gb: float = 2.0
+    # CUDA graphs WITHOUT torch.compile. `enforce_eager` turns off both, and
+    # the two have very different costs: it was Inductor's autotuning that
+    # allocated 1.45 GB and OOMed the card, while graph capture only replays
+    # kernel launches. On a one-sequence decode those launches are most of the
+    # per-layer overhead, so this is the main lever we have on tokens/s.
+    # Opt-in until it has been measured on the stand.
+    cuda_graphs: bool = False
 
     @property
     def is_first(self) -> bool:
@@ -74,6 +83,17 @@ def accepted_arguments(cls):
     mandatory arguments and failing with "Field required".
 
     None means the constructor takes **kwargs and nothing should be dropped.
+    """
+    return _accepted_arguments_cached(cls)
+
+
+@functools.lru_cache(maxsize=None)
+def _accepted_arguments_cached(cls):
+    """Cached because _construct runs on every decode step.
+
+    Two config objects are rebuilt per token per stage, and inspect.signature
+    is not cheap. A class's signature cannot change at runtime, so this is
+    computed once.
     """
     import inspect
 
@@ -163,6 +183,7 @@ def build_stage_runner(config: StageRuntimeConfig):
     device = torch.device("cuda:0")
     torch.cuda.set_device(device)
 
+    compilation_config = _stage_compilation_config(config)
     model_config = _construct(
         ModelConfig,
         required=("model", "max_model_len"),
@@ -174,7 +195,10 @@ def build_stage_runner(config: StageRuntimeConfig):
         seed=0,
         max_model_len=config.max_model_len,
         max_logprobs=1,
-        enforce_eager=config.enforce_eager,
+        # enforce_eager disables torch.compile AND cudagraphs together; with
+        # graphs asked for, it must be off and the compilation config carries
+        # the finer distinction.
+        enforce_eager=config.enforce_eager and not config.cuda_graphs,
     )
     cache_config = _construct(
         CacheConfig,
@@ -185,6 +209,13 @@ def build_stage_runner(config: StageRuntimeConfig):
         gpu_memory_utilization=config.gpu_memory_utilization,
         swap_space=0,
         cache_dtype="auto",
+        # Off, and it has to be: prefix caching keys blocks by their token ids,
+        # and a middle stage never learns any — it receives activations, not
+        # tokens, and fills the field with zeros. Two different requests of the
+        # same length would hash alike and share each other's KV. The cache
+        # manager is built with enable_caching=False for the same reason; these
+        # two must agree.
+        enable_prefix_caching=False,
     )
     # One card per stage: the parallelism Loom cares about lives between nodes,
     # and vLLM is told it is alone so it never tries to talk to peers itself.
@@ -214,6 +245,7 @@ def build_stage_runner(config: StageRuntimeConfig):
         scheduler_config=scheduler_config,
         device_config=_construct(DeviceConfig, device=device),
         load_config=_construct(LoadConfig, load_format="auto"),
+        **({"compilation_config": compilation_config} if compilation_config else {}),
     )
 
     # vLLM keeps "the config in force" in a global, and reads it in places that
@@ -261,6 +293,57 @@ def build_stage_runner(config: StageRuntimeConfig):
         config.dtype,
     )
     return runner, vllm_config
+
+
+def _stage_compilation_config(config: StageRuntimeConfig):
+    """CUDA graphs with the compiler left out, or None to keep vLLM's default.
+
+    FULL capture records the whole stage as one graph, so it needs no piecewise
+    splitting and therefore no Inductor pass — which is the expensive, memory
+    hungry part we turned off after it OOMed a loaded card.
+    """
+    if not config.cuda_graphs:
+        return None
+    try:
+        from vllm.config import CompilationConfig
+        from vllm.config.compilation import CompilationMode, CUDAGraphMode
+    except ImportError:
+        logger.warning(
+            "this vLLM release exposes no CompilationConfig; staying eager"
+        )
+        return None
+    sizes = sorted({1, 2, 4, 8, max(1, config.max_num_seqs)})
+    return _construct(
+        CompilationConfig,
+        mode=CompilationMode.NONE,          # no torch.compile, no Inductor
+        cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY,
+        cudagraph_capture_sizes=sizes,
+        max_cudagraph_capture_size=max(sizes),
+    )
+
+
+def capture_cuda_graphs(runner, config: StageRuntimeConfig) -> None:
+    """Record the decode graph, if this stage asked for one.
+
+    Never fatal: a stage that cannot capture is slower, not broken, and losing
+    a loaded model over a graph would be a bad trade.
+    """
+    if not config.cuda_graphs:
+        return
+    capture = getattr(runner, "capture_model", None)
+    if not callable(capture):
+        logger.warning("this vLLM release has no capture_model(); staying eager")
+        return
+    started = time.perf_counter()
+    try:
+        capture()
+    except Exception:
+        logger.exception(
+            "CUDA graph capture failed; the stage keeps serving eagerly "
+            "(unset LOOM_VLLM_CUDAGRAPH to silence this)"
+        )
+        return
+    logger.info("CUDA graphs captured in %.1f s", time.perf_counter() - started)
 
 
 def build_kv_cache(runner, vllm_config, config: StageRuntimeConfig):
@@ -424,4 +507,6 @@ def stage_config_from_env(
         enforce_eager=os.environ.get("LOOM_VLLM_COMPILE", "").strip().lower()
         not in ("1", "true", "yes"),
         headroom_gb=float(os.environ.get("LOOM_VLLM_HEADROOM_GB", "2.0")),
+        cuda_graphs=os.environ.get("LOOM_VLLM_CUDAGRAPH", "").strip().lower()
+        in ("1", "true", "yes"),
     )

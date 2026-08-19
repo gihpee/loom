@@ -35,24 +35,41 @@ class FakeBlocks:
 
 
 class FakeKvManager:
-    """Stands in for vLLM's paged KV cache manager."""
+    """Stands in for vLLM's paged KV cache manager — including its arithmetic.
+
+    The earlier version of this fake handed out a block whenever asked, which
+    made it useless as a test: it could not tell a correct caller from one that
+    never advances `request.num_computed_tokens`. Real vLLM sizes the table
+    from `request.num_computed_tokens + num_new_tokens` and returns ONLY the
+    blocks it newly allocated — an empty tuple when it believes none are
+    needed. That distinction is the whole bug, so the fake now reproduces it.
+    """
+
+    BLOCK = 16
 
     def __init__(self, capacity_blocks: int = 64):
         self.capacity = capacity_blocks
         self.allocated = 0
         self.freed = []
         self.calls = []
+        self.per_request = {}
 
     def allocate_slots(self, *, request, num_new_tokens, num_new_computed_tokens=0, **kw):
         self.calls.append(("allocate", request.request_id, num_new_tokens))
-        blocks = max(1, num_new_tokens // 16)
-        if self.allocated + blocks > self.capacity:
+        held = self.per_request.get(request.request_id, 0)
+        need_slot = int(getattr(request, "num_computed_tokens", 0)) + num_new_tokens
+        want = -(-need_slot // self.BLOCK)  # ceil
+        new_blocks = max(0, want - held)
+        if self.allocated + new_blocks > self.capacity:
             return None
-        self.allocated += blocks
-        return FakeBlocks([list(range(blocks))])
+        first = self.allocated
+        self.allocated += new_blocks
+        self.per_request[request.request_id] = held + new_blocks
+        return FakeBlocks([list(range(first, first + new_blocks))])
 
     def free(self, request):
         self.freed.append(request.request_id)
+        self.allocated -= self.per_request.pop(request.request_id, 0)
 
 
 class FakeRunner:
@@ -144,8 +161,21 @@ def install_fake_vllm(monkeypatch):
             self.__dict__.update(kw)
 
     class Request:
+        """Carries the two counters the KV manager actually reads."""
+
         def __init__(self, **kw):
             self.__dict__.update(kw)
+            self.num_computed_tokens = 0
+            self._all_token_ids = list(kw.get("prompt_token_ids") or [])
+
+        def append_output_token_ids(self, token_ids):
+            self._all_token_ids.extend(
+                [token_ids] if isinstance(token_ids, int) else token_ids
+            )
+
+        @property
+        def num_tokens(self):
+            return len(self._all_token_ids)
 
     class IntermediateTensors:
         def __init__(self, tensors):
@@ -620,3 +650,98 @@ def test_an_ordinary_failure_does_not_kill_the_stage(executor_factory, monkeypat
     with pytest.raises(ValueError):
         ex.forward(request_id="bad", positions=[0], input_ids=[1])
     assert exits == [], "the stage keeps serving after a request-level error"
+
+
+# ---------------------------------------------- the context must keep growing
+def test_decoding_past_a_block_boundary_keeps_getting_blocks(executor_factory):
+    """The bug that made a working pipeline answer nonsense.
+
+    vLLM sizes the block table from `request.num_computed_tokens +
+    num_new_tokens`. Loom bypasses vLLM's scheduler, so nobody was advancing
+    that counter: it stayed at 0 and every decode step asked for room for a
+    single token. Once the prompt's last block filled, allocate_slots decided
+    nothing more was needed, the block table stopped growing, and every
+    position beyond it resolved to block 0 — the model attended to a 16-slot
+    circular buffer. The text stayed fluent and stopped making sense, which is
+    why nothing looked broken.
+    """
+    ex, _runner, kv = executor_factory(start=0, end=20)
+    prompt = list(range(11))                       # less than one 16-token block
+    ex.forward(request_id="long", positions=list(range(len(prompt))), input_ids=prompt)
+
+    for step in range(60):                          # well past several boundaries
+        ex.forward(request_id="long", positions=[len(prompt) + step], input_ids=[7])
+
+    total_tokens = len(prompt) + 60
+    covered = kv.per_request["long"] * kv.BLOCK
+    assert covered >= total_tokens, (
+        f"block table covers {covered} tokens but the request is at {total_tokens}"
+    )
+    # And vLLM's own counter tracks it, because that is what it allocates from.
+    request = ex._requests["long"].vllm_request
+    assert request.num_computed_tokens == total_tokens
+
+
+def test_a_short_block_table_is_refused_instead_of_answering_garbage(executor_factory):
+    """Under-allocation must fail loudly; silence is what cost us a day."""
+    ex, _runner, kv = executor_factory(start=0, end=20)
+    ex.forward(request_id="r", positions=[0, 1, 2], input_ids=[1, 2, 3])
+
+    # A manager that hands out nothing, exactly as the real one did while the
+    # request's counter was stuck at zero.
+    kv.allocate_slots = lambda **kw: FakeBlocks([[]])
+    with pytest.raises(RuntimeError, match="corrupted context"):
+        for step in range(40):
+            ex.forward(request_id="r", positions=[3 + step], input_ids=[9])
+
+
+def test_prompt_longer_than_one_block_is_covered_from_the_start(executor_factory):
+    ex, _runner, kv = executor_factory(start=0, end=20)
+    prompt = list(range(70))
+    ex.forward(request_id="big", positions=list(range(70)), input_ids=prompt)
+    assert kv.per_request["big"] * kv.BLOCK >= 70
+
+
+def test_freeing_returns_every_block_the_request_held(executor_factory):
+    """Paging only pays off if long requests give it all back."""
+    ex, _runner, kv = executor_factory(start=0, end=20)
+    ex.forward(request_id="a", positions=[0, 1], input_ids=[1, 2])
+    for step in range(40):
+        ex.forward(request_id="a", positions=[2 + step], input_ids=[5])
+    assert kv.allocated > 1
+    ex.free("a")
+    assert kv.allocated == 0, "blocks leaked; the pool would starve"
+
+
+# --------------------------------------------------- cuda graphs are opt-in
+def test_cuda_graphs_are_off_unless_asked_for(monkeypatch):
+    from loom_worker.vllm_stage import runtime
+
+    monkeypatch.delenv("LOOM_VLLM_CUDAGRAPH", raising=False)
+    cfg = runtime.stage_config_from_env(
+        model_path="/m", start_layer=0, end_layer=20, num_layers=40, dtype="bfloat16"
+    )
+    assert cfg.cuda_graphs is False
+    assert runtime._stage_compilation_config(cfg) is None
+
+    captured = []
+    runtime.capture_cuda_graphs(
+        types.SimpleNamespace(capture_model=lambda: captured.append(1)), cfg
+    )
+    assert captured == [], "eager stages must not spend minutes capturing"
+
+
+def test_a_failed_capture_leaves_the_stage_serving(monkeypatch, caplog):
+    """A graph is a speed-up, not a dependency; losing the model over one is worse."""
+    from loom_worker.vllm_stage import runtime
+
+    cfg = runtime.StageRuntimeConfig(
+        model_path="/m", start_layer=0, end_layer=20, num_layers=40, cuda_graphs=True
+    )
+
+    def boom():
+        raise RuntimeError("no memory for the graph pool")
+
+    with caplog.at_level("ERROR"):
+        runtime.capture_cuda_graphs(types.SimpleNamespace(capture_model=boom), cfg)
+    assert "keeps serving eagerly" in caplog.text

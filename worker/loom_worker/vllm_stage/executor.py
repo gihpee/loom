@@ -48,6 +48,9 @@ class StageRequest:
     vllm_request: object = None
     # Full token history: 0.27's CachedRequestData wants it for the connector.
     token_ids: List[int] = field(default_factory=list)
+    # Blocks handed to this request so far — allocate_slots returns only the
+    # NEW ones, so coverage has to be accumulated.
+    block_count: int = 0
 
 
 class VllmStageExecutor:
@@ -375,6 +378,11 @@ class VllmStageExecutor:
                 f"no KV blocks for a {len(token_ids)}-token prompt; lower "
                 f"LOOM_MAX_REQUESTS or LOOM_MAX_MODEL_LEN on this worker"
             )
+        # vLLM's scheduler advances this after scheduling a step; here we ARE
+        # the scheduler, so we owe the request the same bookkeeping. See
+        # _decode_batch for what leaving it at zero costs.
+        vllm_request.num_computed_tokens = len(token_ids)
+        self._check_block_coverage(state, blocks, computed=len(token_ids))
 
         from loom_worker.vllm_stage.runtime import _construct
 
@@ -410,7 +418,20 @@ class VllmStageExecutor:
         from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
 
         vllm_request = state.vllm_request
-        computed = state.prompt_len + state.generated - 1
+        # THE source of truth for where this request is. vLLM sizes the block
+        # table from `request.num_computed_tokens + num_new_tokens`, so a
+        # request stuck at zero asks for slots for exactly one token forever:
+        # once the prompt's last block fills up, allocate_slots decides nothing
+        # new is needed and returns no blocks. The block table then stops
+        # growing, every position past it resolves to block 0, and the model
+        # silently attends to a 16-slot circular buffer instead of its context
+        # — fluent text that repeats itself and forgets the question.
+        computed = int(vllm_request.num_computed_tokens)
+        # The request must also own the token it is about to compute: num_tokens
+        # is what caps caching and sliding-window trimming.
+        append = getattr(vllm_request, "append_output_token_ids", None)
+        if callable(append):
+            append(list(token_ids[-1:]))
         blocks = self.kv_manager.allocate_slots(
             request=vllm_request,
             num_new_tokens=1,
@@ -421,6 +442,8 @@ class VllmStageExecutor:
                 f"request {state.request_id} ran out of KV blocks at "
                 f"{computed} tokens; raise LOOM_MAX_MODEL_LEN or shorten the context"
             )
+        vllm_request.num_computed_tokens = computed + 1
+        self._check_block_coverage(state, blocks, computed=computed + 1)
         from loom_worker.vllm_stage.runtime import _construct
 
         state.token_ids.extend(token_ids[-1:])
@@ -448,6 +471,31 @@ class VllmStageExecutor:
             num_common_prefix_blocks=[0] * len(self.kv_cache_config.kv_cache_groups),
             finished_req_ids=set(),
             free_encoder_mm_hashes=[],
+        )
+
+    def _check_block_coverage(self, state: StageRequest, blocks, computed: int) -> None:
+        """Refuse to compute a position the block table does not cover.
+
+        This is the alarm the stage did not have. An under-allocated block
+        table does not raise: the runner gathers block id 0 for any position
+        past the last real block and attention quietly runs on the wrong
+        memory. The output stays grammatical, so nothing looks broken — the
+        model just loses the thread. Counting blocks costs nothing and turns
+        that into a failure with a name.
+        """
+        try:
+            state.block_count += sum(len(group) for group in blocks.get_block_ids())
+        except Exception:  # pragma: no cover - unfamiliar block object
+            return
+        needed = -(-computed // self.config.kv_block_size)  # ceil
+        if state.block_count >= needed:
+            return
+        raise RuntimeError(
+            f"KV block table for {state.request_id} covers "
+            f"{state.block_count * self.config.kv_block_size} tokens but the "
+            f"request is at {computed}; the engine would read block 0 for the "
+            f"rest and answer from a corrupted context "
+            f"(see docs/VLLM_PIPELINE.md §5b)"
         )
 
     def _outgoing_tensors(self, outputs):
