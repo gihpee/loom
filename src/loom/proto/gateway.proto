@@ -33,6 +33,24 @@ message HardwareInfo {
   string detection_source = 10;   // "nvml" | "torch" | "nvidia-smi" | "sysctl" | "env" | "fallback"
 }
 
+// How this node can be reached by its pipeline neighbours, for the direct
+// worker-to-worker data path. Absent when the node has no p2p stack: the
+// orchestrator then keeps relaying its activations, exactly as before.
+message PeerIdentity {
+  // libp2p peer id ("12D3KooW..."), derived from a keypair the node persists.
+  // It is the node's ADDRESS-INDEPENDENT name: the machine can change network,
+  // IP or provider and still be the same peer.
+  string peer_id = 1;
+  // Multiaddrs the node believes it listens on, e.g.
+  // "/ip4/10.0.0.5/tcp/47100" and "/ip4/10.0.0.5/udp/47100/quic-v1".
+  // These are CANDIDATES, not truth: a node behind NAT sees only its private
+  // address. The orchestrator adds what it observed from the connection.
+  repeated string listen_addrs = 2;
+  // True when the node detected a symmetric NAT. Hole punching cannot work
+  // through one, so the orchestrator stops trying and relays instead.
+  bool symmetric_nat = 3;
+}
+
 message RegisterRequest {
   string node_id = 1;
   // Join key issued by the orchestrator (`POST /admin/keys`). The key's secret
@@ -41,6 +59,7 @@ message RegisterRequest {
   HardwareInfo hardware = 3;
   string region = 4;              // optional; declared by the operator or geo-derived
   string agent_version = 5;
+  PeerIdentity peer = 6;
 }
 
 message RegisterAck {
@@ -48,6 +67,13 @@ message RegisterAck {
   string error = 2;
   // Node id assigned by the orchestrator (authoritative; the worker adopts it).
   string node_id = 3;
+  // Multiaddrs of the orchestrator's own p2p node, e.g.
+  // "/ip4/203.0.113.1/tcp/47100/p2p/12D3KooW...". This is the ONE address a
+  // worker needs in order to reach every other worker: bootstrap peers are
+  // fixed when a libp2p node is built, and peers are found afterwards by id
+  // through a shared entry point. Empty when the orchestrator runs no p2p node,
+  // in which case workers keep relaying through it as they always have.
+  repeated string rendezvous = 4;
 }
 
 // Sent by the worker once a backend for model_id is up and answering locally.

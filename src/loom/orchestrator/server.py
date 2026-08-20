@@ -21,6 +21,7 @@ from loom.orchestrator.controller import MultiModelController
 from loom.orchestrator.gateway import ControlGatewayServicer
 from loom.orchestrator.keys import KeyStore
 from loom.orchestrator.public_addr import resolve_public_address
+from loom.orchestrator.rendezvous import RendezvousNode, host_of
 from loom.orchestrator.tunnel import DataPlaneServicer, TunnelHub, add_dataplane_to_server
 from loom.proto_gen import gateway_pb2_grpc
 
@@ -82,6 +83,15 @@ async def run(config: OrchestratorConfig) -> None:
     controller.keystore = keystore
     controller.public_address = public
 
+    # The single address workers bootstrap to, so they can then reach each
+    # other by peer id. Optional: without it every stage message keeps going
+    # through this process, which is what Loom did before direct links existed.
+    rendezvous = RendezvousNode(public_host=host_of(public.address))
+    rendezvous.start()
+    controller.rendezvous = rendezvous
+    if rendezvous.running:
+        logger.info("rendezvous multiaddrs: %s", ", ".join(rendezvous.multiaddrs()))
+
     grpc_server = await serve_grpc(
         control=ControlGatewayServicer(keystore=keystore, controller=controller),
         data=DataPlaneServicer(tunnel, keystore),
@@ -105,6 +115,7 @@ async def run(config: OrchestratorConfig) -> None:
         for task in background:
             task.cancel()
         await grpc_server.stop(grace=2)
+        rendezvous.stop()
 
 
 def main() -> None:

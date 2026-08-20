@@ -53,7 +53,17 @@ DEFAULT_MAX_TOKENS = int(os.environ.get("LOOM_MAX_TOKENS_DEFAULT", "2048"))
 
 # --------------------------------------------------------------------- relay
 def relay(payload: dict) -> None:
-    """Hand a stage message to the local agent, which tunnels it onward."""
+    """Hand a stage message to the local agent, which routes it onward.
+
+    The pipeline and model are stamped here because this process is the only
+    one that knows them for certain. The agent used to infer them by picking
+    "the first multi-stage shard it hosts", which is right until a node runs
+    stages of two different models — and then activations of one pipeline get
+    addressed with the other's id.
+    """
+    topology = STATE.get("topology") or {}
+    payload.setdefault("pipeline_id", topology.get("pipeline_id", ""))
+    payload.setdefault("model_id", STATE.get("model_id", ""))
     relay_url = STATE["relay_url"]
     data = json.dumps(payload).encode()
     req = urllib.request.Request(

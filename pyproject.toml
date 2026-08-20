@@ -13,6 +13,10 @@ dependencies = [
 
 [project.optional-dependencies]
 redis = ["redis>=5.0"]
+# The rendezvous node workers bootstrap to, so they can reach each other
+# directly (docs/P2P_TRANSPORT.md). Without it the orchestrator relays every
+# inter-stage message, exactly as it did before.
+p2p = ["lattica==1.0.21"]
 # Pinned deliberately: protobuf gencode must stay OLD enough to load under the
 # protobuf runtime shipped in backend images (e.g. vllm/vllm-openai has 6.x).
 # A runtime may be newer than the gencode, never older.

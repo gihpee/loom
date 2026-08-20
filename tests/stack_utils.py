@@ -21,6 +21,7 @@ if str(WORKER_DIR) not in sys.path:
 from loom_worker.dataplane_client import DataPlaneClient  # noqa: E402
 from loom_worker.gateway_client import GatewayClient  # noqa: E402
 from loom_worker.handlers import CommandHandlers  # noqa: E402
+from loom_worker.main import PeerLayer  # noqa: E402
 from loom_worker.proto import gateway_pb2 as w_gateway_pb2  # noqa: E402
 from loom_worker.security import CommandVerifier  # noqa: E402
 from loom_worker.state import WorkerState  # noqa: E402
@@ -149,6 +150,8 @@ class WorkerHarness:
         device: str = "cpu",
         verify_commands: bool = True,
         rss_overhead_bytes: int = 4 * GIB,
+        p2p_port: int | None = None,
+        p2p_key_dir: str = "",
     ) -> None:
         from loom_worker.joinkey import parse_join_key
 
@@ -164,12 +167,20 @@ class WorkerHarness:
             state=self.state,
         )
         relay_url = self.dataplane.start_stage_relay()
+        # Same wiring as loom_worker.main: the direct path is relay-only until
+        # the orchestrator's registration ack says where its rendezvous is.
+        # Built here rather than skipped so the e2e tests exercise the real
+        # data path, not a version of it that only ever relays.
+        self.peers = PeerLayer(self.dataplane, port=p2p_port, key_dir=p2p_key_dir)
+        self.dataplane.links = self.peers.links
         self.handlers = CommandHandlers(
             self.state,
             send=lambda m: holder["client"].send(m),
             device=device,
             watchdog_poll_s=0.3,
             relay_url=relay_url,
+            links=self.peers.links,
+            peer_status=self.peers.status,
             # Tiny test quotas: RSS of a torch process dwarfs them, so give the
             # runtime room instead of having the watchdog kill every stage.
             # Watchdog tests pass 0 to exercise strict enforcement.
@@ -196,6 +207,7 @@ class WorkerHarness:
             ),
             handlers=self.handlers,
             region=region,
+            on_rendezvous=self.peers.on_rendezvous,
             verifier=CommandVerifier(secret) if (verify_commands and secret) else None,
             agent_version="test",
             heartbeat_interval_s=1.0,

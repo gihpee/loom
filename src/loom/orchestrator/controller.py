@@ -27,6 +27,7 @@ from loom.logging_config import get_logger
 from loom.orchestrator.broker import BrokerPlan, PoolNode, ResourceBroker
 from loom.orchestrator.config import OrchestratorConfig
 from loom.orchestrator.gateway import WorkerSession, new_meta
+from loom.orchestrator.peers import PeerDirectory
 from loom.orchestrator.pool import ModelInstance, NodeDescriptor, SchedulerPool
 from loom.orchestrator.placement import (
     KNOWN_BACKENDS,
@@ -121,6 +122,13 @@ class MultiModelController:
         # measurement says what it wants, instead of the orchestrator
         # resurrecting whatever happened to be running last time.
         self.placements: Dict[str, Placement] = {}
+        # Where each node can be reached by its pipeline neighbours. The
+        # orchestrator is the rendezvous for the direct data path and nothing
+        # more: it hands out addresses, the workers do the connecting.
+        self.peers = PeerDirectory()
+        # The orchestrator's own p2p node, set by server.run(). None means no
+        # rendezvous exists and every worker keeps relaying through us.
+        self.rendezvous = None
         # (model, node) -> when the current deploy attempt was issued. A worker
         # heartbeat still describing the PREVIOUS attempt must not be mistaken
         # for a fresh failure — that turns one bad start into a launch storm.
@@ -164,6 +172,13 @@ class MultiModelController:
             agent_version=reg.agent_version,
         )
         self.sessions[session.node_id] = session
+        # The address the control connection arrives from is this node's public
+        # address — the one fact it cannot learn about itself (see peers.py).
+        self.peers.remember(
+            session.node_id,
+            getattr(reg, "peer", None),
+            observed_host=getattr(session, "observed_host", ""),
+        )
         # A re-registering worker may be a restarted container with nothing
         # loaded, so drop our bookkeeping and let it be re-placed; if it is the
         # same agent with shards still running, its LoadShard/StartServing are
@@ -181,6 +196,7 @@ class MultiModelController:
             return  # replaced by a newer session (reconnect)
         self.sessions.pop(node_id, None)
         self.nodes.pop(node_id, None)
+        self.peers.forget(node_id)
         for model_id in self.registry.ids():
             self.endpoints.unregister(model_id=model_id, node_id=node_id)
             self.store.delete_shard_perf(model_id, node_id)
@@ -231,8 +247,25 @@ class MultiModelController:
             ep.local_port,
         )
 
+    def rendezvous_addrs(self) -> List[str]:
+        """What a registering worker is told to bootstrap to."""
+        node = self.rendezvous
+        return list(node.multiaddrs()) if node is not None else []
+
     async def on_telemetry(self, session: WorkerSession, report) -> None:
         self.node_last_seen[session.node_id] = time.time()
+        # A worker learns where the rendezvous is from its registration ack, so
+        # it has no peer identity yet at the moment it registers. It reports one
+        # here instead, on every heartbeat — which also means an orchestrator
+        # that restarted re-learns the whole peer directory within one beat.
+        status = getattr(report, "peer", None)
+        if status is not None and status.peer_id:
+            self.peers.remember(
+                session.node_id,
+                status,
+                observed_host=getattr(session, "observed_host", ""),
+            )
+            self.peers.record_transport(session.node_id, status)
         for shard in report.shards:
             self.shard_status[(shard.model_id, session.node_id)] = (
                 shard.status or ("serving" if shard.healthy else "unknown"),
@@ -664,6 +697,31 @@ class MultiModelController:
         except (ConnectionError, asyncio.TimeoutError) as exc:
             logger.warning("teardown of %s on %s failed: %s", model_id, node_id, exc)
 
+    def _peer_routes(self, pipeline_id: str) -> list:
+        """Directory rows for every stage of one pipeline.
+
+        Built from `deployed`, which is the orchestrator's own record of what
+        runs where, so the directory a worker receives always matches the
+        placement that produced it.
+        """
+        stages = sorted(
+            (
+                (entry[4], node_id)
+                for (_mid, node_id), entry in self.deployed.items()
+                if entry[3] == pipeline_id
+            ),
+            key=lambda row: row[0],
+        )
+        return [
+            worker_control_pb2.PeerRoute(
+                stage_index=stage_index,
+                node_id=node_id,
+                peer_id=peer_id,
+                addrs=addrs,
+            )
+            for stage_index, node_id, peer_id, addrs in self.peers.routes_for(stages)
+        ]
+
     async def _deploy_on_worker(self, model_id: str, node_id: str, entry: tuple) -> None:
         quota, start, end, pipeline_id, stage_index, num_stages = entry
         session = self.sessions.get(node_id)
@@ -689,6 +747,11 @@ class MultiModelController:
                             is_first=stage_index == 0,
                             is_last=stage_index == num_stages - 1,
                             num_model_layers=spec.model_info.num_layers,
+                            # Who this stage's neighbours are and where to try
+                            # reaching them directly. Empty for a single-stage
+                            # deployment, and harmless for a worker too old to
+                            # read the field.
+                            peers=self._peer_routes(pipeline_id) if num_stages > 1 else [],
                         ),
                     )
                 ),
@@ -943,7 +1006,20 @@ class MultiModelController:
                     }
                 )
             last_seen = self.node_last_seen.get(nid)
+            record = self.peers.get(nid)
             out[nid] = {
+                # How this node's activations actually travel. The direct path
+                # degrades to the relay silently, so a deployment that fell back
+                # is indistinguishable from a working one without these.
+                "peer": {
+                    "peer_id": record.peer_id if record else "",
+                    "dialable": bool(record and record.dialable),
+                    "symmetric_nat": bool(record and record.symmetric_nat),
+                    "direct": record.direct if record else 0,
+                    "relayed": record.relayed if record else 0,
+                    "fallbacks": record.fallbacks if record else 0,
+                    "direct_share": record.direct_share if record else 0.0,
+                },
                 "device": d.hardware.device,
                 "region": d.region,
                 "gpu_name": d.hardware.gpu_name,

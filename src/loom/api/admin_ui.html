@@ -138,6 +138,23 @@ function setTab(t) {
   refresh({reset: true});
 }
 
+// How this node's activations travel. The direct path falls back to the relay
+// silently — that is the right behaviour and it makes a degraded pipeline look
+// exactly like a healthy one, so the split has to be visible somewhere.
+function peerCell(p) {
+  if (!p || !p.peer_id) return `<span class="dim">relay</span>`;
+  const total = (p.direct || 0) + (p.relayed || 0);
+  const share = Math.round(100 * (p.direct_share || 0));
+  const label = p.symmetric_nat
+    ? `<span class="warn">symmetric NAT</span>`
+    : (p.dialable ? `<span class="ok">peer</span>` : `<span class="dim">relay</span>`);
+  if (!total) return label + ` <span class="dim">—</span>`;
+  const cls = share >= 90 ? "ok" : (share > 0 ? "warn" : "bad");
+  return label + ` <span class="${cls}">${share}% прямо</span>` +
+    `<br><span class="dim">${p.direct}/${total}` +
+    `${p.fallbacks ? ` · ${p.fallbacks} откат` : ""}</span>`;
+}
+
 // ------------------------------------------------------------------ views
 async function viewNodes() {
   const data = await api("/admin/nodes");
@@ -156,6 +173,7 @@ async function viewNodes() {
       n.price === null ? `<span class="dim">n/a (ph.4)</span>` : n.price,
       (n.connected ? `<span class="ok">ctrl</span>` : `<span class="bad">ctrl</span>`) + " / " +
         (n.tunnel ? `<span class="ok">tunnel</span>` : `<span class="bad">tunnel</span>`),
+      peerCell(n.peer),
       n.last_heartbeat_s_ago === null ? `<span class="dim">—</span>`
         : (n.last_heartbeat_s_ago < 10 ? `<span class="ok">${n.last_heartbeat_s_ago}s ago</span>`
                                        : `<span class="warn">${n.last_heartbeat_s_ago}s ago</span>`),
@@ -163,7 +181,7 @@ async function viewNodes() {
     ];
   });
   return `<h2>Registered workers</h2>` +
-    table(["node","device","region","VRAM decl.","TFLOPs","price","link","heartbeat","shards (status)"], rows);
+    table(["node","device","region","VRAM decl.","TFLOPs","price","link","p2p","heartbeat","shards (status)"], rows);
 }
 
 async function viewModels() {

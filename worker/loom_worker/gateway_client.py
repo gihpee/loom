@@ -41,6 +41,8 @@ class GatewayClient:
         agent_version: str = "",
         heartbeat_interval_s: float = 5.0,
         reconnect_delay_s: float = 3.0,
+        peer=None,
+        on_rendezvous=None,
     ) -> None:
         self.region = region
         self.verifier = verifier
@@ -51,6 +53,12 @@ class GatewayClient:
         self.hardware = hardware
         self.handlers = handlers
         self.heartbeat_interval_s = heartbeat_interval_s
+        # How peers can reach this node directly; None when there is no p2p
+        # stack, in which case the orchestrator keeps relaying for it.
+        self.peer = peer
+        # Called with the orchestrator's rendezvous multiaddrs once registration
+        # succeeds, on every (re)connect.
+        self.on_rendezvous = on_rendezvous
         self.reconnect_delay_s = reconnect_delay_s
         # Per-connection outbox: after a reconnect a stale generator must not
         # consume messages meant for the live stream.
@@ -89,15 +97,16 @@ class GatewayClient:
 
     def _request_iter(self, outbox: "queue.Queue[object]"):
         # First message on every (re)connect is registration.
-        yield gateway_pb2.WorkerMessage(
-            register=gateway_pb2.RegisterRequest(
-                node_id=self.state.node_id,
-                join_key=self.join_key,
-                hardware=self.hardware,
-                region=self.region,
-                agent_version=self.agent_version,
-            )
+        register = gateway_pb2.RegisterRequest(
+            node_id=self.state.node_id,
+            join_key=self.join_key,
+            hardware=self.hardware,
+            region=self.region,
+            agent_version=self.agent_version,
         )
+        if self.peer is not None:
+            register.peer.CopyFrom(self.peer)
+        yield gateway_pb2.WorkerMessage(register=register)
         while True:
             msg = outbox.get()
             if msg is _CLOSE:
@@ -173,6 +182,15 @@ class GatewayClient:
             if msg.register_ack.ok:
                 self._registered.set()
                 logger.info("registered with orchestrator as %s", self.state.node_id)
+                # The orchestrator just told us where its rendezvous is. That is
+                # the ONLY address this node needs in order to reach every other
+                # worker, and it could not be known before now — which is why
+                # the p2p node comes up here rather than at process start.
+                if self.on_rendezvous is not None:
+                    try:
+                        self.on_rendezvous(list(msg.register_ack.rendezvous))
+                    except Exception:
+                        logger.exception("bringing up the p2p node failed")
             else:
                 logger.error("registration rejected: %s", msg.register_ack.error)
                 self.stop()

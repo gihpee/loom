@@ -17,6 +17,10 @@ sglang = ["sglang[all]>=0.4"]
 mlx = ["mlx>=0.21", "mlx-lm>=0.20"]
 # NVML-based VRAM watchdog enforcement on CUDA hosts.
 cuda = ["nvidia-ml-py>=12.0"]
+# Direct worker-to-worker activations (libp2p through Lattica). Optional: the
+# agent relays through the orchestrator when it is absent, so an image without
+# it is slower on a spread-out pipeline and correct everywhere.
+p2p = ["lattica==1.0.21"]
 
 [project.scripts]
 loom-worker = "loom_worker.main:main"

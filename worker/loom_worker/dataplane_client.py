@@ -56,6 +56,10 @@ class DataPlaneClient:
         # Loopback relay: the stage subprocess posts outgoing inter-stage
         # messages here, and we push them into the tunnel.
         self.stage_relay = StageRelayServer(on_message=self._on_stage_outgoing)
+        # Set by the agent once the p2p node is up. None means every message
+        # goes through the orchestrator, which is the behaviour Loom had before
+        # direct links existed and the behaviour it falls back to.
+        self.links = None
 
     # ------------------------------------------------------------ stage relay
     def start_stage_relay(self) -> str:
@@ -76,17 +80,78 @@ class DataPlaneClient:
         return None, None
 
     def _on_stage_outgoing(self, payload: dict) -> None:
-        """Stage -> tunnel: wrap the JSON message into a StageEnvelope."""
+        """Stage -> next stage, directly when possible and relayed when not.
+
+        The stage process posted this to our loopback relay and is done with
+        it; which of the two paths carries it is decided here and nowhere else.
+        """
+        # The stage process does not track pipeline ids, so they are recovered
+        # from local state and STAMPED INTO the payload here. The relayed path
+        # could recover them again on the way out, but a peer receiving this
+        # directly has only what the message carries.
+        self._stamp_ids(payload)
+        target = int(payload.get("target_stage", -1))
+        # A broadcast (target -1, used by FREE to release a finished request on
+        # every stage) keeps going through the orchestrator on purpose: it is
+        # tiny, rare, off the critical path, and the relay already fans it out
+        # to the whole pipeline in one message.
+        if self.links is not None and target >= 0:
+            self.links.send(
+                payload.get("pipeline_id", ""), target, payload, relay=self._relay_stage
+            )
+            return
+        self._relay_stage(payload)
+
+    def deliver_direct(self, payload: dict) -> None:
+        """A message that arrived straight from a peer, bypassing the relay.
+
+        Same destination as a relayed one: the local stage process. Arriving by
+        a different road changes nothing about what happens next.
+        """
         pipeline_id = payload.get("pipeline_id", "")
         model_id = payload.get("model_id", "")
-        if not pipeline_id or not model_id:
-            # The stage does not track ids; recover them from local state.
-            for mid, shard in self.state.snapshot().items():
-                role = shard.spec.role
-                if role.is_multi_stage:
-                    pipeline_id = pipeline_id or role.pipeline_id
-                    model_id = model_id or mid
-                    break
+        _, shard = self._shard_for_pipeline(pipeline_id, model_id)
+        if shard is None or shard.backend is None:
+            logger.warning(
+                "direct stage message for unknown pipeline %s / model %s",
+                pipeline_id,
+                model_id,
+            )
+            return
+        post_to_stage(shard.backend.port, payload)
+
+    def _stamp_ids(self, payload: dict) -> None:
+        """Fill in the pipeline this message belongs to, if the stage did not.
+
+        A current stage always stamps its own ids (it is the only party that
+        knows them for certain). This guess remains for a stage process from an
+        older image, and it is only ever right when this node hosts a single
+        multi-stage model — which is why the stage does it now instead.
+        """
+        if payload.get("pipeline_id") and payload.get("model_id"):
+            return
+        candidates = [
+            (mid, shard.spec.role)
+            for mid, shard in self.state.snapshot().items()
+            if shard.spec.role.is_multi_stage
+        ]
+        if len(candidates) != 1:
+            if candidates:
+                logger.warning(
+                    "a stage message arrived with no pipeline id and this node "
+                    "hosts %d pipelines; it cannot be routed reliably",
+                    len(candidates),
+                )
+            return
+        model_id, role = candidates[0]
+        payload.setdefault("pipeline_id", role.pipeline_id)
+        payload.setdefault("model_id", model_id)
+
+    def _relay_stage(self, payload: dict) -> None:
+        """Stage -> tunnel: wrap the JSON message into a StageEnvelope."""
+        self._stamp_ids(payload)
+        pipeline_id = payload.get("pipeline_id", "")
+        model_id = payload.get("model_id", "")
         from_stage = 0
         _, shard = self._shard_for_pipeline(pipeline_id, model_id)
         if shard is not None:

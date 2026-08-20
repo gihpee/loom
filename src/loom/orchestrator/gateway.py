@@ -19,15 +19,47 @@ from loom.proto_gen import gateway_pb2, gateway_pb2_grpc, worker_control_pb2
 logger = get_logger(__name__)
 
 
+def _observed_host(context) -> str:
+    """The worker's address as seen from here, e.g. "ipv4:203.0.113.7:51234".
+
+    gRPC hands it over as a scheme-prefixed string; only the host matters,
+    because the p2p port is the worker's own and travels in its PeerIdentity.
+    An IPv6 peer is reported bracketed, hence the rsplit on the last colon.
+    """
+    try:
+        raw = context.peer() or ""
+    except Exception:
+        return ""
+    for prefix in ("ipv4:", "ipv6:"):
+        if raw.startswith(prefix):
+            raw = raw[len(prefix):]
+            break
+    else:
+        return ""  # unix sockets and other transports have nothing to offer
+    host = raw.rsplit(":", 1)[0]
+    return host.strip("[]")
+
+
 class WorkerSession:
     """Server-side view of one connected worker."""
 
     def __init__(
-        self, node_id: str, register: gateway_pb2.RegisterRequest, sign_key: str = ""
+        self,
+        node_id: str,
+        register: gateway_pb2.RegisterRequest,
+        sign_key: str = "",
+        observed_host: str = "",
     ) -> None:
         self.node_id = node_id
         self.register = register
         self.sign_key = sign_key
+        # The address this worker's control connection arrives from, as the
+        # orchestrator sees it. For a node behind NAT this is its PUBLIC
+        # address — the one fact it cannot learn about itself, and exactly what
+        # a STUN server would tell it. We get it for free from a connection the
+        # worker had to open anyway, and pass it to that node's peers so they
+        # have something dialable to aim at.
+        self.observed_host = observed_host
         self.outbox: asyncio.Queue[Optional[gateway_pb2.ControlMessage]] = asyncio.Queue()
         self.pending_acks: Dict[str, asyncio.Future] = {}
         self.endpoints: Dict[str, str] = {}  # model_id -> serving url
@@ -77,7 +109,10 @@ class ControlGatewayServicer(gateway_pb2_grpc.ControlGatewayServicer):
     async def Attach(self, request_iterator, context):
         session: Optional[WorkerSession] = None
         holder = {"session": None, "ready": asyncio.Event()}
-        recv_task = asyncio.create_task(self._recv_loop(request_iterator, holder))
+        observed = _observed_host(context)
+        recv_task = asyncio.create_task(
+            self._recv_loop(request_iterator, holder, observed_host=observed)
+        )
         try:
             # Wait until registration produced a session (or the recv loop died).
             ready_task = asyncio.create_task(holder["ready"].wait())
@@ -113,7 +148,9 @@ class ControlGatewayServicer(gateway_pb2_grpc.ControlGatewayServicer):
                 await self.controller.on_disconnect(session)
                 logger.info("worker %s disconnected", session.node_id)
 
-    async def _recv_loop(self, request_iterator, holder: dict) -> None:
+    async def _recv_loop(
+        self, request_iterator, holder: dict, observed_host: str = ""
+    ) -> None:
         session: Optional[WorkerSession] = None
         async for msg in request_iterator:
             kind = msg.WhichOneof("msg")
@@ -137,7 +174,9 @@ class ControlGatewayServicer(gateway_pb2_grpc.ControlGatewayServicer):
                     )
                     tmp.outbox.put_nowait(None)
                     return
-                session = WorkerSession(reg.node_id, reg, sign_key=secret or "")
+                session = WorkerSession(
+                    reg.node_id, reg, sign_key=secret or "", observed_host=observed_host
+                )
                 # Replace a stale session for the same node id, if any.
                 old = self.sessions.pop(reg.node_id, None)
                 if old is not None:
@@ -147,7 +186,14 @@ class ControlGatewayServicer(gateway_pb2_grpc.ControlGatewayServicer):
                 holder["ready"].set()
                 await session.send(
                     gateway_pb2.ControlMessage(
-                        register_ack=gateway_pb2.RegisterAck(ok=True, node_id=reg.node_id)
+                        register_ack=gateway_pb2.RegisterAck(
+                            ok=True,
+                            node_id=reg.node_id,
+                            # The one address this worker needs to reach every
+                            # other worker. Empty when we run no p2p node, in
+                            # which case it keeps relaying through us.
+                            rendezvous=self.controller.rendezvous_addrs(),
+                        )
                     )
                 )
                 logger.info(

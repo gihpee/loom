@@ -28,6 +28,9 @@ services:
       LOOM_NODE_TOKEN: ${LOOM_NODE_TOKEN:-}
       HF_TOKEN: ${HF_TOKEN:-}
       LOOM_KEYSTORE_PATH: /data/keys.json
+      # Direct worker-to-worker activations (docs/P2P_TRANSPORT.md).
+      LOOM_P2P: ${LOOM_P2P:-1}
+      LOOM_P2P_PORT: ${LOOM_P2P_PORT:-47100}
       LOOM_PARAM_MEM_RATIO: ${LOOM_PARAM_MEM_RATIO:-0.6}
       LOOM_KVCACHE_MEM_RATIO: ${LOOM_KVCACHE_MEM_RATIO:-0.3}
       LOOM_QPS_PER_PIPELINE: ${LOOM_QPS_PER_PIPELINE:-10}
@@ -46,6 +49,14 @@ services:
       - "${LOOM_HTTP_PORT:-8000}:${LOOM_HTTP_PORT:-8000}"
       # control plane + data-plane tunnel (workers dial in)
       - "${LOOM_GRPC_PORT:-9000}:${LOOM_GRPC_PORT:-9000}"
+      # p2p rendezvous: the one address workers bootstrap to, so they can then
+      # reach EACH OTHER directly instead of relaying activations through this
+      # process (docs/P2P_TRANSPORT.md). Both transports: TCP goes through the
+      # most middleboxes, QUIC avoids head-of-line blocking. This host is the
+      # only one in Loom that needs an inbound port — workers still just dial
+      # out. Set LOOM_P2P=0 to turn the whole thing off.
+      - "${LOOM_P2P_PORT:-47100}:${LOOM_P2P_PORT:-47100}/tcp"
+      - "${LOOM_P2P_PORT:-47100}:${LOOM_P2P_PORT:-47100}/udp"
     volumes:
       - loom-data:/data
     depends_on:

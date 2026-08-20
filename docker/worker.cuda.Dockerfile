@@ -16,7 +16,8 @@ COPY pyproject.toml ./
 COPY loom_worker ./loom_worker
 
 # nvidia-ml-py: NVML-based hardware detection + VRAM watchdog enforcement.
-RUN pip install --no-cache-dir . nvidia-ml-py>=12.0
+# lattica: direct worker-to-worker links (see docs/P2P_TRANSPORT.md).
+RUN pip install --no-cache-dir . "nvidia-ml-py>=12.0" "lattica==1.0.21"
 
 # Optional: add SGLang support (large; enable if you plan to serve with sglang)
 # RUN pip install --no-cache-dir "sglang[all]>=0.4"

@@ -14,6 +14,7 @@ import urllib.request
 from typing import Callable, List, Optional
 
 from loom_worker.backends import make_backend
+from loom_worker.p2p import neighbours_from_topology
 from loom_worker.proto import gateway_pb2, worker_control_pb2
 from loom_worker.state import PipelineRole, ShardSpec, ShardState, ShardStatus, WorkerState
 from loom_worker.watchdog import QuotaWatchdog
@@ -30,6 +31,8 @@ class CommandHandlers:
         backend_kwargs: Optional[dict] = None,
         device: str = "cpu",
         watchdog_poll_s: float = 2.0,
+        links=None,
+        peer_status=None,
         relay_url: str = "",
         rss_overhead_bytes: Optional[int] = None,
         vram_overhead_bytes: Optional[int] = None,
@@ -41,6 +44,11 @@ class CommandHandlers:
         self.device = device
         # Loopback URL the stage subprocess posts inter-stage messages to.
         self.relay_url = relay_url
+        # Peer directory for the direct data path; None keeps every message on
+        # the orchestrator's relay.
+        self.links = links
+        # Callable returning this node's PeerStatus, reported on every beat.
+        self.peer_status = peer_status
         # Host-memory headroom for the runtime when enforcing an RSS limit.
         self.rss_overhead_bytes = (
             rss_overhead_bytes
@@ -161,6 +169,15 @@ class CommandHandlers:
                 num_model_layers=role.num_model_layers,
                 **backend_kwargs,
             )
+            # The orchestrator named this stage's neighbours; hand them to the
+            # data plane so the next message can go straight there. Directory
+            # first, backend second: the peers must be known before any
+            # activations start flowing.
+            if self.links is not None:
+                self.links.set_neighbours(
+                    role.pipeline_id,
+                    neighbours_from_topology(req.topology, self_node_id=self.state.node_id),
+                )
             if role.is_multi_stage and not backend.serves_partial_shard:
                 raise NotImplementedError(
                     f"backend '{spec.backend_type}' serves whole models only "
@@ -352,11 +369,18 @@ class CommandHandlers:
                     num_stages=shard.spec.role.num_stages,
                 )
             )
-        return gateway_pb2.WorkerMessage(
-            telemetry=worker_control_pb2.TelemetryReport(
-                node_id=self.state.node_id, shards=shards
-            )
+        report = worker_control_pb2.TelemetryReport(
+            node_id=self.state.node_id, shards=shards
         )
+        # Identity and path counters ride the heartbeat: the node had no peer id
+        # when it registered (it learns the rendezvous from the ack), and an
+        # orchestrator that restarts re-learns the directory from these beats.
+        if self.peer_status is not None:
+            try:
+                report.peer.CopyFrom(self.peer_status())
+            except Exception:
+                logger.exception("building peer status failed")
+        return gateway_pb2.WorkerMessage(telemetry=report)
 
     # --- internals ---------------------------------------------------------
     def _teardown(self, model_id: str, shard: ShardState, *, to_status: ShardStatus) -> None:

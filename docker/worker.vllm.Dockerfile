@@ -22,7 +22,8 @@ COPY loom_worker ./loom_worker
 
 # Quoted on purpose: unquoted, the shell reads ">=12.0" as a redirect and
 # silently installs whatever nvidia-ml-py version it likes.
-RUN pip install --no-cache-dir . "nvidia-ml-py>=12.0"
+# lattica: direct worker-to-worker links (see docs/P2P_TRANSPORT.md).
+RUN pip install --no-cache-dir . "nvidia-ml-py>=12.0" "lattica==1.0.21"
 
 # Record what the stage engine was built against. The patches in
 # loom_worker/vllm_stage/ target these internals; a mismatch surfaces at

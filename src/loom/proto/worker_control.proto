@@ -37,6 +37,22 @@ message Ack {
 // Where this shard sits in a pipeline. A model whose layers do not fit on one
 // GPU is served by several stages: stage 0 embeds and runs layers [0, k), the
 // next stage continues from k, and the last stage runs the LM head and samples.
+// One neighbour a stage may talk to directly, as the orchestrator knows it.
+// This is the rendezvous half of NAT traversal: the orchestrator is the only
+// party both peers trust and can always reach, so it is what tells each of
+// them who the other is and where to try.
+message PeerRoute {
+  int32 stage_index = 1;        // which stage of this pipeline the peer runs
+  string node_id = 2;
+  string peer_id = 3;           // libp2p identity; empty = no direct path
+  // Everything worth trying, best first: addresses the peer reported plus the
+  // address the orchestrator OBSERVED on its control connection. The observed
+  // one is the node's public address as the outside world sees it — the same
+  // fact a STUN server would return, obtained for free from a connection the
+  // node had to open anyway.
+  repeated string addrs = 4;
+}
+
 message PipelineTopology {
   string pipeline_id = 1;       // groups the stages of one replica
   int32 stage_index = 2;        // 0-based position in the chain
@@ -44,6 +60,10 @@ message PipelineTopology {
   bool is_first = 4;            // owns embeddings + the client-facing request
   bool is_last = 5;             // owns the LM head + sampling
   int32 num_model_layers = 6;   // total decoder layers of the model
+  // Every OTHER stage of this pipeline. A stage sends to stage_index+1 and the
+  // last one sends the sampled token back to stage 0, so a full directory is
+  // simpler than trying to guess which neighbours matter.
+  repeated PeerRoute peers = 7;
 }
 
 message LoadShardRequest {
@@ -111,12 +131,35 @@ message RttSample {
   double rtt_ms = 2;
 }
 
+// A node's p2p state, on every heartbeat: who it is on the peer network and
+// how its traffic actually travelled.
+//
+// Identity rides here, not only in RegisterRequest, because a worker learns
+// where the rendezvous is FROM the registration ack — so at the moment it
+// registers it has no peer id yet. Repeating it on every heartbeat also means
+// an orchestrator that restarts re-learns the whole peer directory within one
+// heartbeat, the same way it re-learns which shards are running.
+//
+// The counters matter because the direct path degrades silently: a deployment
+// that quietly fell back to the relay looks identical to a working one apart
+// from the latency.
+message PeerStatus {
+  string peer_id = 1;               // empty when this node has no p2p stack
+  repeated string listen_addrs = 2;
+  bool symmetric_nat = 3;           // hole punching to this node cannot work
+  uint64 direct = 4;                // messages sent straight to a peer
+  uint64 relayed = 5;               // messages sent through the orchestrator
+  uint64 fallbacks = 6;             // direct link failed, the relay saved it
+  double direct_share = 7;
+}
+
 message TelemetryReport {
   string node_id = 1;
   repeated ShardTelemetry shards = 2;
   repeated RttSample rtts = 3;
   uint64 vram_free_bytes = 4;
   int64 reported_at_unix_ms = 5;
+  PeerStatus peer = 6;
 }
 
 message HeartbeatRequest {

@@ -24,12 +24,15 @@ import logging
 import os
 import socket
 import sys
+from typing import List, Optional
 
 from loom_worker import __version__
 from loom_worker.dataplane_client import DataPlaneClient
 from loom_worker.gateway_client import GatewayClient
 from loom_worker.handlers import CommandHandlers
 from loom_worker.hwinfo import detect_hardware
+from loom_worker.p2p import LinkTable, PeerNode, lattica_available
+from loom_worker.proto import worker_control_pb2
 from loom_worker.joinkey import parse_join_key
 from loom_worker.proto import gateway_pb2
 from loom_worker.security import CommandVerifier
@@ -82,6 +85,98 @@ def build_hardware_message() -> gateway_pb2.HardwareInfo:
     )
 
 
+class PeerLayer:
+    """This node's direct path: brought up when the rendezvous becomes known.
+
+    A worker cannot start its p2p node at process start, because the address it
+    must bootstrap to arrives in the registration ack. So the LinkTable exists
+    from the beginning and relays everything, and the node is attached to it
+    later — everything downstream holds the same object and never has to be
+    re-wired.
+
+    Started on the ack rather than on the first multi-stage LoadShard on
+    purpose: joining the network takes seconds, and a deployment should not be
+    the thing that waits for it.
+    """
+
+    def __init__(self, dataplane, *, port: Optional[int] = None, key_dir: str = "") -> None:
+        self.dataplane = dataplane
+        self.links = LinkTable()
+        self.node: Optional[PeerNode] = None
+        self.identity = None
+        # Overrides for the node's port and key directory. Defaults come from
+        # the environment; both are explicit here so a test can run several
+        # agents in one process — two nodes sharing a key directory interfere,
+        # and a closed node does not free its port instantly.
+        self._port = port
+        self._key_dir = key_dir
+        self._enabled = os.environ.get("LOOM_P2P", "1").strip().lower() not in (
+            "0",
+            "false",
+            "no",
+        )
+
+    def on_rendezvous(self, addrs: List[str]) -> None:
+        """Bring the node up against the orchestrator's rendezvous.
+
+        Never fatal, and never retried in a loop: a worker that cannot join the
+        peer network is slower, not broken, and taking a working GPU out of the
+        pool over a networking nicety would be the wrong trade.
+        """
+        if self.node is not None or not self._enabled:
+            return
+        addrs = [a for a in (addrs or []) if a.strip()]
+        if not addrs:
+            logger.info(
+                "the orchestrator offers no rendezvous; stage messages go through it"
+            )
+            return
+        if not lattica_available():
+            logger.info(
+                "no p2p stack in this image; stage messages go through the orchestrator"
+            )
+            return
+        # Bootstrap only. The rendezvous is a DHT entry point, not a libp2p
+        # relay service — asking it to be one leaves the node stuck outside the
+        # network. Traffic that cannot go directly uses the orchestrator's own
+        # tunnel, which every message already travels today.
+        options = {"bootstraps": addrs}
+        if self._port is not None:
+            options["port"] = self._port
+        if self._key_dir:
+            options["key_dir"] = self._key_dir
+        node = PeerNode(**options)
+        try:
+            self.identity = node.start(on_message=self.dataplane.deliver_direct)
+        except Exception:
+            logger.warning(
+                "the p2p node did not start; relaying every stage message",
+                exc_info=True,
+            )
+            return
+        self.node = node
+        self.links.attach(send_direct=node.send, dial=node.warm)
+        if self.identity.symmetric_nat:
+            logger.warning(
+                "this node is behind a symmetric NAT: peers cannot open a direct "
+                "link to it and will relay"
+            )
+
+    def status(self):
+        """What this node reports about its p2p state on every heartbeat."""
+        stats = self.links.snapshot()
+        identity = self.identity
+        return worker_control_pb2.PeerStatus(
+            peer_id=identity.peer_id if identity else "",
+            listen_addrs=identity.listen_addrs if identity else [],
+            symmetric_nat=bool(identity.symmetric_nat) if identity else False,
+            direct=stats["direct"],
+            relayed=stats["relay"],
+            fallbacks=stats["fallbacks"],
+            direct_share=stats["direct_share"],
+        )
+
+
 def main(argv=None) -> None:
     logging.basicConfig(
         level=os.environ.get("LOOM_LOG_LEVEL", "INFO"),
@@ -129,12 +224,21 @@ def main(argv=None) -> None:
     )
     relay_url = dataplane.start_stage_relay()
 
+    # Direct worker-to-worker path. Relay-only until the orchestrator tells us
+    # where its rendezvous is (see PeerLayer). Optional by construction: a node
+    # that cannot join keeps relaying, which is what every node did before this
+    # existed. See docs/P2P_TRANSPORT.md.
+    peers = PeerLayer(dataplane)
+    dataplane.links = peers.links
+
     handlers = CommandHandlers(
         state,
         send=lambda m: holder["client"].send(m),
         device=hardware.device,
         watchdog_poll_s=float(os.environ.get("LOOM_WATCHDOG_POLL_S", "2")),
         relay_url=relay_url,
+        links=peers.links,
+        peer_status=peers.status,
         backend_kwargs={
             "vllm": {"total_vram_bytes": hardware.vram_total_bytes},
             "sglang": {"total_vram_bytes": hardware.vram_total_bytes},
@@ -150,6 +254,7 @@ def main(argv=None) -> None:
         verifier=verifier,
         agent_version=__version__,
         heartbeat_interval_s=float(os.environ.get("LOOM_HEARTBEAT_S", "5")),
+        on_rendezvous=peers.on_rendezvous,
     )
     holder["client"] = client
 
