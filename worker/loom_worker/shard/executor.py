@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
 from loom_worker.shard.loader import ShardModel
+from loom_worker.wire import from_wire, to_wire
 
 logger = logging.getLogger("loom_worker.shard.executor")
 
@@ -186,16 +187,13 @@ class ShardExecutor:
     def serialize(self, tensor) -> Tuple[bytes, List[int], str]:
         """Tensor -> (bytes, shape, dtype) for the wire.
 
-        float32 on the wire keeps the format portable across stages that may
-        run different dtypes (a cuda stage and a cpu stage can co-operate).
+        The tensor's own dtype travels with it, so a bfloat16 stage sends half
+        the bytes a float32 one does and neither has to know what the other
+        runs (see loom_worker/wire.py).
         """
-        t = tensor.detach().to("cpu", dtype=self.torch.float32).contiguous()
-        return t.numpy().tobytes(), list(t.shape), "float32"
+        return to_wire(self.torch, tensor)
 
     def deserialize(self, data: bytes, shape: List[int], dtype: str):
-        torch = self.torch
-        np_dtype = {"float32": "float32", "float16": "float16"}.get(dtype, "float32")
-        import numpy as np
-
-        array = np.frombuffer(data, dtype=np_dtype).reshape(tuple(shape))
-        return torch.from_numpy(array.copy())
+        # Whatever arrived, in the dtype it was sent as. The layers convert it
+        # themselves on the first matmul, so there is nothing to cast here.
+        return from_wire(self.torch, data, shape, dtype)

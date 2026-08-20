@@ -288,29 +288,27 @@ class VllmStageExecutor:
     WIRE_SEPARATOR = "|"
 
     def serialize(self, payload) -> Tuple[bytes, List[int], str]:
+        from loom_worker.wire import to_wire
+
         torch = self.torch
         tensors = getattr(payload, "tensors", None)
         if not isinstance(tensors, dict):
-            flat = payload.detach().to("cpu", dtype=torch.float32).contiguous()
-            return flat.numpy().tobytes(), list(flat.shape), "float32"
+            return to_wire(torch, payload)
 
+        # A named set goes as one stacked tensor; the names ride in the dtype
+        # field after the separator. Stacking first keeps every member in the
+        # same dtype, which is what makes one dtype name enough for the set.
         names = list(tensors)
-        stacked = torch.stack(
-            [tensors[name].detach().to("cpu", dtype=torch.float32).contiguous()
-             for name in names]
-        ).contiguous()
-        return (
-            stacked.numpy().tobytes(),
-            list(stacked.shape),
-            "float32" + self.WIRE_SEPARATOR + ",".join(names),
-        )
+        stacked = torch.stack([tensors[name].detach() for name in names]).contiguous()
+        raw, shape, dtype = to_wire(torch, stacked)
+        return raw, shape, dtype + self.WIRE_SEPARATOR + ",".join(names)
 
     def deserialize(self, data: bytes, shape: List[int], dtype: str):
+        from loom_worker.wire import from_wire
+
         torch = self.torch
         name, _, joined = dtype.partition(self.WIRE_SEPARATOR)
-        by_name = {"float32": torch.float32, "float16": torch.float16, "bfloat16": torch.bfloat16}
-        wire = by_name.get(name, torch.float32)
-        flat = torch.frombuffer(bytearray(data), dtype=wire).reshape(tuple(shape))
+        flat = from_wire(torch, data, shape, name)
         if not joined:
             return flat
         from vllm.sequence import IntermediateTensors
