@@ -186,15 +186,44 @@ def test_relay_addresses_are_configured_not_discovered(monkeypatch):
     /libp2p/circuit/relay/0.2.0/stop and never the /hop half, so the
     orchestrator's own node cannot be the relay however reachable it is.
     """
-    import importlib
-
-    import loom.orchestrator.rendezvous as rdv
+    from loom.orchestrator.rendezvous import relay_addrs
 
     monkeypatch.setenv("LOOM_P2P_RELAY", "/ip4/1.2.3.4/tcp/47200/p2p/12D3KooWa, ")
-    assert importlib.reload(rdv).RELAY_ADDRS == ["/ip4/1.2.3.4/tcp/47200/p2p/12D3KooWa"]
+    assert relay_addrs() == ["/ip4/1.2.3.4/tcp/47200/p2p/12D3KooWa"]
 
     monkeypatch.delenv("LOOM_P2P_RELAY", raising=False)
-    assert importlib.reload(rdv).RELAY_ADDRS == []
+    monkeypatch.setenv("LOOM_P2P_RELAY_FILE", "/nonexistent/relay/address")
+    assert relay_addrs() == []
+
+
+def test_the_relay_hands_its_address_over_without_a_human(monkeypatch, tmp_path):
+    """The step that was lost on a live stand, removed rather than documented.
+
+    Enabling the relay used to mean copying a multiaddr from its log into .env
+    and restarting the orchestrator. Skipping the copy leaves every part of the
+    system looking healthy — relay up, workers up, model serving — and the only
+    evidence is "(2 bootstrap, 0 relay)" in a worker's startup log.
+
+    Both processes share a volume, so the relay writes the address there and
+    the orchestrator reads it. Read per registration, not cached: a relay
+    started after the orchestrator must still be picked up.
+    """
+    from loom.orchestrator.rendezvous import relay_addrs
+
+    published = tmp_path / "relay" / "address"
+    monkeypatch.delenv("LOOM_P2P_RELAY", raising=False)
+    monkeypatch.setenv("LOOM_P2P_RELAY_FILE", str(published))
+
+    assert relay_addrs() == []  # no relay running yet
+
+    published.parent.mkdir()
+    published.write_text("/ip4/203.0.113.7/tcp/47200/p2p/12D3KooWRelay\n")
+    assert relay_addrs() == ["/ip4/203.0.113.7/tcp/47200/p2p/12D3KooWRelay"]
+
+    # An explicit setting still wins: someone running the relay elsewhere must
+    # not be overruled by a stale file from a relay that used to be local.
+    monkeypatch.setenv("LOOM_P2P_RELAY", "/ip4/198.51.100.9/tcp/47200/p2p/12D3KooWOther")
+    assert relay_addrs() == ["/ip4/198.51.100.9/tcp/47200/p2p/12D3KooWOther"]
 
 
 def test_a_worker_takes_the_relay_from_the_registration_ack(monkeypatch):

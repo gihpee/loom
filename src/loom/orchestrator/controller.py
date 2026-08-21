@@ -260,9 +260,9 @@ class MultiModelController:
         orchestrator can find. Empty means workers with no reachable address
         keep relaying their activations through this process instead.
         """
-        from loom.orchestrator.rendezvous import RELAY_ADDRS
+        from loom.orchestrator.rendezvous import relay_addrs
 
-        return list(RELAY_ADDRS)
+        return relay_addrs()
 
     async def on_telemetry(self, session: WorkerSession, report) -> None:
         self.node_last_seen[session.node_id] = time.time()

@@ -41,7 +41,35 @@ DEFAULT_KEY_DIR = os.environ.get("LOOM_P2P_KEY_DIR", "/data/p2p")
 # A separate process from this one on purpose: Lattica speaks the relay CLIENT
 # protocol (/libp2p/circuit/relay/0.2.0/stop) and never the server half, so the
 # rendezvous cannot be the relay however reachable it is. See relay/relay.mjs.
-RELAY_ADDRS = [a.strip() for a in os.environ.get("LOOM_P2P_RELAY", "").split(",") if a.strip()]
+# Where the relay writes the address it announces. The two processes share a
+# volume, so the orchestrator can simply read it instead of a human copying a
+# multiaddr from one log into a .env file and restarting — a step that is easy
+# to skip and whose only symptom is "(2 bootstrap, 0 relay)" in a worker log
+# nobody thought to look at.
+RELAY_ADDR_FILE = "/data/relay/address"
+
+
+def relay_addrs() -> List[str]:
+    """Circuit-relay servers to hand workers, configured or self-announced.
+
+    Read on every registration rather than cached at import: the relay may
+    come up after the orchestrator, and a worker registering later should get
+    the address without anyone restarting anything.
+    """
+    configured = [
+        a.strip() for a in os.environ.get("LOOM_P2P_RELAY", "").split(",") if a.strip()
+    ]
+    if configured:
+        return configured
+    try:
+        with open(os.environ.get("LOOM_P2P_RELAY_FILE", RELAY_ADDR_FILE)) as handle:
+            return [
+                line.strip()
+                for line in handle
+                if line.strip() and not line.startswith("#")
+            ]
+    except OSError:
+        return []
 
 
 def lattica_available() -> bool:
@@ -101,6 +129,22 @@ class RendezvousNode:
             self._lattica.peer_id(),
             self.port,
         )
+        # Said out loud because its absence is invisible everywhere else: with
+        # no relay, a worker nothing can dial into simply never gets a direct
+        # link, and the only trace is a relay share that stays at zero.
+        relays = relay_addrs()
+        if relays:
+            logger.info(
+                "workers will be given %d relay(s): %s", len(relays), ", ".join(relays)
+            )
+        else:
+            logger.info(
+                "no relay known yet (neither LOOM_P2P_RELAY nor %s): workers "
+                "that cannot be dialled into will relay their activations "
+                "through this process. A relay started later is picked up "
+                "without a restart (docs/P2P_RELAY.md)",
+                RELAY_ADDR_FILE,
+            )
         return True
 
     def _build(self):
