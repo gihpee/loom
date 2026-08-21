@@ -241,7 +241,18 @@ def test_the_heartbeat_reports_a_relay_only_node_honestly(monkeypatch):
 
 
 # ------------------------------------------------- a link worth using at all
-def worth_table(peer_rtt, relay_rtt, **kw):
+def expire(table):
+    """Age every verdict out, as the re-check interval does.
+
+    Not the same as clearing the table: the previous verdict has to survive
+    its own expiry, or there is nothing for the hysteresis to hold on to and
+    every re-check starts from scratch.
+    """
+    for peer_id, (verdict, _deadline, direct, relayed) in list(table._worth.items()):
+        table._worth[peer_id] = (verdict, 0.0, direct, relayed)
+
+
+def worth_table(peer_rtt, relay_rtt, peer_relay_rtt=1.0, **kw):
     """A table whose only interesting property is what the two paths cost."""
     sent = []
     table = LinkTable(
@@ -251,7 +262,9 @@ def worth_table(peer_rtt, relay_rtt, **kw):
         relay_rtt=lambda: relay_rtt,
         **kw,
     )
-    table.set_neighbours("p#0", [peer(1)])
+    neighbour = peer(1)
+    neighbour.relay_rtt_ms = peer_relay_rtt
+    table.set_neighbours("p#0", [neighbour])
     return table, sent
 
 
@@ -268,7 +281,7 @@ def test_a_link_costlier_than_the_relay_is_not_used():
     less than reaching the relay for the direct path to be saving anything at
     all. A circuit runs THROUGH the relay and so can never pass this test.
     """
-    table, sent = worth_table(peer_rtt=180.0, relay_rtt=60.0)
+    table, sent = worth_table(peer_rtt=180.0, relay_rtt=60.0, peer_relay_rtt=20.0)
     relayed = []
     assert table.send("p#0", 1, {"step": 1}, relay=relayed.append) == "relay"
     assert not sent and len(relayed) == 1
@@ -276,7 +289,7 @@ def test_a_link_costlier_than_the_relay_is_not_used():
 
 
 def test_a_genuinely_direct_link_is_used():
-    table, sent = worth_table(peer_rtt=12.0, relay_rtt=60.0)
+    table, sent = worth_table(peer_rtt=12.0, relay_rtt=60.0, peer_relay_rtt=20.0)
     assert table.send("p#0", 1, {"step": 1}, relay=lambda m: None) == "direct"
     assert len(sent) == 1
 
@@ -295,13 +308,15 @@ def test_a_link_is_re_examined_so_hole_punching_can_win_later():
         rtt=lambda pid: rtt["value"],
         relay_rtt=lambda: 60.0,
     )
-    table.set_neighbours("p#0", [peer(1)])
+    neighbour = peer(1)
+    neighbour.relay_rtt_ms = 20.0
+    table.set_neighbours("p#0", [neighbour])
     assert table.send("p#0", 1, {"s": 1}, relay=lambda m: None) == "relay"
 
     rtt["value"] = 15.0  # hole punching succeeded
     assert table.send("p#0", 1, {"s": 2}, relay=lambda m: None) == "relay"  # cached
 
-    table._worth.clear()  # what the re-check interval does on its own
+    expire(table)  # what the re-check interval does on its own
     assert table.send("p#0", 1, {"s": 3}, relay=lambda m: None) == "direct"
 
 
@@ -518,3 +533,51 @@ def test_a_busy_port_does_not_cost_the_node_its_direct_path():
         assert node.port == taken + 1  # and it reports where it actually is
     finally:
         hog.close()
+
+
+def test_the_near_half_of_the_relay_path_is_not_the_whole_of_it():
+    """The numbers are from a real stand, and the old rule got them wrong.
+
+    nv3 sat 8 ms from the relay; the Mac it talked to sat 90 ms from the same
+    relay. Comparing the direct link (94 ms) against only nv3's own trip to
+    the relay (8 ms) rejected it — while the actual relayed path cost 98 ms
+    and was the slower of the two. A node cannot measure the far half, so the
+    peer reports it and the orchestrator passes it on.
+    """
+    table, sent = worth_table(peer_rtt=94.0, relay_rtt=8.0, peer_relay_rtt=90.0)
+    assert table.send("p#0", 1, {"s": 1}, relay=lambda m: None) == "direct"
+    assert len(sent) == 1
+
+
+def test_two_paths_of_the_same_cost_do_not_make_the_route_flap():
+    """94 ms against 98 ms, re-examined every 30 s, flipped every time.
+
+    Each flip costs a dial, and jitter alone decided the winner. A tie has to
+    resolve to "leave it as it is".
+    """
+    rtt = {"value": 94.0}
+    table = LinkTable(
+        send_direct=lambda pid, msg: None,
+        dial=lambda pid, addrs: None,
+        rtt=lambda pid: rtt["value"],
+        relay_rtt=lambda: 8.0,
+    )
+    neighbour = peer(1)
+    neighbour.relay_rtt_ms = 90.0
+    table.set_neighbours("p#0", [neighbour])
+    assert table.send("p#0", 1, {"s": 1}, relay=lambda m: None) == "direct"
+
+    for jitter in (99.0, 105.0, 96.0, 102.0):  # both sides of 98 ms
+        rtt["value"] = jitter
+        expire(table)  # what the re-check interval does on its own
+        assert table.send("p#0", 1, {"s": 1}, relay=lambda m: None) == "direct", jitter
+
+    rtt["value"] = 160.0  # a genuine change, well past the band
+    expire(table)
+    assert table.send("p#0", 1, {"s": 1}, relay=lambda m: None) == "relay"
+
+
+def test_a_peer_that_never_reported_its_distance_is_trusted():
+    """Guessing the unknown half as zero is exactly what rejected good links."""
+    table, sent = worth_table(peer_rtt=94.0, relay_rtt=8.0, peer_relay_rtt=0.0)
+    assert table.send("p#0", 1, {"s": 1}, relay=lambda m: None) == "direct"

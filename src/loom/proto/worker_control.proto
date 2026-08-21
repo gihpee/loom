@@ -51,6 +51,11 @@ message PeerRoute {
   // fact a STUN server would return, obtained for free from a connection the
   // node had to open anyway.
   repeated string addrs = 4;
+  // What it costs THIS peer to reach the relay, as it last reported. Half of
+  // the arithmetic that decides whether a direct link is worth using: the
+  // relayed path costs my trip to the relay plus this one, and a node cannot
+  // know the far half on its own.
+  double relay_rtt_ms = 5;
 }
 
 message PipelineTopology {

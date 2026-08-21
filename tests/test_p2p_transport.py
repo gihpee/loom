@@ -224,8 +224,10 @@ def test_two_workers_meet_through_the_orchestrator_and_then_bypass_it(tmp_path_f
         # ...and hands node-a the directory, as a LoadShard topology would.
         topology = SimpleNamespace(
             peers=[
-                SimpleNamespace(stage_index=i, node_id=n, peer_id=p, addrs=a)
-                for i, n, p, a in rows
+                SimpleNamespace(
+                    stage_index=i, node_id=n, peer_id=p, addrs=a, relay_rtt_ms=r
+                )
+                for i, n, p, a, r in rows
             ]
         )
         peers_a.links.set_neighbours(

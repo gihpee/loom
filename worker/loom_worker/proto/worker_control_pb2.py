@@ -24,7 +24,7 @@ _sym_db = _symbol_database.Default()
 
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x14worker_control.proto\x12\x0floom.control.v0\"O\n\x0b\x43ommandMeta\x12\x12\n\ncommand_id\x18\x01 \x01(\t\x12\x19\n\x11issued_at_unix_ms\x18\x02 \x01(\x03\x12\x11\n\tsignature\x18\x03 \x01(\x0c\"4\n\x03\x41\x63k\x12\x12\n\ncommand_id\x18\x01 \x01(\t\x12\n\n\x02ok\x18\x02 \x01(\x08\x12\r\n\x05\x65rror\x18\x03 \x01(\t\"Q\n\tPeerRoute\x12\x13\n\x0bstage_index\x18\x01 \x01(\x05\x12\x0f\n\x07node_id\x18\x02 \x01(\t\x12\x0f\n\x07peer_id\x18\x03 \x01(\t\x12\r\n\x05\x61\x64\x64rs\x18\x04 \x03(\t\"\xb8\x01\n\x10PipelineTopology\x12\x13\n\x0bpipeline_id\x18\x01 \x01(\t\x12\x13\n\x0bstage_index\x18\x02 \x01(\x05\x12\x12\n\nnum_stages\x18\x03 \x01(\x05\x12\x10\n\x08is_first\x18\x04 \x01(\x08\x12\x0f\n\x07is_last\x18\x05 \x01(\x08\x12\x18\n\x10num_model_layers\x18\x06 \x01(\x05\x12)\n\x05peers\x18\x07 \x03(\x0b\x32\x1a.loom.control.v0.PeerRoute\"\xf2\x01\n\x10LoadShardRequest\x12\x10\n\x08model_id\x18\x01 \x01(\t\x12\x13\n\x0bstart_layer\x18\x02 \x01(\x05\x12\x11\n\tend_layer\x18\x03 \x01(\x05\x12\x14\n\x0c\x62\x61\x63kend_type\x18\x04 \x01(\t\x12\x13\n\x0bweights_uri\x18\x05 \x01(\t\x12\x18\n\x10vram_quota_bytes\x18\x06 \x01(\x04\x12*\n\x04meta\x18\x07 \x01(\x0b\x32\x1c.loom.control.v0.CommandMeta\x12\x33\n\x08topology\x18\x08 \x01(\x0b\x32!.loom.control.v0.PipelineTopology\"R\n\x12UnloadShardRequest\x12\x10\n\x08model_id\x18\x01 \x01(\t\x12*\n\x04meta\x18\x02 \x01(\x0b\x32\x1c.loom.control.v0.CommandMeta\"\x80\x01\n\x0cQuotaRequest\x12\x10\n\x08model_id\x18\x01 \x01(\t\x12\x18\n\x10vram_quota_bytes\x18\x02 \x01(\x04\x12\x18\n\x10\x63ompute_fraction\x18\x03 \x01(\x01\x12*\n\x04meta\x18\x04 \x01(\x0b\x32\x1c.loom.control.v0.CommandMeta\"L\n\x0cModelRequest\x12\x10\n\x08model_id\x18\x01 \x01(\t\x12*\n\x04meta\x18\x02 \x01(\x0b\x32\x1c.loom.control.v0.CommandMeta\">\n\x10TelemetryRequest\x12*\n\x04meta\x18\x01 \x01(\x0b\x32\x1c.loom.control.v0.CommandMeta\"\xca\x02\n\x0eShardTelemetry\x12\x10\n\x08model_id\x18\x01 \x01(\t\x12\x13\n\x0bstart_layer\x18\x02 \x01(\x05\x12\x11\n\tend_layer\x18\x03 \x01(\x05\x12\x1c\n\x14\x61vg_layer_latency_ms\x18\x04 \x01(\x01\x12\x18\n\x10\x63urrent_requests\x18\x05 \x01(\x05\x12\x0f\n\x07healthy\x18\x06 \x01(\x08\x12\x17\n\x0fvram_used_bytes\x18\x07 \x01(\x04\x12\x11\n\ttokens_in\x18\x08 \x01(\x04\x12\x12\n\ntokens_out\x18\t \x01(\x04\x12\x13\n\x0bgpu_seconds\x18\n \x01(\x01\x12\x0e\n\x06status\x18\x0b \x01(\t\x12\x12\n\nlocal_port\x18\x0c \x01(\r\x12\x13\n\x0bpipeline_id\x18\r \x01(\t\x12\x13\n\x0bstage_index\x18\x0e \x01(\x05\x12\x12\n\nnum_stages\x18\x0f \x01(\x05\"0\n\tRttSample\x12\x13\n\x0b\x64st_node_id\x18\x01 \x01(\t\x12\x0e\n\x06rtt_ms\x18\x02 \x01(\x01\"\xe9\x01\n\nPeerStatus\x12\x0f\n\x07peer_id\x18\x01 \x01(\t\x12\x14\n\x0clisten_addrs\x18\x02 \x03(\t\x12\x15\n\rsymmetric_nat\x18\x03 \x01(\x08\x12\x0e\n\x06\x64irect\x18\x04 \x01(\x04\x12\x0f\n\x07relayed\x18\x05 \x01(\x04\x12\x11\n\tfallbacks\x18\x06 \x01(\x04\x12\x14\n\x0c\x64irect_share\x18\x07 \x01(\x01\x12\x15\n\rvisible_addrs\x18\x08 \x03(\t\x12\x11\n\tnot_worth\x18\t \x01(\x04\x12\x13\n\x0blink_rtt_ms\x18\n \x01(\x01\x12\x14\n\x0crelay_rtt_ms\x18\x0b \x01(\x01\"\xde\x01\n\x0fTelemetryReport\x12\x0f\n\x07node_id\x18\x01 \x01(\t\x12/\n\x06shards\x18\x02 \x03(\x0b\x32\x1f.loom.control.v0.ShardTelemetry\x12(\n\x04rtts\x18\x03 \x03(\x0b\x32\x1a.loom.control.v0.RttSample\x12\x17\n\x0fvram_free_bytes\x18\x04 \x01(\x04\x12\x1b\n\x13reported_at_unix_ms\x18\x05 \x01(\x03\x12)\n\x04peer\x18\x06 \x01(\x0b\x32\x1b.loom.control.v0.PeerStatus\">\n\x10HeartbeatRequest\x12*\n\x04meta\x18\x01 \x01(\x0b\x32\x1c.loom.control.v0.CommandMeta\"a\n\x0cHeartbeatAck\x12\x0f\n\x07node_id\x18\x01 \x01(\t\x12\x0f\n\x07unix_ms\x18\x02 \x01(\x03\x12/\n\x06shards\x18\x03 \x03(\x0b\x32\x1f.loom.control.v0.ShardTelemetry2\x90\x04\n\rWorkerControl\x12\x44\n\tLoadShard\x12!.loom.control.v0.LoadShardRequest\x1a\x14.loom.control.v0.Ack\x12H\n\x0bUnloadShard\x12#.loom.control.v0.UnloadShardRequest\x1a\x14.loom.control.v0.Ack\x12?\n\x08SetQuota\x12\x1d.loom.control.v0.QuotaRequest\x1a\x14.loom.control.v0.Ack\x12\x43\n\x0cStartServing\x12\x1d.loom.control.v0.ModelRequest\x1a\x14.loom.control.v0.Ack\x12\x42\n\x0bStopServing\x12\x1d.loom.control.v0.ModelRequest\x1a\x14.loom.control.v0.Ack\x12V\n\x0fReportTelemetry\x12!.loom.control.v0.TelemetryRequest\x1a .loom.control.v0.TelemetryReport\x12M\n\tHeartbeat\x12!.loom.control.v0.HeartbeatRequest\x1a\x1d.loom.control.v0.HeartbeatAckb\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x14worker_control.proto\x12\x0floom.control.v0\"O\n\x0b\x43ommandMeta\x12\x12\n\ncommand_id\x18\x01 \x01(\t\x12\x19\n\x11issued_at_unix_ms\x18\x02 \x01(\x03\x12\x11\n\tsignature\x18\x03 \x01(\x0c\"4\n\x03\x41\x63k\x12\x12\n\ncommand_id\x18\x01 \x01(\t\x12\n\n\x02ok\x18\x02 \x01(\x08\x12\r\n\x05\x65rror\x18\x03 \x01(\t\"g\n\tPeerRoute\x12\x13\n\x0bstage_index\x18\x01 \x01(\x05\x12\x0f\n\x07node_id\x18\x02 \x01(\t\x12\x0f\n\x07peer_id\x18\x03 \x01(\t\x12\r\n\x05\x61\x64\x64rs\x18\x04 \x03(\t\x12\x14\n\x0crelay_rtt_ms\x18\x05 \x01(\x01\"\xb8\x01\n\x10PipelineTopology\x12\x13\n\x0bpipeline_id\x18\x01 \x01(\t\x12\x13\n\x0bstage_index\x18\x02 \x01(\x05\x12\x12\n\nnum_stages\x18\x03 \x01(\x05\x12\x10\n\x08is_first\x18\x04 \x01(\x08\x12\x0f\n\x07is_last\x18\x05 \x01(\x08\x12\x18\n\x10num_model_layers\x18\x06 \x01(\x05\x12)\n\x05peers\x18\x07 \x03(\x0b\x32\x1a.loom.control.v0.PeerRoute\"\xf2\x01\n\x10LoadShardRequest\x12\x10\n\x08model_id\x18\x01 \x01(\t\x12\x13\n\x0bstart_layer\x18\x02 \x01(\x05\x12\x11\n\tend_layer\x18\x03 \x01(\x05\x12\x14\n\x0c\x62\x61\x63kend_type\x18\x04 \x01(\t\x12\x13\n\x0bweights_uri\x18\x05 \x01(\t\x12\x18\n\x10vram_quota_bytes\x18\x06 \x01(\x04\x12*\n\x04meta\x18\x07 \x01(\x0b\x32\x1c.loom.control.v0.CommandMeta\x12\x33\n\x08topology\x18\x08 \x01(\x0b\x32!.loom.control.v0.PipelineTopology\"R\n\x12UnloadShardRequest\x12\x10\n\x08model_id\x18\x01 \x01(\t\x12*\n\x04meta\x18\x02 \x01(\x0b\x32\x1c.loom.control.v0.CommandMeta\"\x80\x01\n\x0cQuotaRequest\x12\x10\n\x08model_id\x18\x01 \x01(\t\x12\x18\n\x10vram_quota_bytes\x18\x02 \x01(\x04\x12\x18\n\x10\x63ompute_fraction\x18\x03 \x01(\x01\x12*\n\x04meta\x18\x04 \x01(\x0b\x32\x1c.loom.control.v0.CommandMeta\"L\n\x0cModelRequest\x12\x10\n\x08model_id\x18\x01 \x01(\t\x12*\n\x04meta\x18\x02 \x01(\x0b\x32\x1c.loom.control.v0.CommandMeta\">\n\x10TelemetryRequest\x12*\n\x04meta\x18\x01 \x01(\x0b\x32\x1c.loom.control.v0.CommandMeta\"\xca\x02\n\x0eShardTelemetry\x12\x10\n\x08model_id\x18\x01 \x01(\t\x12\x13\n\x0bstart_layer\x18\x02 \x01(\x05\x12\x11\n\tend_layer\x18\x03 \x01(\x05\x12\x1c\n\x14\x61vg_layer_latency_ms\x18\x04 \x01(\x01\x12\x18\n\x10\x63urrent_requests\x18\x05 \x01(\x05\x12\x0f\n\x07healthy\x18\x06 \x01(\x08\x12\x17\n\x0fvram_used_bytes\x18\x07 \x01(\x04\x12\x11\n\ttokens_in\x18\x08 \x01(\x04\x12\x12\n\ntokens_out\x18\t \x01(\x04\x12\x13\n\x0bgpu_seconds\x18\n \x01(\x01\x12\x0e\n\x06status\x18\x0b \x01(\t\x12\x12\n\nlocal_port\x18\x0c \x01(\r\x12\x13\n\x0bpipeline_id\x18\r \x01(\t\x12\x13\n\x0bstage_index\x18\x0e \x01(\x05\x12\x12\n\nnum_stages\x18\x0f \x01(\x05\"0\n\tRttSample\x12\x13\n\x0b\x64st_node_id\x18\x01 \x01(\t\x12\x0e\n\x06rtt_ms\x18\x02 \x01(\x01\"\xe9\x01\n\nPeerStatus\x12\x0f\n\x07peer_id\x18\x01 \x01(\t\x12\x14\n\x0clisten_addrs\x18\x02 \x03(\t\x12\x15\n\rsymmetric_nat\x18\x03 \x01(\x08\x12\x0e\n\x06\x64irect\x18\x04 \x01(\x04\x12\x0f\n\x07relayed\x18\x05 \x01(\x04\x12\x11\n\tfallbacks\x18\x06 \x01(\x04\x12\x14\n\x0c\x64irect_share\x18\x07 \x01(\x01\x12\x15\n\rvisible_addrs\x18\x08 \x03(\t\x12\x11\n\tnot_worth\x18\t \x01(\x04\x12\x13\n\x0blink_rtt_ms\x18\n \x01(\x01\x12\x14\n\x0crelay_rtt_ms\x18\x0b \x01(\x01\"\xde\x01\n\x0fTelemetryReport\x12\x0f\n\x07node_id\x18\x01 \x01(\t\x12/\n\x06shards\x18\x02 \x03(\x0b\x32\x1f.loom.control.v0.ShardTelemetry\x12(\n\x04rtts\x18\x03 \x03(\x0b\x32\x1a.loom.control.v0.RttSample\x12\x17\n\x0fvram_free_bytes\x18\x04 \x01(\x04\x12\x1b\n\x13reported_at_unix_ms\x18\x05 \x01(\x03\x12)\n\x04peer\x18\x06 \x01(\x0b\x32\x1b.loom.control.v0.PeerStatus\">\n\x10HeartbeatRequest\x12*\n\x04meta\x18\x01 \x01(\x0b\x32\x1c.loom.control.v0.CommandMeta\"a\n\x0cHeartbeatAck\x12\x0f\n\x07node_id\x18\x01 \x01(\t\x12\x0f\n\x07unix_ms\x18\x02 \x01(\x03\x12/\n\x06shards\x18\x03 \x03(\x0b\x32\x1f.loom.control.v0.ShardTelemetry2\x90\x04\n\rWorkerControl\x12\x44\n\tLoadShard\x12!.loom.control.v0.LoadShardRequest\x1a\x14.loom.control.v0.Ack\x12H\n\x0bUnloadShard\x12#.loom.control.v0.UnloadShardRequest\x1a\x14.loom.control.v0.Ack\x12?\n\x08SetQuota\x12\x1d.loom.control.v0.QuotaRequest\x1a\x14.loom.control.v0.Ack\x12\x43\n\x0cStartServing\x12\x1d.loom.control.v0.ModelRequest\x1a\x14.loom.control.v0.Ack\x12\x42\n\x0bStopServing\x12\x1d.loom.control.v0.ModelRequest\x1a\x14.loom.control.v0.Ack\x12V\n\x0fReportTelemetry\x12!.loom.control.v0.TelemetryRequest\x1a .loom.control.v0.TelemetryReport\x12M\n\tHeartbeat\x12!.loom.control.v0.HeartbeatRequest\x1a\x1d.loom.control.v0.HeartbeatAckb\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
@@ -36,31 +36,31 @@ if not _descriptor._USE_C_DESCRIPTORS:
   _globals['_ACK']._serialized_start=122
   _globals['_ACK']._serialized_end=174
   _globals['_PEERROUTE']._serialized_start=176
-  _globals['_PEERROUTE']._serialized_end=257
-  _globals['_PIPELINETOPOLOGY']._serialized_start=260
-  _globals['_PIPELINETOPOLOGY']._serialized_end=444
-  _globals['_LOADSHARDREQUEST']._serialized_start=447
-  _globals['_LOADSHARDREQUEST']._serialized_end=689
-  _globals['_UNLOADSHARDREQUEST']._serialized_start=691
-  _globals['_UNLOADSHARDREQUEST']._serialized_end=773
-  _globals['_QUOTAREQUEST']._serialized_start=776
-  _globals['_QUOTAREQUEST']._serialized_end=904
-  _globals['_MODELREQUEST']._serialized_start=906
-  _globals['_MODELREQUEST']._serialized_end=982
-  _globals['_TELEMETRYREQUEST']._serialized_start=984
-  _globals['_TELEMETRYREQUEST']._serialized_end=1046
-  _globals['_SHARDTELEMETRY']._serialized_start=1049
-  _globals['_SHARDTELEMETRY']._serialized_end=1379
-  _globals['_RTTSAMPLE']._serialized_start=1381
-  _globals['_RTTSAMPLE']._serialized_end=1429
-  _globals['_PEERSTATUS']._serialized_start=1432
-  _globals['_PEERSTATUS']._serialized_end=1665
-  _globals['_TELEMETRYREPORT']._serialized_start=1668
-  _globals['_TELEMETRYREPORT']._serialized_end=1890
-  _globals['_HEARTBEATREQUEST']._serialized_start=1892
-  _globals['_HEARTBEATREQUEST']._serialized_end=1954
-  _globals['_HEARTBEATACK']._serialized_start=1956
-  _globals['_HEARTBEATACK']._serialized_end=2053
-  _globals['_WORKERCONTROL']._serialized_start=2056
-  _globals['_WORKERCONTROL']._serialized_end=2584
+  _globals['_PEERROUTE']._serialized_end=279
+  _globals['_PIPELINETOPOLOGY']._serialized_start=282
+  _globals['_PIPELINETOPOLOGY']._serialized_end=466
+  _globals['_LOADSHARDREQUEST']._serialized_start=469
+  _globals['_LOADSHARDREQUEST']._serialized_end=711
+  _globals['_UNLOADSHARDREQUEST']._serialized_start=713
+  _globals['_UNLOADSHARDREQUEST']._serialized_end=795
+  _globals['_QUOTAREQUEST']._serialized_start=798
+  _globals['_QUOTAREQUEST']._serialized_end=926
+  _globals['_MODELREQUEST']._serialized_start=928
+  _globals['_MODELREQUEST']._serialized_end=1004
+  _globals['_TELEMETRYREQUEST']._serialized_start=1006
+  _globals['_TELEMETRYREQUEST']._serialized_end=1068
+  _globals['_SHARDTELEMETRY']._serialized_start=1071
+  _globals['_SHARDTELEMETRY']._serialized_end=1401
+  _globals['_RTTSAMPLE']._serialized_start=1403
+  _globals['_RTTSAMPLE']._serialized_end=1451
+  _globals['_PEERSTATUS']._serialized_start=1454
+  _globals['_PEERSTATUS']._serialized_end=1687
+  _globals['_TELEMETRYREPORT']._serialized_start=1690
+  _globals['_TELEMETRYREPORT']._serialized_end=1912
+  _globals['_HEARTBEATREQUEST']._serialized_start=1914
+  _globals['_HEARTBEATREQUEST']._serialized_end=1976
+  _globals['_HEARTBEATACK']._serialized_start=1978
+  _globals['_HEARTBEATACK']._serialized_end=2075
+  _globals['_WORKERCONTROL']._serialized_start=2078
+  _globals['_WORKERCONTROL']._serialized_end=2606
 # @@protoc_insertion_point(module_scope)

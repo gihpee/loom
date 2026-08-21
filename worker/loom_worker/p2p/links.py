@@ -40,6 +40,11 @@ DIRECT_COOLDOWN_S = 30.0
 # some seconds after the first dial) starts being used within the same request.
 WORTH_RECHECK_S = 30.0
 
+# How much better the other path must be before the route is changed. Without
+# it a pair whose two paths cost about the same flips on every re-check, and
+# each flip costs a dial.
+HYSTERESIS = 0.15
+
 
 @dataclass
 class Neighbour:
@@ -49,6 +54,9 @@ class Neighbour:
     node_id: str
     peer_id: str = ""
     addrs: List[str] = field(default_factory=list)
+    # What the trip from THIS peer to the relay costs it. The far half of the
+    # relayed path, which cannot be measured from here.
+    relay_rtt_ms: float = 0.0
 
     @property
     def dialable(self) -> bool:
@@ -154,30 +162,30 @@ class LinkTable:
         return self._worth_using(peer)
 
     def _worth_using(self, peer: Neighbour) -> bool:
-        """Is reaching this peer over libp2p actually cheaper than relaying?
+        """Is reaching this peer over libp2p cheaper than relaying to it?
 
-        The question sounds academic and is not. libp2p reports a link as
-        established whether it is a real connection or a circuit through the
-        relay, and Loom used to treat both as "direct" — so when hole punching
-        failed, every activation went worker -> relay -> worker, which is the
-        same two wide-area crossings as the orchestrator's tunnel plus a
-        general-purpose relay in the middle. Measured on a two-stage pipeline
-        across regions: transport went from 200 ms per token to 320 ms and the
-        run halved in speed, while the admin page said "100% прямо".
+        libp2p reports a link as established whether it is a real connection
+        or a circuit through the relay, and Loom used to treat both as direct.
+        When hole punching failed, every activation went worker -> relay ->
+        worker — the same two wide-area crossings as the orchestrator's tunnel
+        plus a general-purpose relay in the middle — while the admin page said
+        "100% прямо". Measured across regions: 200 ms per token became 320 ms.
 
-        Worse, a circuit is not even stable: a relay applies the standard v2
-        limits, 128 KB per connection, which for a 4B model is about 25 tokens
-        before the connection is torn down and re-established mid-generation.
+        The comparison is between two whole paths:
 
-        The test is one comparison. A relay sits on the orchestrator's machine,
-        so the trip to it is the same trip a relayed activation starts with; a
-        peer that costs more to reach than the relay cannot be saving anything.
-        And it settles the circuit question for free — a circuit runs THROUGH
-        the relay, so it can never be cheaper than the relay.
+            direct   = my trip to the peer
+            relayed  = my trip to the relay + the peer's trip to the relay
 
-        Deliberately conservative: when the numbers are not there yet the link
-        is used, because that is what happened before this existed, and a
-        missing measurement is not evidence of a bad link.
+        The second half cannot be measured from here, so the peer reports it
+        and the orchestrator passes it on with the rest of the directory.
+        Leaving it out is not a small simplification — it was wrong in a way
+        that showed up immediately on a real stand. A node 8 ms from the relay
+        rejected a genuinely direct 94 ms link to a peer that was itself 90 ms
+        from the relay, because 94 > 8. The relayed path was 98 ms; direct was
+        the better route and got refused.
+
+        A circuit is rejected by the same arithmetic without a special case:
+        it runs through the relay, so it costs both halves by construction.
         """
         if self._relay_rtt is None or self._rtt is None:
             return True  # nothing to compare against: no relay, no circuits
@@ -186,37 +194,63 @@ class LinkTable:
             cached = self._worth.get(peer.peer_id)
             if cached is not None and now < cached[1]:
                 return cached[0]
+            previous = cached[0] if cached is not None else None
 
-        relay_rtt = self._safe(self._relay_rtt)
-        peer_rtt = self._safe(lambda: self._rtt(peer.peer_id))
-        verdict = True
-        if relay_rtt is not None and peer_rtt is not None:
-            verdict = peer_rtt <= relay_rtt
+        direct = self._safe(lambda: self._rtt(peer.peer_id))
+        near = self._safe(self._relay_rtt)
+        far = peer.relay_rtt_ms or 0.0
+        verdict = self._verdict(direct, near, far, previous)
+        relayed = (near or 0.0) + far
 
         with self._lock:
-            previous = self._worth.get(peer.peer_id)
-            self._worth[peer.peer_id] = (verdict, now + WORTH_RECHECK_S, peer_rtt, relay_rtt)
+            self._worth[peer.peer_id] = (verdict, now + WORTH_RECHECK_S, direct, relayed)
             if not verdict:
                 self.stats["not_worth"] += 1
-            changed = previous is None or previous[0] != verdict
-        if changed and not verdict:
+        if previous is not None and previous == verdict:
+            return verdict
+        if not verdict:
             logger.info(
-                "link to %s costs %.0f ms against %.0f ms to the relay: it is a "
-                "circuit or a detour, not a direct link. Relaying through the "
-                "orchestrator instead (re-checked every %.0fs)",
+                "link to %s costs %.0f ms against %.0f ms relayed (%.0f + %.0f): "
+                "a circuit or a detour, not a direct link. Relaying through the "
+                "orchestrator instead",
                 peer.node_id,
-                peer_rtt,
-                relay_rtt,
-                WORTH_RECHECK_S,
+                direct if direct is not None else -1,
+                relayed,
+                near or 0.0,
+                far,
             )
-        elif changed and previous is not None:
+        elif previous is not None:
             logger.info(
-                "link to %s is now direct (%.0f ms against %.0f ms to the relay)",
+                "link to %s is direct and cheaper: %.0f ms against %.0f ms relayed",
                 peer.node_id,
-                peer_rtt if peer_rtt is not None else -1,
-                relay_rtt if relay_rtt is not None else -1,
+                direct if direct is not None else -1,
+                relayed,
             )
         return verdict
+
+    def _verdict(self, direct, near, far, previous) -> bool:
+        """Which path wins, with enough hysteresis to stop it oscillating.
+
+        Both paths often cost nearly the same — on a stand where the relay sat
+        almost exactly between two nodes they measured 94 ms and 98 ms — and a
+        plain comparison then flips the route every time it is re-examined,
+        purely on jitter. Switching costs a dial and a cooldown, so a tie must
+        resolve to "leave it alone" rather than to whichever number won this
+        second.
+        """
+        if direct is None or near is None:
+            return True  # a missing measurement is not evidence of a bad link
+        if not far:
+            # The peer never reported its distance to the relay. The far half
+            # is unknown, and guessing it as zero is what rejected good links,
+            # so trust the link instead.
+            return True
+        relayed = near + far
+        if previous is True:
+            return direct <= relayed * (1.0 + HYSTERESIS)
+        if previous is False:
+            return direct < relayed * (1.0 - HYSTERESIS)
+        return direct <= relayed
 
     @staticmethod
     def _safe(call):
@@ -273,9 +307,9 @@ class LinkTable:
         """What the agent reports about its data path, for telemetry."""
         with self._lock:
             total = self.stats["direct"] + self.stats["relay"]
-            rtts = [v for v in self._worth.values()]
-            link_rtt = next((v[2] for v in rtts if v[2] is not None), None)
-            relay_rtt = next((v[3] for v in rtts if v[3] is not None), None)
+            measured = list(self._worth.values())
+            link_rtt = next((v[2] for v in measured if v[2] is not None), None)
+            relay_rtt = next((v[3] for v in measured if v[3]), None)
             return {
                 "direct": self.stats["direct"],
                 "relay": self.stats["relay"],
@@ -314,6 +348,7 @@ def neighbours_from_topology(topology, *, self_node_id: str) -> List[Neighbour]:
                 node_id=route.node_id,
                 peer_id=route.peer_id or "",
                 addrs=list(route.addrs or []),
+                relay_rtt_ms=float(getattr(route, "relay_rtt_ms", 0.0) or 0.0),
             )
         )
     return out

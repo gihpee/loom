@@ -189,8 +189,8 @@ class PeerDirectory:
 
     def routes_for(
         self, stages: Iterable[Tuple[int, str]]
-    ) -> List[Tuple[int, str, str, List[str]]]:
-        """Directory rows for one pipeline: (stage_index, node_id, peer_id, addrs).
+    ) -> List[Tuple[int, str, str, List[str], float]]:
+        """One pipeline's rows: (stage, node_id, peer_id, addrs, relay_rtt_ms).
 
         Every stage is described to every other one, including stages that
         cannot be dialled — a peer with an empty id is how a node learns to
@@ -202,7 +202,7 @@ class PeerDirectory:
         for stage_index, node_id in stages:
             record = self._records.get(node_id)
             if record is None or not record.dialable:
-                rows.append((stage_index, node_id, "", []))
+                rows.append((stage_index, node_id, "", [], 0.0))
                 continue
             rows.append(
                 (
@@ -210,6 +210,7 @@ class PeerDirectory:
                     node_id,
                     record.peer_id,
                     record.candidate_addrs(self.default_port),
+                    record.relay_rtt_ms,
                 )
             )
         return rows

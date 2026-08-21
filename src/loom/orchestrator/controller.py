@@ -741,8 +741,11 @@ class MultiModelController:
                 node_id=node_id,
                 peer_id=peer_id,
                 addrs=addrs,
+                relay_rtt_ms=relay_rtt_ms,
             )
-            for stage_index, node_id, peer_id, addrs in self.peers.routes_for(stages)
+            for stage_index, node_id, peer_id, addrs, relay_rtt_ms in (
+                self.peers.routes_for(stages)
+            )
         ]
 
     async def _deploy_on_worker(self, model_id: str, node_id: str, entry: tuple) -> None:
