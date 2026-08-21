@@ -37,12 +37,12 @@ from typing import Dict, List, Optional, Sequence, Tuple
 # and enforces it again on arrival; this copy exists so the orchestrator can
 # refuse an impossible split immediately, instead of letting three nodes
 # discover it separately after downloading a checkpoint each.
-SHARDABLE_BACKENDS = frozenset({"shard", "vllm_shard", "echo"})
+SHARDABLE_BACKENDS = frozenset({"shard", "vllm_shard", "mlx_shard", "echo"})
 
 # Every backend a worker can be asked for. Validating the name here turns a
 # typo into a message on the deploy form instead of a NACK from three nodes.
 KNOWN_BACKENDS = frozenset(
-    {"shard", "vllm_shard", "vllm", "sglang", "mlx", "echo"}
+    {"shard", "vllm_shard", "mlx_shard", "vllm", "sglang", "mlx", "echo"}
 )
 
 
@@ -52,11 +52,20 @@ class PlacementError(ValueError):
 
 @dataclass(frozen=True)
 class Stage:
-    """One node's share of one model."""
+    """One node's share of one model.
+
+    `backend_type` is per stage, and empty means "whatever the deployment
+    chose". Stages of one pipeline do not have to agree: an Apple node runs
+    `mlx_shard` while a CUDA node next to it runs `vllm_shard`, because what a
+    stage needs from its neighbours is the bytes of a hidden state, not their
+    engine. The wire format carries the dtype with the tensor, so the two ends
+    interoperate without knowing anything about each other.
+    """
 
     node_id: str
     start_layer: int
     end_layer: int
+    backend_type: str = ""
 
     @property
     def num_layers(self) -> int:
@@ -68,6 +77,7 @@ class Stage:
             "start_layer": self.start_layer,
             "end_layer": self.end_layer,
             "layers": self.num_layers,
+            "backend_type": self.backend_type,
         }
 
 
@@ -168,7 +178,20 @@ def stages_from_request(
             raise PlacementError(
                 f"stage {position} ({node_id}): needs at least one layer, got {end - start}"
             )
-        stages.append(Stage(node_id=node_id, start_layer=start, end_layer=end))
+        backend = str(entry.get("backend") or entry.get("backend_type") or "").strip()
+        if backend and backend not in KNOWN_BACKENDS:
+            raise PlacementError(
+                f"stage {position} ({node_id}): unknown backend {backend!r}; "
+                f"known: {', '.join(sorted(KNOWN_BACKENDS))}"
+            )
+        stages.append(
+            Stage(
+                node_id=node_id,
+                start_layer=start,
+                end_layer=end,
+                backend_type=backend,
+            )
+        )
         cursor = end
 
     _validate_chain(stages, num_model_layers=num_model_layers)
@@ -212,6 +235,28 @@ def _validate_chain(stages: Sequence[Stage], *, num_model_layers: int) -> None:
             f"the stages cover {total} of {num_model_layers} layers "
             f"({abs(short)} {'missing' if short > 0 else 'too many'}); "
             f"the numbers must add up to exactly {num_model_layers}"
+        )
+
+
+def check_stage_backends(stages: Sequence[Stage], default_backend: str) -> None:
+    """Every stage's engine must be able to be one stage.
+
+    Checked per stage rather than once for the deployment, because they can
+    differ. A mixed pipeline is fine — an Apple node beside a CUDA one — but a
+    whole-model engine anywhere in the chain is not: it would load the entire
+    model and answer complete requests while pretending to be a link in it.
+    """
+    if len(stages) <= 1:
+        return
+    for position, stage in enumerate(stages):
+        backend = stage.backend_type or default_backend
+        if backend in SHARDABLE_BACKENDS:
+            continue
+        raise PlacementError(
+            f"stage {position} ({stage.node_id}) would run backend "
+            f"{backend!r}, which serves whole models only and cannot be one of "
+            f"{len(stages)} pipeline stages. Choose 'shard', 'vllm_shard' or "
+            f"'mlx_shard' for it"
         )
 
 

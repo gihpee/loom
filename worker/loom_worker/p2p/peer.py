@@ -46,6 +46,11 @@ DEFAULT_P2P_PORT = int(os.environ.get("LOOM_P2P_PORT", "47100"))
 # that regenerates its identity on every boot looks like a stranger each time.
 DEFAULT_KEY_DIR = os.environ.get("LOOM_P2P_KEY_DIR", "/root/.cache/loom/p2p")
 
+# How long one direct send may take before the relay is used instead. A token
+# budget is a couple of hundred milliseconds, so anything here is expensive —
+# but the cooldown means it is paid once per failure, not once per token.
+SEND_TIMEOUT_S = float(os.environ.get("LOOM_P2P_SEND_TIMEOUT_S", "5"))
+
 
 class P2PUnavailable(RuntimeError):
     """No usable p2p stack on this node; the caller must fall back to relay."""
@@ -331,13 +336,29 @@ class PeerNode:
             logger.debug("warming a route to %s failed: %s", peer_id, exc)
             return False
 
-    def send(self, peer_id: str, message: dict, *, timeout_s: float = 30.0) -> dict:
-        """One inter-stage message, straight to the peer that must handle it."""
+    def send(self, peer_id: str, message: dict, timeout_s: float = 0.0) -> dict:
+        """One inter-stage message, straight to the peer that must handle it.
+
+        Bounded, and tightly. This runs once per token: a send that hangs does
+        not just fail, it holds up the whole pipeline while it does. Lattica's
+        own default is 180 seconds — three minutes of a stalled generation to
+        learn something the fallback could have handled immediately.
+
+        The bound is generous enough for a cold start (the first send to a peer
+        also resolves it through the rendezvous, about 100 ms) and short enough
+        that paying it is survivable. And it is paid at most once per cooldown:
+        after a failure the link is quarantined and the relay takes over.
+        """
         if self._handler is None:
             raise P2PUnavailable("the p2p node is not running")
         stub = self._stub_for(peer_id)
         future = stub.stage_forward(message)
-        result = future.result() if hasattr(future, "result") else future
+        if not hasattr(future, "result"):
+            return {"ok": True}
+        # Whole seconds: the binding rejects a float outright, and a mock that
+        # accepts one hides that until it reaches a real peer.
+        seconds = max(1, int(timeout_s or SEND_TIMEOUT_S))
+        result = future.result(timeout=seconds)
         return result if isinstance(result, dict) else {"ok": True}
 
     def _stub_for(self, peer_id: str):

@@ -359,6 +359,10 @@ def create_app(controller: MultiModelController) -> FastAPI:
         Optional `backend_type` overrides the catalog entry's for this
         deployment — the same checkpoint served whole by `vllm` or split by
         `shard`, chosen per run rather than per catalog file.
+
+        Each stage may also carry its own `"backend"`, which wins over both.
+        That is what lets one pipeline mix engines: an Apple node on
+        `mlx_shard` beside a CUDA node on `vllm_shard`.
         """
         if _admin_forbidden(x_loom_admin_token):
             return _error(403, "invalid admin token")

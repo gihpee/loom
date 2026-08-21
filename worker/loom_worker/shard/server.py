@@ -815,6 +815,37 @@ def _build_vllm_executor(args, spec):
     return executor, config
 
 
+def _build_mlx_executor(args, spec):
+    """Stand up the MLX engine for this stage and return (executor, config).
+
+    Imported lazily: mlx exists only on Apple Silicon, and every other image
+    must keep importing this module.
+    """
+    from transformers import AutoConfig
+
+    from loom_worker.mlx_stage import (
+        MlxStageExecutor,
+        build_stage_model,
+        stage_config_from_env,
+    )
+
+    config = AutoConfig.from_pretrained(spec.model_path)
+    if hasattr(config, "text_config"):
+        config = config.text_config
+    num_layers = args.num_model_layers or int(getattr(config, "num_hidden_layers"))
+
+    runtime_config = stage_config_from_env(
+        model_path=spec.model_path,
+        start_layer=args.start_layer,
+        end_layer=args.end_layer,
+        num_layers=num_layers,
+        memory_limit_bytes=args.vram_quota_bytes or None,
+    )
+    model, _ = build_stage_model(runtime_config)
+    executor = MlxStageExecutor(model, runtime_config, spec)
+    return executor, config
+
+
 def _watch_parent(poll_s: float = 2.0) -> None:
     """Exit if the agent that spawned us is gone.
 
@@ -861,9 +892,12 @@ def main(argv=None) -> None:
     )
     parser.add_argument(
         "--engine",
-        choices=("torch", "vllm"),
+        choices=("torch", "vllm", "mlx"),
         default=os.environ.get("LOOM_STAGE_ENGINE", "torch"),
-        help="what runs the layers: transformers (portable) or vLLM (fast, CUDA only)",
+        help=(
+            "what runs the layers: transformers (portable), vLLM (fast, CUDA "
+            "only) or MLX (Apple Silicon)"
+        ),
     )
     parser.add_argument(
         "--num-model-layers",
@@ -914,7 +948,14 @@ def main(argv=None) -> None:
         device=args.device,
         dtype=args.dtype,
     )
-    if args.engine == "vllm":
+    if args.engine == "mlx":
+        # Same selective download and pruned checkpoint view as the vLLM
+        # engine: mlx_lm reads the safetensors index too, so the index must
+        # match the files this stage actually fetched.
+        spec.model_path = resolve_model_path(args.weights_uri, shard=spec)
+        spec.model_path = build_stage_checkpoint_view(spec.model_path, spec)
+        STATE["executor"], config = _build_mlx_executor(args, spec)
+    elif args.engine == "vllm":
         # Same selective download as the torch engine, then a view directory
         # whose index mentions only the files we fetched — vLLM opens every
         # file the index lists, so the index has to match what is on disk.

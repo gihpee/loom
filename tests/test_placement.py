@@ -592,3 +592,90 @@ def test_the_deploy_command_carries_the_chosen_backend():
     row = next(m for m in view if m["model_id"] == spec.model_id)
     assert row["backend_type"] == "shard"
     assert row["catalog_backend_type"] == spec.backend_type
+
+
+# ------------------------------------------- a different engine on each stage
+def test_each_stage_may_name_its_own_backend():
+    """An Apple node and a CUDA node in one pipeline.
+
+    The engine is a property of the machine, not of the model. What a stage
+    needs from its neighbour is the bytes of a hidden state, and the wire
+    format carries the dtype with the tensor — so the two ends interoperate
+    without knowing anything about each other.
+    """
+    stages = stages_from_request(
+        [
+            {"node_id": "mac", "layers": 12, "backend": "mlx_shard"},
+            {"node_id": "a30", "layers": 8, "backend": "vllm_shard"},
+        ],
+        num_model_layers=20,
+    )
+    assert [s.backend_type for s in stages] == ["mlx_shard", "vllm_shard"]
+    assert stages[0].as_dict()["backend_type"] == "mlx_shard"
+
+
+def test_a_stage_without_a_backend_falls_back_to_the_deployment():
+    stages = stages_from_request(
+        [{"node_id": "a", "layers": 10}, {"node_id": "b", "layers": 10, "backend": "mlx_shard"}],
+        num_model_layers=20,
+    )
+    assert stages[0].backend_type == ""
+    assert stages[1].backend_type == "mlx_shard"
+
+
+def test_an_unknown_per_stage_backend_is_refused():
+    with pytest.raises(PlacementError, match="unknown backend 'metal'"):
+        stages_from_request(
+            [{"node_id": "a", "layers": 20, "backend": "metal"}], num_model_layers=20
+        )
+
+
+def test_a_whole_model_engine_anywhere_in_the_chain_is_refused():
+    """It would load the entire model and answer as if it were a link in it."""
+    from loom.orchestrator.placement import check_stage_backends
+
+    stages = stages_from_request(
+        [
+            {"node_id": "a", "layers": 10, "backend": "mlx_shard"},
+            {"node_id": "b", "layers": 10, "backend": "vllm"},
+        ],
+        num_model_layers=20,
+    )
+    with pytest.raises(PlacementError, match=r"stage 1 \(b\).*whole models only"):
+        check_stage_backends(stages, "shard")
+
+    # ...and the mixed-but-shardable version is fine. (Stage is frozen: a
+    # placement is a decision, not something to edit after the fact.)
+    ok = stages_from_request(
+        [
+            {"node_id": "a", "layers": 10, "backend": "mlx_shard"},
+            {"node_id": "b", "layers": 10, "backend": "vllm_shard"},
+        ],
+        num_model_layers=20,
+    )
+    check_stage_backends(ok, "shard")
+
+
+def test_the_worker_is_told_the_backend_of_its_own_stage():
+    """The decisive bit: LoadShard already carries backend_type per shard.
+
+    So a mixed pipeline needs no protocol change and no worker change — each
+    node receives the engine it was assigned and behaves exactly as before.
+    """
+    controller = controller_with("catalog-demo.json")
+    model_id = controller.registry.list()[0].model_id
+    layers = controller.registry.get(model_id).model_info.num_layers
+
+    asyncio.run(
+        controller.deploy(
+            model_id,
+            backend_type="shard",
+            stages=[
+                {"node_id": "n1", "layers": layers - 4, "backend": "mlx_shard"},
+                {"node_id": "n2", "layers": 4},
+            ],
+        )
+    )
+    assert controller.backend_for(model_id, "n1") == "mlx_shard"
+    assert controller.backend_for(model_id, "n2") == "shard", "falls back to the deployment"
+    assert controller.backend_for(model_id) == "shard", "no node named: the deployment's"

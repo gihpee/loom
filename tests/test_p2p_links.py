@@ -293,3 +293,40 @@ def test_the_snapshot_names_the_pipeline_each_route_belongs_to():
         ("alpha#0", 1),
         ("beta#0", 2),
     }
+
+
+def test_a_direct_send_is_bounded(monkeypatch):
+    """A hung peer must cost one bounded wait, not a stalled generation.
+
+    This runs once per token. Lattica's own default is 180 seconds; inheriting
+    it would mean a single unreachable neighbour freezing the pipeline for
+    three minutes to learn what the relay could have done immediately.
+    """
+    import loom_worker.p2p.peer as peer_module
+
+    captured = {}
+
+    class Future:
+        def result(self, timeout=None):
+            # Lattica's binding takes whole seconds and rejects a float. A mock
+            # that quietly accepts one lets the mistake through to a real peer,
+            # which is exactly what happened once.
+            assert isinstance(timeout, int), f"timeout must be an int, got {timeout!r}"
+            captured["timeout"] = timeout
+            return {"ok": True}
+
+    node = peer_module.PeerNode.__new__(peer_module.PeerNode)
+    node._handler = object()
+    node._stub_for = lambda pid: SimpleNamespace(stage_forward=lambda msg: Future())
+
+    monkeypatch.setattr(peer_module, "SEND_TIMEOUT_S", 5.0)
+    node.send("12D3KooWPeer", {"step": 1})
+    assert captured["timeout"] == 5, "the send inherited Lattica's 180s default"
+
+    node.send("12D3KooWPeer", {"step": 2}, 30)
+    assert captured["timeout"] == 30, "an explicit bound must win"
+
+    # Sub-second bounds round up rather than becoming zero, which would mean
+    # "no timeout at all" to some bindings.
+    node.send("12D3KooWPeer", {"step": 3}, 0.25)
+    assert captured["timeout"] == 1

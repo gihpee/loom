@@ -301,6 +301,11 @@ async function viewDeploy() {
       `${esc(n.gpu_name || n.device)} · ${n.vram_free_gb} / ${n.vram_total_gb} GB`,
       `<span class="dim">${ceiling}</span>`,
       `<input type="text" id="dep-lay-${k}" value="0" style="width:60px" onchange="depTotal()" oninput="depTotal()">`,
+      `<select id="dep-be-${k}" onchange="depTotal()">` +
+        `<option value="">как у модели</option>` +
+        data.backends.filter(b => b.splits).map(b =>
+          `<option value="${esc(b.name)}">${esc(b.name)}</option>`).join("") +
+        `</select>`,
       busy,
     ];
   });
@@ -322,7 +327,7 @@ async function viewDeploy() {
        <button class="action" onclick="depDeploy(true)">развернуть, игнорируя оценку VRAM</button></p>
     <p id="dep-total" class="dim">отметьте ноды и укажите слои</p>
     <pre id="dep-out" class="muted">${esc(depMsg)}</pre>` +
-    table(["","№","node","GPU · VRAM свободно","влезет слоёв","слоёв","состояние"], rows);
+    table(["","№","node","GPU · VRAM свободно","влезет слоёв","слоёв","бэкенд","состояние"], rows);
 }
 
 function depSelected() {
@@ -336,7 +341,9 @@ function depSelected() {
       if (!on || !on.checked) return null;
       const layers = parseInt((document.querySelector("#dep-lay-" + k) || {}).value, 10);
       const order = parseFloat((document.querySelector("#dep-ord-" + k) || {}).value);
-      return {node_id: id, layers: isNaN(layers) ? 0 : layers, order: isNaN(order) ? 999 : order};
+      const backend = ((document.querySelector("#dep-be-" + k) || {}).value || "").trim();
+      return {node_id: id, layers: isNaN(layers) ? 0 : layers,
+              order: isNaN(order) ? 999 : order, backend};
     })
     .filter(Boolean)
     .sort((a, b) => a.order - b.order);
@@ -360,11 +367,17 @@ function depTotal() {
   const chain = picked.map(s => `${s.node_id}=${s.layers}`).join(" + ");
   const backendEl = document.querySelector("#dep-backend");
   const backend = backendEl ? backendEl.value : "";
-  if (picked.length > 1 && depSplittable[backend] === false) {
-    el.className = "bad";
-    el.textContent = `бэкенд ${backend} обслуживает модель только целиком — ` +
-      `на ${picked.length} нод его не разложить. Выберите shard или vllm_shard`;
-    return;
+  if (picked.length > 1) {
+    // Each stage runs its own engine, so the deployment default only matters
+    // for the stages that did not pick one.
+    const bad = picked.filter(s => depSplittable[s.backend || backend] === false);
+    if (bad.length) {
+      el.className = "bad";
+      el.textContent = `${bad.map(s => s.node_id).join(", ")}: бэкенд ` +
+        `${bad[0].backend || backend} обслуживает модель только целиком — ` +
+        `стадией быть не может. Выберите shard, vllm_shard или mlx_shard`;
+      return;
+    }
   }
   if (sum === total) { el.className = "ok"; el.textContent = `${chain} = ${sum} из ${total} ✓`; }
   else { el.className = "bad"; el.textContent = `${chain} = ${sum}, а нужно ровно ${total}`; }
@@ -393,12 +406,16 @@ async function depDeploy(force) {
     const r = await api("/admin/deploy", {method:"POST", body: JSON.stringify({
       model_id: sel.value,
       backend_type: backendEl ? backendEl.value : undefined,
-      stages: picked.map(s => ({node_id: s.node_id, layers: s.layers})),
+      // A per-stage backend, when one was chosen: an Apple node can run
+      // mlx_shard next to a CUDA node running vllm_shard.
+      stages: picked.map(s => Object.assign(
+        {node_id: s.node_id, layers: s.layers}, s.backend ? {backend: s.backend} : {})),
       force: !!force,
     })});
     depMsg = "развёрнута на " + (r.placement.backend_type || "бэкенде из каталога") + ": " +
       r.placement.stages
-        .map(s => `${s.node_id}[${s.start_layer}:${s.end_layer}] (${s.layers} слоёв)`).join(" → ");
+        .map(s => `${s.node_id}[${s.start_layer}:${s.end_layer}] (${s.layers} слоёв` +
+                  `${s.backend_type ? ", " + s.backend_type : ""})`).join(" → ");
   } catch (e) { depMsg = "ошибка: " + e.message; }
   document.querySelector("#dep-out").textContent = depMsg;
   refresh();

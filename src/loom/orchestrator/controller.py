@@ -40,7 +40,7 @@ from loom.orchestrator.placement import (
     is_complete_pipeline,
     max_layers_for,
     quota_for_layers,
-    check_backend_can_split,
+    check_stage_backends,
     stages_as_allocation,
     stages_from_request,
 )
@@ -470,9 +470,10 @@ class MultiModelController:
             parsed = stages_from_request(
                 stages, num_model_layers=spec.model_info.num_layers
             )
-            # Before anything about VRAM or nodes: can this backend be a stage
-            # at all? Getting this wrong costs a checkpoint download per node.
-            check_backend_can_split(effective_backend, len(parsed))
+            # Before anything about VRAM or nodes: can each stage's engine be
+            # a stage at all? Checked per stage, because they may differ — an
+            # Apple node on mlx_shard next to a CUDA node on vllm_shard.
+            check_stage_backends(parsed, effective_backend)
             unknown = [s.node_id for s in parsed if s.node_id not in self.nodes]
             if unknown:
                 raise PlacementError(
@@ -504,12 +505,22 @@ class MultiModelController:
         await self.rebalance(reason=f"deploy {model_id}")
         return placement
 
-    def backend_for(self, model_id: str) -> str:
-        """The backend this deployment runs on: the override, else the catalog."""
+    def backend_for(self, model_id: str, node_id: str = "") -> str:
+        """Which engine runs this model — on this node, if one is named.
+
+        Three levels, most specific first: the stage's own backend, then the
+        deployment's, then the catalog entry's. A pipeline whose stages do not
+        agree is normal: the engine is a property of the machine, not of the
+        model, and `LoadShardRequest` has always carried it per shard.
+        """
         placement = self.placements.get(model_id)
-        spec = self.registry.get(model_id)
+        if placement is not None and node_id:
+            for stage in placement.stages:
+                if stage.node_id == node_id and stage.backend_type:
+                    return stage.backend_type
         if placement is not None and placement.backend_type:
             return placement.backend_type
+        spec = self.registry.get(model_id)
         return spec.backend_type if spec is not None else ""
 
     async def undeploy(self, model_id: str) -> bool:
@@ -736,7 +747,7 @@ class MultiModelController:
                         model_id=model_id,
                         start_layer=start,
                         end_layer=end,
-                        backend_type=self.backend_for(model_id),
+                        backend_type=self.backend_for(model_id, node_id),
                         weights_uri=spec.weights_uri,
                         vram_quota_bytes=quota,
                         meta=meta,

@@ -190,4 +190,4 @@ def test_only_the_layer_aware_backends_claim_to_serve_a_stage():
     from loom_worker.backends import BACKENDS
 
     splits = {name for name, cls in BACKENDS.items() if cls.serves_partial_shard}
-    assert splits == {"shard", "vllm_shard", "echo"}
+    assert splits == {"shard", "vllm_shard", "mlx_shard", "echo"}

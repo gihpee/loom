@@ -90,6 +90,67 @@ def to_wire(torch, tensor) -> Tuple[bytes, List[int], str]:
     return raw, list(flat.shape), _name_of(torch, target)
 
 
+# ---------------------------------------------------------------------- MLX
+# An Apple Silicon stage computes in MLX, not torch, but it stands in the same
+# pipeline as CUDA stages and must put the same bytes on the wire. The names
+# above stay the single vocabulary; only the array type differs.
+#
+# Verified byte-identical in both directions, bfloat16 included: an MLX array
+# read through the buffer protocol and rebuilt by torch compares equal, and
+# the reverse too.
+
+
+def mlx_dtypes(mx):
+    return {
+        "float32": mx.float32,
+        "float16": mx.float16,
+        "bfloat16": mx.bfloat16,
+    }
+
+
+def mlx_to_wire(mx, array) -> Tuple[bytes, List[int], str]:
+    """MLX array -> (bytes, shape, dtype name).
+
+    numpy cannot represent bfloat16, so the bytes are taken through the buffer
+    protocol and cast to plain bytes — the layout is the same either way, and
+    the reader knows the type from the name that travels alongside.
+    """
+    target = _mlx_wire_dtype(mx, array)
+    if array.dtype != target:
+        array = array.astype(target)
+    mx.eval(array)  # nothing is computed until something reads it
+    raw = bytes(memoryview(array).cast("B"))
+    return raw, list(array.shape), _mlx_name_of(mx, target)
+
+
+def mlx_from_wire(mx, data: bytes, shape: List[int], dtype: str):
+    """(bytes, shape, dtype name) -> MLX array, refusing what it cannot read."""
+    name = (dtype or "").strip()
+    mapping = mlx_dtypes(mx)
+    if name not in mapping:
+        raise WireFormatError(
+            f"a peer sent activations as {name!r}, which this MLX stage does "
+            f"not know how to read (it understands {', '.join(sorted(mapping))})"
+        )
+    import numpy as np
+
+    flat = mx.array(np.frombuffer(data, dtype=np.uint8)).view(mapping[name])
+    return flat.reshape(tuple(shape))
+
+
+def _mlx_wire_dtype(mx, array):
+    if WIRE_DTYPE in _WIRE_NAMES:
+        return mlx_dtypes(mx)[WIRE_DTYPE]
+    return array.dtype if _mlx_name_of(mx, array.dtype) else mx.float32
+
+
+def _mlx_name_of(mx, dtype) -> str:
+    for name, candidate in mlx_dtypes(mx).items():
+        if dtype == candidate:
+            return name
+    return ""
+
+
 def from_wire(torch, data: bytes, shape: List[int], dtype: str):
     """(bytes, shape, dtype name) -> tensor, exactly as it was sent.
 
