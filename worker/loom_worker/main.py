@@ -35,6 +35,7 @@ from loom_worker.p2p import (
     DEFAULT_P2P_PORT,
     LinkTable,
     PeerNode,
+    behind_container_nat,
     lattica_available,
 )
 from loom_worker.proto import worker_control_pb2
@@ -173,7 +174,12 @@ class PeerLayer:
             )
             return
         self.node = node
-        self.links.attach(send_direct=node.send, dial=node.warm)
+        self.links.attach(
+            send_direct=node.send,
+            dial=node.warm,
+            rtt=node.rtt_ms,
+            relay_rtt=node.relay_rtt_ms,
+        )
         if self.identity.symmetric_nat:
             logger.warning(
                 "this node is behind a symmetric NAT: peers cannot open a direct "
@@ -192,7 +198,17 @@ class PeerLayer:
             # looks fine, reports a peer id, and nobody can reach it. Naming
             # which of the two reasons it is saves the whole investigation —
             # they look identical from here and have nothing in common.
-            if relay_addrs:
+            if behind_container_nat():
+                logger.warning(
+                    "this worker runs on a Docker bridge network, so no peer "
+                    "can ever open a direct link to it: the container's port "
+                    "is not the host's, and outgoing packets are translated "
+                    "again on the way out. Hole punching cannot work from "
+                    "here. Restart the container with --network host (and "
+                    "open port %d) to make the direct path possible",
+                    self.node.port if self.node else DEFAULT_P2P_PORT,
+                )
+            elif relay_addrs:
                 logger.warning(
                     "no address of this node is reachable from outside, and "
                     "the relay at %s gave it no reservation either. Check that "
@@ -210,9 +226,20 @@ class PeerLayer:
                 )
 
     def status(self):
-        """What this node reports about its p2p state on every heartbeat."""
+        """What this node reports about its p2p state on every heartbeat.
+
+        Reachability is re-read from the node rather than taken from the
+        identity captured at startup. It is not a constant: a relay reservation
+        can arrive a second after the node joins, and AutoNAT needs a few
+        probes before it confirms anything. Reporting the startup snapshot
+        forever showed nodes as unreachable long after they were not.
+        """
         stats = self.links.snapshot()
         identity = self.identity
+        # The counters are reported even with no identity at all: a node with
+        # no p2p stack still relays every message, and that is exactly what the
+        # orchestrator needs to see.
+        visible = self.node.visible_addrs() if self.node is not None else []
         return worker_control_pb2.PeerStatus(
             peer_id=identity.peer_id if identity else "",
             listen_addrs=identity.listen_addrs if identity else [],
@@ -221,7 +248,10 @@ class PeerLayer:
             relayed=stats["relay"],
             fallbacks=stats["fallbacks"],
             direct_share=stats["direct_share"],
-            visible_addrs=identity.visible_addrs if identity else [],
+            visible_addrs=visible or (identity.visible_addrs if identity else []),
+            not_worth=stats["not_worth"],
+            link_rtt_ms=stats["link_rtt_ms"],
+            relay_rtt_ms=stats["relay_rtt_ms"],
         )
 
 

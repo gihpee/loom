@@ -29,6 +29,7 @@ services:
       LOOM_RELAY_PUBLIC_HOST: ${LOOM_P2P_RELAY_PUBLIC_HOST:-}
     ports:
       - "${LOOM_P2P_RELAY_PORT:-47200}:${LOOM_P2P_RELAY_PORT:-47200}/tcp"
+      - "${LOOM_P2P_RELAY_PORT:-47200}:${LOOM_P2P_RELAY_PORT:-47200}/udp"
     volumes:
       - loom-data:/data
 

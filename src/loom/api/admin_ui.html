@@ -157,9 +157,17 @@ function peerCell(p) {
             : (p.dialable ? `<span class="ok">peer</span>` : `<span class="dim">relay</span>`)));
   if (!total) return label + ` <span class="dim">—</span>`;
   const cls = share >= 90 ? "ok" : (share > 0 ? "warn" : "bad");
+  // A link refused as too expensive is not a link that failed to come up, and
+  // "0% прямо" alone cannot tell those apart. The two numbers are the whole
+  // argument: reaching the peer costs more than reaching the relay, so the
+  // "direct" path was a circuit through it.
+  const refused = p.not_worth
+    ? `<br><span class="dim">не выгодно: ${Math.round(p.link_rtt_ms)} ms ` +
+      `против ${Math.round(p.relay_rtt_ms)} ms до relay</span>`
+    : "";
   return label + ` <span class="${cls}">${share}% прямо</span>` +
     `<br><span class="dim">${p.direct}/${total}` +
-    `${p.fallbacks ? ` · ${p.fallbacks} откат` : ""}</span>`;
+    `${p.fallbacks ? ` · ${p.fallbacks} откат` : ""}</span>` + refused;
 }
 
 // ------------------------------------------------------------------ views
@@ -487,7 +495,9 @@ async function issueKey() {
   try {
     const r = await api("/admin/keys", {method:"POST", body: JSON.stringify(
       {label, max_nodes: Number.isFinite(maxNodes) ? maxNodes : 0})});
-    const cmd = "docker run -d --gpus all --restart unless-stopped " +
+    // --network host: without it the worker's p2p port lives inside the
+    // container and nothing can reach it, so every activation is relayed.
+    const cmd = "docker run -d --gpus all --restart unless-stopped --network host " +
       (r.worker_image || "gihpee/loomworker") + " --key " + r.key;
     lastKeyRaw = r.key;
     lastKey = "На GPU-машине выполнить ОДНУ команду:\n\n" + cmd +

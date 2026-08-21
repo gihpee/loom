@@ -86,6 +86,10 @@ def main(argv=None) -> int:
         print("  - the relay is not running, or not on that port")
         print("  - the port is closed on the way here (try: nc -vz <host> <port>)")
         print("  - the multiaddr's peer id belongs to an older relay identity")
+        if "/quic" in args.relay:
+            print("  - this is a QUIC address, and Lattica reserves only over")
+            print("    TCP: it connects over QUIC and never sends RESERVE.")
+            print("    Try the relay's /tcp/ address instead.")
         return 1
 
     # Held, or merely granted? A reservation that dies seconds later looks

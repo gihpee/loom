@@ -114,6 +114,33 @@ def local_candidate_addrs(port: int) -> List[str]:
     return addrs
 
 
+# Docker's default address pools. A container on a bridge network sees only
+# these, and that is the whole problem — see behind_container_nat().
+_DOCKER_POOL = ("172.1", "172.2", "172.3")
+
+
+def behind_container_nat() -> bool:
+    """Is this node inside a container whose ports the host does not share?
+
+    It matters more than anything else about NAT here. Hole punching works by
+    dialling OUT from the very port you listen on, so the mapping the router
+    creates is the one a peer can aim at. A bridge network breaks that in two
+    independent ways: the container's addresses are its own private ones, and
+    Docker re-translates every outgoing packet, so the port the peer is told
+    to aim at is not the port anything arrives on. And with no published port
+    there is no socket on the host at all — a punched TCP connection is met
+    with a reset.
+
+    No amount of relay or DCUtR recovers from this: the two peers can be
+    perfectly willing and the packets still have nowhere to land. On Linux the
+    fix is one flag, `--network host`.
+    """
+    if not os.path.exists("/.dockerenv"):
+        return False
+    ips = [ip for ip in _local_ips() if not ip.startswith("127.")]
+    return bool(ips) and all(ip.startswith(_DOCKER_POOL) for ip in ips)
+
+
 def _local_ips() -> List[str]:
     """Non-loopback IPv4 addresses of this host, best effort."""
     found: List[str] = []
@@ -345,6 +372,27 @@ class PeerNode:
         except Exception:
             return None
         return None if seconds is None else float(seconds) * 1000.0
+
+    def relay_rtt_ms(self) -> Optional[float]:
+        """Round trip to the nearest relay, in milliseconds.
+
+        The yardstick for whether a direct link is worth using at all. The
+        relay sits on the orchestrator's machine, so the trip to it is the
+        same trip a relayed activation makes on its way out — and a peer that
+        costs more to reach than the orchestrator saves nothing.
+
+        It also settles a question the Python API cannot answer otherwise:
+        whether a libp2p link is really direct or a circuit through the relay.
+        A circuit passes through the relay by construction, so it can never be
+        cheaper than the relay itself.
+        """
+        best: Optional[float] = None
+        for addr in self.relay_servers:
+            peer_id = addr.rsplit("/p2p/", 1)[-1] if "/p2p/" in addr else ""
+            rtt = self.rtt_ms(peer_id) if peer_id else None
+            if rtt is not None and (best is None or rtt < best):
+                best = rtt
+        return best
 
     def connected_peers(self) -> List[str]:
         if self._lattica is None:

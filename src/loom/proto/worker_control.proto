@@ -154,6 +154,13 @@ message PeerStatus {
   // Addresses AutoNAT confirmed are reachable from outside. Empty means no
   // peer can open a direct link TO this node — it can still open one itself.
   repeated string visible_addrs = 8;
+  // Links libp2p reported as established but which cost more to use than
+  // relaying: circuits through the relay, mostly. Counted rather than hidden,
+  // because "0% direct" means something entirely different when the direct
+  // path was rejected on purpose than when it never came up.
+  uint64 not_worth = 9;
+  double link_rtt_ms = 10;          // to the neighbour, over libp2p
+  double relay_rtt_ms = 11;         // to the relay: the yardstick
 }
 
 message TelemetryReport {

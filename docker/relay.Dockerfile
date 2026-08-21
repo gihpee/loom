@@ -17,5 +17,7 @@ COPY relay/relay.mjs ./
 ENV LOOM_RELAY_KEY=/data/relay/identity.key \
     LOOM_RELAY_PORT=47200
 
-EXPOSE 47200
+# TCP carries the reservations; UDP is QUIC, which is the transport a hole
+# punch should prefer — no handshake for a firewall to answer with an RST.
+EXPOSE 47200/tcp 47200/udp
 CMD ["node", "relay.mjs"]

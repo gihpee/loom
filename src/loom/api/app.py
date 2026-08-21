@@ -260,7 +260,14 @@ def create_app(controller: MultiModelController) -> FastAPI:
             "address": key.address,
             "label": key.label,
             "max_nodes": key.max_nodes,
-            "run_command": f"docker run -d --gpus all gihpee/loomworker --key {encoded}",
+            # --network host is not decoration: on a bridge network the
+            # container's p2p port is not the host's and every outgoing packet
+            # is translated again, so no peer can ever open a direct link to
+            # this worker and all its activations are relayed.
+            "run_command": (
+                f"docker run -d --gpus all --network host "
+                f"gihpee/loomworker --key {encoded}"
+            ),
         }
 
     @app.get("/admin/keys")

@@ -239,6 +239,103 @@ def test_the_heartbeat_reports_a_relay_only_node_honestly(monkeypatch):
     assert status.relayed == 1 and status.direct == 0
 
 
+
+# ------------------------------------------------- a link worth using at all
+def worth_table(peer_rtt, relay_rtt, **kw):
+    """A table whose only interesting property is what the two paths cost."""
+    sent = []
+    table = LinkTable(
+        send_direct=lambda pid, msg: sent.append((pid, msg)),
+        dial=lambda pid, addrs: None,
+        rtt=lambda pid: peer_rtt,
+        relay_rtt=lambda: relay_rtt,
+        **kw,
+    )
+    table.set_neighbours("p#0", [peer(1)])
+    return table, sent
+
+
+def test_a_link_costlier_than_the_relay_is_not_used():
+    """libp2p says "connected" for a circuit through the relay too.
+
+    That is how this went wrong on a real stand: hole punching failed, every
+    activation went worker -> relay -> worker, transport per token rose from
+    200 ms to 320 ms, the run halved in speed — and the admin page reported
+    "100% прямо" the whole time, because a circuit is a connection like any
+    other as far as the API is concerned.
+
+    The relay sits on the orchestrator's machine, so reaching a peer must cost
+    less than reaching the relay for the direct path to be saving anything at
+    all. A circuit runs THROUGH the relay and so can never pass this test.
+    """
+    table, sent = worth_table(peer_rtt=180.0, relay_rtt=60.0)
+    relayed = []
+    assert table.send("p#0", 1, {"step": 1}, relay=relayed.append) == "relay"
+    assert not sent and len(relayed) == 1
+    assert table.snapshot()["not_worth"] == 1
+
+
+def test_a_genuinely_direct_link_is_used():
+    table, sent = worth_table(peer_rtt=12.0, relay_rtt=60.0)
+    assert table.send("p#0", 1, {"step": 1}, relay=lambda m: None) == "direct"
+    assert len(sent) == 1
+
+
+def test_a_link_is_re_examined_so_hole_punching_can_win_later():
+    """A circuit becomes a direct connection seconds later, or never.
+
+    Deciding once at deployment would settle the question before the answer
+    exists: DCUtR upgrades the connection after the first dial, and a verdict
+    taken at that moment is a verdict about the circuit.
+    """
+    rtt = {"value": 180.0}
+    table = LinkTable(
+        send_direct=lambda pid, msg: None,
+        dial=lambda pid, addrs: None,
+        rtt=lambda pid: rtt["value"],
+        relay_rtt=lambda: 60.0,
+    )
+    table.set_neighbours("p#0", [peer(1)])
+    assert table.send("p#0", 1, {"s": 1}, relay=lambda m: None) == "relay"
+
+    rtt["value"] = 15.0  # hole punching succeeded
+    assert table.send("p#0", 1, {"s": 2}, relay=lambda m: None) == "relay"  # cached
+
+    table._worth.clear()  # what the re-check interval does on its own
+    assert table.send("p#0", 1, {"s": 3}, relay=lambda m: None) == "direct"
+
+
+def test_without_measurements_the_link_is_used_as_before():
+    """A missing number is not evidence of a bad link.
+
+    Nodes with no relay configured have nothing to compare against, and there
+    are no circuits for them to be fooled by either. They must behave exactly
+    as they did before any of this existed.
+    """
+    table, sent = worth_table(peer_rtt=None, relay_rtt=None)
+    assert table.send("p#0", 1, {"step": 1}, relay=lambda m: None) == "direct"
+    assert len(sent) == 1
+
+    plain = LinkTable(send_direct=lambda pid, msg: None, dial=lambda pid, a: None)
+    plain.set_neighbours("p#0", [peer(1)])
+    assert plain.send("p#0", 1, {"step": 1}, relay=lambda m: None) == "direct"
+
+
+def test_a_measurement_that_raises_does_not_lose_the_token():
+    """The transport may be mid-reconnect when we ask it anything."""
+
+    def explode(*_):
+        raise RuntimeError("no route")
+
+    table = LinkTable(
+        send_direct=lambda pid, msg: None,
+        dial=lambda pid, addrs: None,
+        rtt=explode,
+        relay_rtt=explode,
+    )
+    table.set_neighbours("p#0", [peer(1)])
+    assert table.send("p#0", 1, {"step": 1}, relay=lambda m: None) == "direct"
+
 # ----------------------------------------- several pipelines on one node
 def test_two_pipelines_on_one_node_do_not_share_routes():
     """"Stage 1" is a different machine in every pipeline.

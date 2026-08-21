@@ -10,6 +10,7 @@ See docs/P2P_TRANSPORT.md for the design and the measurements behind it.
 
 from loom_worker.p2p.links import LinkTable, Neighbour, neighbours_from_topology
 from loom_worker.p2p.peer import (
+    behind_container_nat,
     DEFAULT_P2P_PORT,
     P2PUnavailable,
     PeerIdentity,
@@ -20,6 +21,7 @@ from loom_worker.p2p.peer import (
 
 __all__ = [
     "DEFAULT_P2P_PORT",
+    "behind_container_nat",
     "LinkTable",
     "Neighbour",
     "P2PUnavailable",

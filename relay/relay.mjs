@@ -24,6 +24,7 @@
 import { createLibp2p } from 'libp2p'
 import { circuitRelayServer } from '@libp2p/circuit-relay-v2'
 import { tcp } from '@libp2p/tcp'
+import { quic } from '@chainsafe/libp2p-quic'
 import { identify } from '@libp2p/identify'
 import { ping } from '@libp2p/ping'
 import { noise } from '@chainsafe/libp2p-noise'
@@ -83,10 +84,22 @@ const privateKey = await loadOrCreateKey()
 const node = await createLibp2p({
   privateKey,
   addresses: {
-    listen: [`/ip4/0.0.0.0/tcp/${PORT}`],
-    ...(PUBLIC_HOST ? { announce: [`/${HOST_PROTO}/${PUBLIC_HOST}/tcp/${PORT}`] } : {})
+    // Both transports on the same number. QUIC matters more than it looks:
+    // hole punching over TCP needs a simultaneous open, which many stateful
+    // firewalls answer with an RST, while QUIC is plain UDP with no handshake
+    // to interrupt. A relay that only speaks TCP forces every negotiation it
+    // hosts down the harder path.
+    listen: [`/ip4/0.0.0.0/tcp/${PORT}`, `/ip4/0.0.0.0/udp/${PORT}/quic-v1`],
+    ...(PUBLIC_HOST
+      ? {
+          announce: [
+            `/${HOST_PROTO}/${PUBLIC_HOST}/tcp/${PORT}`,
+            `/${HOST_PROTO}/${PUBLIC_HOST}/udp/${PORT}/quic-v1`
+          ]
+        }
+      : {})
   },
-  transports: [tcp()],
+  transports: [tcp(), quic()],
   connectionEncrypters: [noise()],
   streamMuxers: [yamux()],
   services: {
@@ -108,7 +121,19 @@ const node = await createLibp2p({
       // costs that worker its direct path.
       reservations: {
         maxReservations: Number(process.env.LOOM_RELAY_MAX_RESERVATIONS || 512),
-        reservationTtl: 60 * 60 * 1000
+        reservationTtl: 60 * 60 * 1000,
+        // The standard v2 limits, kept ON DELIBERATELY: 128 KB and two minutes
+        // per relayed connection. They are what stops this from becoming the
+        // data path — and it must not be one. Activations relayed here would
+        // take the same two wide-area crossings as the orchestrator's tunnel
+        // plus a general-purpose relay in the middle; measured on a two-stage
+        // pipeline, transport per token went 200 ms -> 320 ms that way.
+        //
+        // For a 4B model 128 KB is about 25 tokens, so a pipeline that tried
+        // it would also be torn down and re-established mid-generation. Raising
+        // the limit hides that symptom and keeps the slower path; the worker
+        // instead measures the link and declines to use it (p2p/links.py).
+        applyDefaultLimit: true
       }
     })
   }
@@ -128,9 +153,15 @@ for (const addr of node.getMultiaddrs()) console.log(`  ${addr.toString()}`)
 // never be reached through.
 const ADDR_FILE = process.env.LOOM_RELAY_ADDR_FILE || join(dirname(KEY_PATH), 'address')
 if (PUBLIC_HOST) {
+  // TCP first, and that ordering is load-bearing: measured against this very
+  // relay, Lattica requests a reservation over the TCP address immediately
+  // and never over the QUIC one — it connects over QUIC happily and simply
+  // sends no RESERVE. Handing it both is safe (it picks TCP), handing it QUIC
+  // alone leaves the worker with no slot at all.
   const announced = node.getMultiaddrs()
     .map(a => a.toString())
     .filter(a => a.includes(`/${PUBLIC_HOST}/`))
+    .sort((a, b) => (a.includes('/quic') ? 1 : 0) - (b.includes('/quic') ? 1 : 0))
   await mkdir(dirname(ADDR_FILE), { recursive: true })
   await writeFile(ADDR_FILE, announced.join('\n') + '\n')
   console.log(`address published for the orchestrator: ${ADDR_FILE}`)

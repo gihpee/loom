@@ -33,6 +33,7 @@ Loom — маркетплейс, и его планировщик по умол�
 
 ```bash
 docker run -d --gpus all --restart unless-stopped \
+  --network host \
   -v loom-hf:/root/.cache/huggingface \
   gihpee/loomworker --key loom_<...>
 ```

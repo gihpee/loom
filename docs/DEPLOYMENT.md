@@ -128,7 +128,7 @@ curl -s -X POST localhost:8000/admin/keys -H "X-Loom-Admin-Token: $LOOM_ADMIN_TO
 ```json
 {
   "key": "loom_eyJpIjoi...",
-  "run_command": "docker run -d --gpus all gihpee/loomworker --key loom_eyJpIjoi...",
+  "run_command": "docker run -d --gpus all --network host gihpee/loomworker --key loom_eyJpIjoi...",
   "address": "203.0.113.10:9000",
   "max_nodes": 1
 }

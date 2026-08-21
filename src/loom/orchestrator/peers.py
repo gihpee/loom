@@ -55,6 +55,13 @@ class PeerRecord:
     relayed: int = 0
     fallbacks: int = 0
     direct_share: float = 0.0
+    # Links libp2p had established but which were not worth using — a circuit
+    # through the relay costs more than the relay it runs through. Without
+    # this, a deliberate refusal and a path that never came up both read as
+    # "0% direct", and they call for opposite reactions.
+    not_worth: int = 0
+    link_rtt_ms: float = 0.0
+    relay_rtt_ms: float = 0.0
 
     @property
     def dialable(self) -> bool:
@@ -165,6 +172,14 @@ class PeerDirectory:
         record.relayed = int(getattr(status, "relayed", 0) or 0)
         record.fallbacks = int(getattr(status, "fallbacks", 0) or 0)
         record.direct_share = float(getattr(status, "direct_share", 0.0) or 0.0)
+        record.not_worth = int(getattr(status, "not_worth", 0) or 0)
+        record.link_rtt_ms = float(getattr(status, "link_rtt_ms", 0.0) or 0.0)
+        record.relay_rtt_ms = float(getattr(status, "relay_rtt_ms", 0.0) or 0.0)
+        # Reachability is re-reported on every heartbeat and does change: a
+        # relay reservation can arrive after the node registered.
+        visible = list(getattr(status, "visible_addrs", []) or [])
+        if visible:
+            record.visible_addrs = visible
 
     def forget(self, node_id: str) -> None:
         self._records.pop(node_id, None)
@@ -223,6 +238,9 @@ class PeerDirectory:
                 "relayed": r.relayed,
                 "fallbacks": r.fallbacks,
                 "direct_share": r.direct_share,
+                "not_worth": r.not_worth,
+                "link_rtt_ms": r.link_rtt_ms,
+                "relay_rtt_ms": r.relay_rtt_ms,
             }
             for r in sorted(self._records.values(), key=lambda r: r.node_id)
         ]
