@@ -155,6 +155,29 @@ def test_reachability_is_reported_separately_from_nat_type():
     assert view["open"]["dialable"] and view["closed"]["dialable"]
 
 
+
+def test_a_node_reachable_only_through_the_relay_is_shown_as_such():
+    """The one state that proves the relay is working, and it needs a name.
+
+    A node holding a circuit-relay reservation is reachable — peers can open a
+    connection to it and try to punch through from there — but it accepts
+    nothing on its own. Lumping it in with a plainly dialable node hides the
+    only signal that says the relay did anything at all; lumping it in with
+    "unreachable" hides it just as well in the other direction.
+    """
+    directory = PeerDirectory()
+    directory.remember("relayed", status(), observed_host="203.0.113.9")
+    directory.remember("open", status(), observed_host="203.0.113.7")
+    directory._records["relayed"].visible_addrs = [
+        "/ip4/198.51.100.1/tcp/47200/p2p/12D3KooWRelay/p2p-circuit/p2p/12D3KooWMe"
+    ]
+    directory._records["open"].visible_addrs = ["/ip4/203.0.113.7/tcp/47100"]
+
+    view = {row["node_id"]: row for row in directory.view()}
+    assert view["relayed"]["reachable"] and view["relayed"]["via_relay"]
+    assert view["open"]["reachable"] and not view["open"]["via_relay"]
+
+
 # --------------------------------------------------------------- relay wiring
 def test_relay_addresses_are_configured_not_discovered(monkeypatch):
     """A relay is infrastructure somebody stood up, not something to find.

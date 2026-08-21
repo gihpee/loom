@@ -152,7 +152,9 @@ function peerCell(p) {
     ? `<span class="warn">symmetric NAT</span>`
     : (!p.reachable
         ? `<span class="warn">не достучаться</span>`
-        : (p.dialable ? `<span class="ok">peer</span>` : `<span class="dim">relay</span>`));
+        : (p.via_relay
+            ? `<span class="ok">peer</span> <span class="dim">через relay</span>`
+            : (p.dialable ? `<span class="ok">peer</span>` : `<span class="dim">relay</span>`)));
   if (!total) return label + ` <span class="dim">—</span>`;
   const cls = share >= 90 ? "ok" : (share > 0 ? "warn" : "bad");
   return label + ` <span class="${cls}">${share}% прямо</span>` +

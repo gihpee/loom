@@ -179,17 +179,35 @@ class PeerLayer:
                 "this node is behind a symmetric NAT: peers cannot open a direct "
                 "link to it and will relay"
             )
+        elif any("/p2p-circuit" in a for a in self.identity.visible_addrs):
+            # A reservation is held: nothing can dial this node directly, but
+            # peers can now reach it through the relay and try to punch through
+            # from there. This is the state the relay exists to produce.
+            logger.info(
+                "this node is reachable through the relay: %s",
+                self.identity.visible_addrs[0],
+            )
         elif not self.identity.visible_addrs:
             # The quiet case, and the one that wastes an afternoon: the node
-            # looks fine, reports a peer id, and nobody can reach it. Hole
-            # punching needs a relay to coordinate through, and Loom does not
-            # run one — so an unreachable node is simply unreachable.
-            logger.warning(
-                "no address of this node is reachable from outside (AutoNAT "
-                "confirmed none). Peers will relay TO it; it can still send "
-                "directly. Forward port %d (TCP and UDP) to make it dialable",
-                self.node.port if self.node else DEFAULT_P2P_PORT,
-            )
+            # looks fine, reports a peer id, and nobody can reach it. Naming
+            # which of the two reasons it is saves the whole investigation —
+            # they look identical from here and have nothing in common.
+            if relay_addrs:
+                logger.warning(
+                    "no address of this node is reachable from outside, and "
+                    "the relay at %s gave it no reservation either. Check that "
+                    "the relay is running and its port is open from here",
+                    relay_addrs[0],
+                )
+            else:
+                logger.warning(
+                    "no address of this node is reachable from outside (AutoNAT "
+                    "confirmed none) and no relay was offered. Peers will relay "
+                    "TO it through the orchestrator; it can still send "
+                    "directly. Forward port %d (TCP and UDP), or run a relay "
+                    "(docs/P2P_RELAY.md), to make it dialable",
+                    self.node.port if self.node else DEFAULT_P2P_PORT,
+                )
 
     def status(self):
         """What this node reports about its p2p state on every heartbeat."""

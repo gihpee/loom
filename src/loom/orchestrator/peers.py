@@ -210,6 +210,14 @@ class PeerDirectory:
                 "symmetric_nat": r.symmetric_nat,
                 "dialable": r.dialable,
                 "reachable": bool(r.visible_addrs),
+                # Reachable ONLY through a circuit-relay reservation: the node
+                # itself accepts nothing, and every address it can offer is a
+                # detour through the relay. Worth showing apart from a plainly
+                # dialable node, because it is the one state that says the
+                # relay is doing its job — and its absence is how a relay that
+                # is not working looks.
+                "via_relay": bool(r.visible_addrs)
+                and all("/p2p-circuit" in a for a in r.visible_addrs),
                 "visible_addrs": r.visible_addrs,
                 "direct": r.direct,
                 "relayed": r.relayed,

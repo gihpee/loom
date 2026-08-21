@@ -6,11 +6,12 @@
   "description": "libp2p circuit-relay v2 server for Loom workers behind NAT",
   "main": "relay.mjs",
   "dependencies": {
-    "libp2p": "^2.0.0",
+    "@chainsafe/libp2p-noise": "^16.0.0",
+    "@chainsafe/libp2p-yamux": "^7.0.0",
     "@libp2p/circuit-relay-v2": "^3.0.0",
     "@libp2p/identify": "^3.0.0",
+    "@libp2p/ping": "^2.0.0",
     "@libp2p/tcp": "^10.0.0",
-    "@chainsafe/libp2p-noise": "^16.0.0",
-    "@chainsafe/libp2p-yamux": "^7.0.0"
+    "libp2p": "^2.0.0"
   }
 }

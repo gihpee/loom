@@ -25,6 +25,7 @@ import { createLibp2p } from 'libp2p'
 import { circuitRelayServer } from '@libp2p/circuit-relay-v2'
 import { tcp } from '@libp2p/tcp'
 import { identify } from '@libp2p/identify'
+import { ping } from '@libp2p/ping'
 import { noise } from '@chainsafe/libp2p-noise'
 import { yamux } from '@chainsafe/libp2p-yamux'
 import { generateKeyPair, privateKeyFromProtobuf, privateKeyToProtobuf } from '@libp2p/crypto/keys'
@@ -62,6 +63,17 @@ const node = await createLibp2p({
   streamMuxers: [yamux()],
   services: {
     identify: identify(),
+    // Not decoration. Lattica pings whatever it is connected to, and a peer
+    // that answers "Unsupported" is dropped as dead — taking the reservation
+    // with it. Without this the relay works for about ten seconds, then the
+    // client reconnects, pings, is disappointed, and drops again, forever:
+    //
+    //   WARN lattica: Ping failed for peer 12D3KooW...: Unsupported
+    //   (visible addrs: circuit address present, then gone)
+    //
+    // A relay whose reservations keep evaporating is worse than none, because
+    // everything else about it looks healthy.
+    ping: ping(),
     relay: circuitRelayServer({
       // Generous: every worker that cannot be dialled into needs one slot for
       // as long as it is in a pipeline, and a refused reservation silently
