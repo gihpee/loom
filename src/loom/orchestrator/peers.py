@@ -48,6 +48,8 @@ class PeerRecord:
     listen_addrs: List[str] = field(default_factory=list)
     observed_host: str = ""
     symmetric_nat: bool = False
+    # Addresses AutoNAT confirmed. Empty means nobody can dial in.
+    visible_addrs: List[str] = field(default_factory=list)
     # Reported by the node itself, refreshed on every heartbeat.
     direct: int = 0
     relayed: int = 0
@@ -143,6 +145,7 @@ class PeerDirectory:
             listen_addrs=list(getattr(peer, "listen_addrs", []) or []),
             observed_host=observed_host or "",
             symmetric_nat=bool(getattr(peer, "symmetric_nat", False)),
+            visible_addrs=list(getattr(peer, "visible_addrs", []) or []),
         )
         self._records[node_id] = record
         return record
@@ -206,6 +209,8 @@ class PeerDirectory:
                 "listen_addrs": r.listen_addrs,
                 "symmetric_nat": r.symmetric_nat,
                 "dialable": r.dialable,
+                "reachable": bool(r.visible_addrs),
+                "visible_addrs": r.visible_addrs,
                 "direct": r.direct,
                 "relayed": r.relayed,
                 "fallbacks": r.fallbacks,

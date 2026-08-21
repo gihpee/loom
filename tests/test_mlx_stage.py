@@ -228,3 +228,104 @@ def test_a_mac_stage_and_a_cuda_stage_speak_the_same_wire(model_path, whole_mode
     assert [float(x) for x in back.flatten().tolist()[:8]] == pytest.approx(
         [float(x) for x in as_torch.flatten().tolist()[:8]], rel=1e-6
     )
+
+
+# ------------------------------------------------- wiring the stage receives
+def test_every_stage_engine_is_handed_its_pipeline_topology():
+    """The bug this prevents cost a whole deploy to diagnose.
+
+    A hardcoded list of backend names decided who gets a topology, and a newly
+    added engine was not on it. Its stage came up believing it was stage 0 of
+    1 — with layers [18, 36) — and refused the first activations it received
+    with "the head stage was given no token ids", from a stage that was
+    plainly not the head. Asking the class removes the chance to forget.
+    """
+    from loom_worker.backends.shard import ShardBackend
+
+    stage_engines = {
+        name for name, cls in BACKENDS.items() if cls.serves_partial_shard
+    }
+    by_class = {
+        name
+        for name, cls in BACKENDS.items()
+        if isinstance(cls, type) and issubclass(cls, ShardBackend)
+    }
+    # `echo` is the exception on purpose: a test stub that serves any range
+    # without needing to know the pipeline.
+    assert stage_engines - by_class == {"echo"}
+    assert "mlx_shard" in by_class
+
+
+def test_a_stage_refuses_a_topology_that_contradicts_its_layers():
+    """Fail where the wiring is wrong, not three hops later."""
+    from loom_worker.mlx_stage import MlxStageConfig
+    from loom_worker.mlx_stage.executor import MlxStageExecutor
+
+    config = MlxStageConfig(
+        model_path="/nowhere", start_layer=18, end_layer=36, num_layers=36
+    )
+    # What a stage started without its topology gets: the single-stage default.
+    lying_spec = SimpleNamespace(
+        start_layer=18, end_layer=36, is_first=True, is_last=True
+    )
+    with pytest.raises(ValueError, match="pipeline wiring did not reach"):
+        MlxStageExecutor(SimpleNamespace(model=None), config, lying_spec)
+
+
+@needs_metal
+def test_a_stage_works_from_the_thread_the_server_actually_uses(model_path, whole_model):
+    """The stage server serves messages on its own thread. MLX minds that.
+
+    MLX is lazy: an array is a promise until something forces it. A promise
+    built on one thread and forced on another fails with "There is no
+    Stream(cpu, 0) in current thread" — thrown from whatever eval happens to
+    force it, which is nowhere near the code that made it.
+
+    Every test above ran on the main thread and passed while production was
+    broken, so this one imitates the server: build on one thread, serve on
+    another.
+    """
+    import threading
+
+    model, tokenizer = whole_model
+    num_layers = len(model.model.layers)
+    reference = greedy_reference(model, tokenizer, steps=2)
+    stages = build_stages(model_path, num_layers, (0, num_layers // 2, num_layers))
+
+    produced, failure = [], []
+
+    def serve():
+        try:
+            produced.extend(run_pipeline(stages, tokenizer, steps=2))
+        except Exception as exc:  # noqa: BLE001 - reported, not swallowed
+            failure.append(f"{type(exc).__name__}: {exc}")
+
+    worker = threading.Thread(target=serve, name="stage-inbox")
+    worker.start()
+    worker.join(timeout=120)
+
+    assert not failure, failure[0]
+    assert produced == reference, "a stage served off-thread answered differently"
+
+
+@needs_metal
+def test_the_wire_hands_back_a_real_array_not_a_promise(model_path, whole_model):
+    """Deserialising must finish the work, not defer it to an unknown thread."""
+    import mlx.core as mx
+
+    model, tokenizer = whole_model
+    num_layers = len(model.model.layers)
+    head = build_stages(model_path, num_layers, (0, 4))[0]
+
+    hidden, _ = head.forward(
+        request_id="w", positions=[0], input_ids=tokenizer.encode(PROMPT)
+    )
+    arrived = head.deserialize(*head.serialize(hidden))
+    # A materialised array can be read from any thread; a promise cannot.
+    result = {}
+    import threading
+
+    t = threading.Thread(target=lambda: result.update(sum=float(mx.sum(arrived).item())))
+    t.start()
+    t.join(timeout=30)
+    assert "sum" in result, "the deserialised array could not be used off-thread"

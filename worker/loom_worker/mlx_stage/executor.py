@@ -54,6 +54,19 @@ class MlxStageExecutor:
     """Runs `[start_layer, end_layer)` of a model on Apple's GPU."""
 
     def __init__(self, model, config, spec) -> None:
+        # Checked before anything is loaded or sliced: two sources say whether
+        # this is the head — the topology the orchestrator sent and the layer
+        # range itself — and a disagreement means the stage was wired wrong.
+        # The symptom otherwise appears much later, as "the head stage was
+        # given no token ids" from a stage that is plainly not the head.
+        if bool(spec.is_first) != (config.start_layer == 0):
+            raise ValueError(
+                f"this stage holds layers [{config.start_layer}, "
+                f"{config.end_layer}) but the topology calls it "
+                f"{'the head' if spec.is_first else 'a later stage'}; the "
+                f"pipeline wiring did not reach this worker"
+            )
+
         import mlx.core as mx
         from mlx_lm.models.base import create_attention_mask
 

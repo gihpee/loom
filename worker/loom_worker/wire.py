@@ -135,7 +135,13 @@ def mlx_from_wire(mx, data: bytes, shape: List[int], dtype: str):
     import numpy as np
 
     flat = mx.array(np.frombuffer(data, dtype=np.uint8)).view(mapping[name])
-    return flat.reshape(tuple(shape))
+    array = flat.reshape(tuple(shape))
+    # Materialise before returning. MLX is lazy, and a numpy-backed array is
+    # built on the CPU stream — leaving the graph unevaluated means it is
+    # forced later, possibly on another thread, and surfaces far from here as
+    # "There is no Stream(cpu, 0) in current thread" from an unrelated eval.
+    mx.eval(array)
+    return array
 
 
 def _mlx_wire_dtype(mx, array):

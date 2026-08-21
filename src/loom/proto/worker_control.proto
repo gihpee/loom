@@ -151,6 +151,9 @@ message PeerStatus {
   uint64 relayed = 5;               // messages sent through the orchestrator
   uint64 fallbacks = 6;             // direct link failed, the relay saved it
   double direct_share = 7;
+  // Addresses AutoNAT confirmed are reachable from outside. Empty means no
+  // peer can open a direct link TO this node — it can still open one itself.
+  repeated string visible_addrs = 8;
 }
 
 message TelemetryReport {

@@ -31,7 +31,12 @@ from loom_worker.dataplane_client import DataPlaneClient
 from loom_worker.gateway_client import GatewayClient
 from loom_worker.handlers import CommandHandlers
 from loom_worker.hwinfo import detect_hardware
-from loom_worker.p2p import LinkTable, PeerNode, lattica_available
+from loom_worker.p2p import (
+    DEFAULT_P2P_PORT,
+    LinkTable,
+    PeerNode,
+    lattica_available,
+)
 from loom_worker.proto import worker_control_pb2
 from loom_worker.joinkey import parse_join_key
 from loom_worker.proto import gateway_pb2
@@ -133,7 +138,9 @@ class PeerLayer:
             return
         if not lattica_available():
             logger.info(
-                "no p2p stack in this image; stage messages go through the orchestrator"
+                "no p2p stack installed; stage messages go through the "
+                "orchestrator. Install the extra to let this node talk to its "
+                "neighbours directly: pip install 'loom-worker[p2p]'"
             )
             return
         # Bootstrap only. The rendezvous is a DHT entry point, not a libp2p
@@ -161,6 +168,17 @@ class PeerLayer:
                 "this node is behind a symmetric NAT: peers cannot open a direct "
                 "link to it and will relay"
             )
+        elif not self.identity.visible_addrs:
+            # The quiet case, and the one that wastes an afternoon: the node
+            # looks fine, reports a peer id, and nobody can reach it. Hole
+            # punching needs a relay to coordinate through, and Loom does not
+            # run one — so an unreachable node is simply unreachable.
+            logger.warning(
+                "no address of this node is reachable from outside (AutoNAT "
+                "confirmed none). Peers will relay TO it; it can still send "
+                "directly. Forward port %d (TCP and UDP) to make it dialable",
+                self.node.port if self.node else DEFAULT_P2P_PORT,
+            )
 
     def status(self):
         """What this node reports about its p2p state on every heartbeat."""
@@ -174,6 +192,7 @@ class PeerLayer:
             relayed=stats["relay"],
             fallbacks=stats["fallbacks"],
             direct_share=stats["direct_share"],
+            visible_addrs=identity.visible_addrs if identity else [],
         )
 
 

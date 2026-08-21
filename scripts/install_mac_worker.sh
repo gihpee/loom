@@ -61,7 +61,9 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 echo "installing into $PREFIX"
 "$PY" -m venv "$PREFIX/venv"
 "$PREFIX/venv/bin/pip" install --quiet --upgrade pip
-"$PREFIX/venv/bin/pip" install --quiet "$REPO_ROOT/worker[mlx]"
+# [p2p] as well as [mlx]: without it every activation is relayed through
+# the orchestrator, which on a spread-out pipeline is the whole cost.
+"$PREFIX/venv/bin/pip" install --quiet "$REPO_ROOT/worker[mlx,p2p]"
 
 echo -n "checking the GPU is actually reachable... "
 "$PREFIX/venv/bin/python" - <<'PY'

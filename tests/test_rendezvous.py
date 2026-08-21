@@ -132,3 +132,24 @@ def test_transport_counters_for_an_unknown_node_are_ignored():
     directory = PeerDirectory()
     directory.record_transport("ghost", status(direct=5))
     assert directory.get("ghost") is None
+
+
+def test_reachability_is_reported_separately_from_nat_type():
+    """"peer" must not mean "probably fine".
+
+    A node that is merely not behind a symmetric NAT still cannot accept an
+    inbound connection unless something out there can reach it. Reporting only
+    the NAT type made a pipeline look ready to go direct while every single
+    message fell back to the relay.
+    """
+    directory = PeerDirectory()
+    directory.remember("open", status(), observed_host="203.0.113.7")
+    directory.remember("closed", status(), observed_host="203.0.113.8")
+    directory._records["open"].visible_addrs = ["/ip4/203.0.113.7/tcp/47100"]
+
+    view = {row["node_id"]: row for row in directory.view()}
+    assert view["open"]["reachable"] is True
+    assert view["closed"]["reachable"] is False
+    # Both are still attempted: an unreachable node can dial OUT, and a LAN
+    # pair works without AutoNAT ever confirming anything.
+    assert view["open"]["dialable"] and view["closed"]["dialable"]

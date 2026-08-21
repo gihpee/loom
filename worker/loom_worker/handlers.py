@@ -13,7 +13,8 @@ import threading
 import urllib.request
 from typing import Callable, List, Optional
 
-from loom_worker.backends import make_backend
+from loom_worker.backends import BACKENDS, make_backend
+from loom_worker.backends.shard import ShardBackend
 from loom_worker.p2p import neighbours_from_topology
 from loom_worker.proto import gateway_pb2, worker_control_pb2
 from loom_worker.state import PipelineRole, ShardSpec, ShardState, ShardStatus, WorkerState
@@ -146,7 +147,13 @@ class CommandHandlers:
             self._teardown(req.model_id, existing, to_status=ShardStatus.STOPPED)
         try:
             backend_kwargs = dict(self.backend_kwargs.get(spec.backend_type, {}))
-            if spec.backend_type in ("shard", "vllm_shard"):
+            # Every stage engine descends from ShardBackend, and they are the
+            # ones that take a topology. Asking the class beats a hardcoded
+            # list of names: that list is what silently left a new engine
+            # (mlx_shard) running as a lone stage 0/1 with no relay url, which
+            # surfaced far away as "the head stage was given no token ids".
+            backend_cls = BACKENDS.get(spec.backend_type)
+            if backend_cls is not None and issubclass(backend_cls, ShardBackend):
                 # The stage needs to know its place in the pipeline and where to
                 # hand off activations (the agent's loopback relay).
                 backend_kwargs.setdefault("device", self.device)

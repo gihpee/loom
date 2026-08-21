@@ -13,7 +13,10 @@ dependencies = [
 # Installed only in GPU images; the worker spawns `vllm serve` as a subprocess.
 vllm = ["vllm>=0.8"]
 sglang = ["sglang[all]>=0.4"]
-# Apple Silicon (native, not docker): mlx_lm.server backend.
+# Apple Silicon (native, not docker — Metal cannot be passed into a container).
+# Covers both the whole-model `mlx` backend and the `mlx_shard` stage engine.
+# Pair it with [p2p] so the node also gets direct links to its neighbours:
+#   pip install "./worker[mlx,p2p]"
 mlx = ["mlx>=0.21", "mlx-lm>=0.20"]
 # NVML-based VRAM watchdog enforcement on CUDA hosts.
 cuda = ["nvidia-ml-py>=12.0"]

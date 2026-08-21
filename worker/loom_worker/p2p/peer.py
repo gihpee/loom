@@ -44,7 +44,14 @@ DEFAULT_P2P_PORT = int(os.environ.get("LOOM_P2P_PORT", "47100"))
 # Where the node keeps its keypair. The peer id must survive restarts: it is
 # how the orchestrator and the neighbours refer to this machine, and a node
 # that regenerates its identity on every boot looks like a stranger each time.
-DEFAULT_KEY_DIR = os.environ.get("LOOM_P2P_KEY_DIR", "/root/.cache/loom/p2p")
+# Expanded from HOME rather than hardcoded. In the worker image HOME is /root,
+# so this resolves to exactly the path it always did; on a Mac running the
+# agent natively it lands in the user's cache instead of /root, which does not
+# exist there and is not writable — a hardcoded container path is how a node
+# that is otherwise fine ends up relaying every message.
+DEFAULT_KEY_DIR = os.environ.get(
+    "LOOM_P2P_KEY_DIR", os.path.join(os.path.expanduser("~"), ".cache", "loom", "p2p")
+)
 
 # How long one direct send may take before the relay is used instead. A token
 # budget is a couple of hundred milliseconds, so anything here is expensive —
@@ -63,6 +70,11 @@ class PeerIdentity:
     peer_id: str
     listen_addrs: List[str] = field(default_factory=list)
     symmetric_nat: bool = False
+    # Addresses AutoNAT confirmed the outside world can actually reach. This
+    # is the difference between "probably fine" and "reachable": a node with
+    # none of these cannot accept an inbound connection, so no peer can open a
+    # direct link TO it however hard it tries.
+    visible_addrs: List[str] = field(default_factory=list)
 
     def as_dict(self) -> dict:
         return {
@@ -218,7 +230,7 @@ class PeerNode:
     def _build(self):
         from lattica import Lattica
 
-        os.makedirs(self.key_dir, exist_ok=True)
+        key_dir = self._usable_key_dir()
         builder = (
             Lattica.builder()
             .with_listen_addrs(
@@ -228,7 +240,7 @@ class PeerNode:
                 ]
             )
             # A stable identity across restarts (see DEFAULT_KEY_DIR).
-            .with_key_path(self.key_dir)
+            .with_key_path(key_dir)
             # Hole punching, and the reachability probe that tells us whether
             # it is even worth attempting.
             .with_dcutr(True)
@@ -256,6 +268,34 @@ class PeerNode:
             builder = builder.with_relay_servers(self.relay_servers)
         return builder.build()
 
+    def _usable_key_dir(self) -> str:
+        """A directory this process can actually write to.
+
+        A node that cannot store its keypair should still join the network:
+        losing the identity across restarts costs nothing much, because the
+        orchestrator relearns every peer id from the heartbeats anyway. Losing
+        the direct path costs a wide-area round trip on every token.
+        """
+        import tempfile
+
+        try:
+            os.makedirs(self.key_dir, exist_ok=True)
+            probe = os.path.join(self.key_dir, ".writable")
+            with open(probe, "w"):
+                pass
+            os.unlink(probe)
+            return self.key_dir
+        except OSError as exc:
+            fallback = tempfile.mkdtemp(prefix="loom-p2p-")
+            logger.warning(
+                "cannot use %s for the p2p identity (%s); falling back to %s, "
+                "so this node's peer id will change when it restarts",
+                self.key_dir,
+                exc,
+                fallback,
+            )
+            return fallback
+
     def close(self) -> None:
         with self._lock:
             if self._lattica is None:
@@ -280,7 +320,17 @@ class PeerNode:
             peer_id=self._lattica.peer_id(),
             listen_addrs=local_candidate_addrs(self.port),
             symmetric_nat=bool(self._lattica.is_symmetric_nat()),
+            visible_addrs=self.visible_addrs(),
         )
+
+    def visible_addrs(self) -> List[str]:
+        """What AutoNAT says the outside world can reach, if anything."""
+        if self._lattica is None:
+            return []
+        try:
+            return list(self._lattica.get_visible_maddrs() or [])
+        except Exception:
+            return []
 
     def rtt_ms(self, peer_id: str) -> Optional[float]:
         """Round trip to a peer, in milliseconds, or None if not connected.

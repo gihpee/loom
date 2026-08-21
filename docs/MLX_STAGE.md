@@ -31,6 +31,17 @@ Metal — фреймворк пользовательского простран
 bash scripts/install_mac_worker.sh --key loom_<...>
 ```
 
+Или без скрипта, двумя командами:
+
+```bash
+python3 -m venv ~/.loom/venv && ~/.loom/venv/bin/pip install "./worker[mlx,p2p]"
+~/.loom/venv/bin/loom-worker --key loom_<...>
+```
+
+**`[p2p]` здесь не украшение.** Без него нода поднимется и будет работать, но
+все активации пойдут через оркестратор — в логе будет `no p2p stack installed`,
+а в админке в колонке p2p `relay`. Колесо `lattica` под macOS arm64 есть.
+
 Скрипт проверяет, что python действительно arm64 (под Rosetta колёса MLX
 встанут, но GPU за ними не будет), ставит воркер в `~/.loom`, **убеждается,
 что MLX реально выбрал GPU**, и регистрирует службу.

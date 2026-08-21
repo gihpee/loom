@@ -115,10 +115,13 @@ def build_stage_model(config: MlxStageConfig):
     start, end = config.start_layer, min(config.end_layer, total)
     inner.layers = inner.layers[start:end]
 
-    # Force this stage's weights into memory now. Lazy loading would otherwise
-    # spread the cost across the first request, where it looks like the model
-    # is inexplicably slow rather than still loading.
-    mx.eval(inner.layers)
+    # Materialise every parameter this stage will touch, here and now. Lazy
+    # loading would otherwise spread the cost over the first request, where it
+    # looks like the model is inexplicably slow rather than still loading.
+    #
+    # `model.parameters()` rather than the layer list: the last stage also uses
+    # `norm` and the head, and the first uses the embeddings.
+    mx.eval(model.parameters())
     logger.info(
         "MLX stage loaded: layers [%d, %d) of %d (first=%s last=%s)",
         start,

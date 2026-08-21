@@ -330,3 +330,51 @@ def test_a_direct_send_is_bounded(monkeypatch):
     # "no timeout at all" to some bindings.
     node.send("12D3KooWPeer", {"step": 3}, 0.25)
     assert captured["timeout"] == 1
+
+
+def test_the_identity_directory_follows_home_not_a_container_path(monkeypatch):
+    """A hardcoded /root is how a perfectly good Mac ends up relaying.
+
+    The worker image runs as root, so HOME is /root and the path is unchanged
+    there. A native agent on macOS gets the user's cache instead of a directory
+    that does not exist and cannot be created.
+    """
+    import importlib
+
+    import loom_worker.p2p.peer as peer_module
+
+    monkeypatch.delenv("LOOM_P2P_KEY_DIR", raising=False)
+    monkeypatch.setenv("HOME", "/root")
+    assert importlib.reload(peer_module).DEFAULT_KEY_DIR == "/root/.cache/loom/p2p"
+
+    monkeypatch.setenv("HOME", "/Users/someone")
+    assert (
+        importlib.reload(peer_module).DEFAULT_KEY_DIR
+        == "/Users/someone/.cache/loom/p2p"
+    )
+    monkeypatch.delenv("HOME", raising=False)
+    importlib.reload(peer_module)
+
+
+def test_an_unwritable_identity_directory_does_not_cost_the_direct_path(tmp_path):
+    """Losing the keypair is cheap; losing p2p is a round trip per token.
+
+    The orchestrator relearns every peer id from the heartbeats, so an identity
+    that changes on restart costs almost nothing — while falling back to the
+    relay costs a wide-area crossing on every single token.
+    """
+    from loom_worker.p2p.peer import PeerNode
+
+    node = PeerNode(key_dir="/proc/nonexistent/loom")
+    resolved = node._usable_key_dir()
+    assert resolved != "/proc/nonexistent/loom"
+    assert Path(resolved).is_dir(), "the fallback must be usable, not just different"
+
+
+def test_a_writable_directory_is_used_as_given(tmp_path):
+    from loom_worker.p2p.peer import PeerNode
+
+    target = tmp_path / "keys"
+    assert PeerNode(key_dir=str(target))._usable_key_dir() == str(target)
+    assert target.is_dir()
+    assert not (target / ".writable").exists(), "the probe file must be cleaned up"

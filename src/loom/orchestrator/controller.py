@@ -1026,6 +1026,9 @@ class MultiModelController:
                     "peer_id": record.peer_id if record else "",
                     "dialable": bool(record and record.dialable),
                     "symmetric_nat": bool(record and record.symmetric_nat),
+                    # Whether anyone can dial IN. Without it "peer" only means
+                    # "not symmetric NAT", which is not the same thing at all.
+                    "reachable": bool(record and record.visible_addrs),
                     "direct": record.direct if record else 0,
                     "relayed": record.relayed if record else 0,
                     "fallbacks": record.fallbacks if record else 0,

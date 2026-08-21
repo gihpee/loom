@@ -64,7 +64,17 @@ def relay(payload: dict) -> None:
     topology = STATE.get("topology") or {}
     payload.setdefault("pipeline_id", topology.get("pipeline_id", ""))
     payload.setdefault("model_id", STATE.get("model_id", ""))
-    relay_url = STATE["relay_url"]
+    relay_url = STATE.get("relay_url") or ""
+    if not relay_url:
+        # A stage with nowhere to send was started without its pipeline wiring.
+        # Saying that plainly beats urllib's "unknown url type: ''", which is
+        # what the operator saw while this path was reporting a DIFFERENT error.
+        logger.error(
+            "this stage has no relay url: it was started without pipeline "
+            "wiring and cannot hand off %s",
+            payload.get("kind", "a message"),
+        )
+        return
     data = json.dumps(payload).encode()
     req = urllib.request.Request(
         relay_url, data=data, headers={"Content-Type": "application/json"}, method="POST"

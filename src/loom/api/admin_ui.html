@@ -145,9 +145,14 @@ function peerCell(p) {
   if (!p || !p.peer_id) return `<span class="dim">relay</span>`;
   const total = (p.direct || 0) + (p.relayed || 0);
   const share = Math.round(100 * (p.direct_share || 0));
+  // "peer" used to mean only "not behind a symmetric NAT", which reads as
+  // "this will work" and often does not: a node nobody can dial into cannot
+  // accept a direct link however willing both sides are.
   const label = p.symmetric_nat
     ? `<span class="warn">symmetric NAT</span>`
-    : (p.dialable ? `<span class="ok">peer</span>` : `<span class="dim">relay</span>`);
+    : (!p.reachable
+        ? `<span class="warn">не достучаться</span>`
+        : (p.dialable ? `<span class="ok">peer</span>` : `<span class="dim">relay</span>`));
   if (!total) return label + ` <span class="dim">—</span>`;
   const cls = share >= 90 ? "ok" : (share > 0 ? "warn" : "bad");
   return label + ` <span class="${cls}">${share}% прямо</span>` +
