@@ -8,6 +8,7 @@ the direct path is allowed to fail at all.
 """
 
 import sys
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -662,3 +663,85 @@ def test_an_inbound_message_is_accepted_without_waiting_for_the_stage():
             break
         time.sleep(0.02)
     assert delivered == [{"step": 1}], "the message was accepted but never delivered"
+
+
+# ------------------------------------- handing over versus waiting to be heard
+class SlowAck:
+    """A future whose acknowledgement takes as long as a network round trip."""
+
+    def __init__(self, delay=0.3, fail=False):
+        self.delay, self.fail = delay, fail
+
+    def result(self, timeout=None):
+        import time
+
+        time.sleep(self.delay)
+        if self.fail:
+            raise RuntimeError("operation timeout")
+        return {"ok": True}
+
+
+def test_the_token_path_does_not_wait_to_be_acknowledged():
+    """Waiting for the reply is what made the direct path the slower one.
+
+    An activation is one-way: the next stage needs it, and nothing in this
+    step depends on hearing back. Waiting anyway cost a full round trip, while
+    the relay — a queue — cost half of one. Measured across regions: 219 ms
+    per token direct against 116 ms relayed, over a link whose actual round
+    trip was 100 ms. The direct path was beating itself.
+    """
+    import time
+
+    table = LinkTable(
+        send_direct=lambda pid, msg: SlowAck(delay=0.3),
+        dial=lambda pid, addrs: None,
+    )
+    table.set_neighbours("p#0", [peer(1)])
+
+    began = time.monotonic()
+    assert table.send("p#0", 1, {"s": 1}, relay=lambda m: None) == "direct"
+    took = time.monotonic() - began
+    assert took < 0.1, f"the send waited {took:.2f}s for an acknowledgement"
+
+
+def test_a_message_that_was_never_acknowledged_is_relayed_after_all():
+    """Not waiting must not mean not noticing.
+
+    The guarantee that survives every rewrite: a direct path may be slower, it
+    may be unavailable, it may fail — but it may not lose a token. A lost one
+    ends the request.
+    """
+    relayed = []
+    table = LinkTable(
+        send_direct=lambda pid, msg: SlowAck(delay=0.0, fail=True),
+        dial=lambda pid, addrs: None,
+        timeout_s=1.0,
+    )
+    table.set_neighbours("p#0", [peer(1)])
+    assert table.send("p#0", 1, {"s": 7}, relay=relayed.append) == "direct"
+
+    for _ in range(100):
+        if relayed:
+            break
+        time.sleep(0.02)
+    assert relayed == [{"s": 7}], "a message nobody acknowledged was simply lost"
+    # ...and the link is quarantined, so the next token does not repeat it.
+    assert not table.direct_available("p#0", 1)
+    assert table.snapshot()["fallbacks"] == 1
+
+
+def test_the_counters_do_not_credit_a_send_that_failed():
+    """A message counted as direct and then relayed is one message, not two."""
+    table = LinkTable(
+        send_direct=lambda pid, msg: SlowAck(delay=0.0, fail=True),
+        dial=lambda pid, addrs: None,
+        timeout_s=1.0,
+    )
+    table.set_neighbours("p#0", [peer(1)])
+    table.send("p#0", 1, {"s": 1}, relay=lambda m: None)
+    for _ in range(100):
+        if table.snapshot()["relay"]:
+            break
+        time.sleep(0.02)
+    stats = table.snapshot()
+    assert stats["direct"] == 0 and stats["relay"] == 1

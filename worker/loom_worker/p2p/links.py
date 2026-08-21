@@ -23,6 +23,8 @@ POSTs to the agent's loopback relay exactly as before.
 from __future__ import annotations
 
 import logging
+import os
+import queue
 import threading
 import time
 from dataclasses import dataclass, field
@@ -45,6 +47,13 @@ WORTH_RECHECK_S = 30.0
 # it a pair whose two paths cost about the same flips on every re-check, and
 # each flip costs a dial.
 HYSTERESIS = 0.15
+
+# How long to give an acknowledgement before treating the message as lost.
+SEND_TIMEOUT_S = float(os.environ.get("LOOM_P2P_SEND_TIMEOUT_S", "2"))
+
+# How many handed-over messages may be awaiting acknowledgement. A pipeline
+# decoding one sequence has exactly one in flight; the rest is slack.
+PENDING_ACKS = 64
 
 
 @dataclass
@@ -87,6 +96,7 @@ class LinkTable:
         cooldown_s: float = DIRECT_COOLDOWN_S,
         rtt: Optional[Callable[[str], Optional[float]]] = None,
         relay_rtt: Optional[Callable[[], Optional[float]]] = None,
+        timeout_s: float = SEND_TIMEOUT_S,
     ) -> None:
         self._lock = threading.RLock()
         # (pipeline_id, stage_index) -> Neighbour
@@ -99,6 +109,9 @@ class LinkTable:
         self._relay_rtt = relay_rtt
         # peer_id -> (verdict, when it expires, the two numbers behind it)
         self._worth: Dict[str, Tuple[bool, float, Optional[float], Optional[float]]] = {}
+        self._timeout_s = timeout_s
+        self._pending: "queue.Queue" = queue.Queue(maxsize=PENDING_ACKS)
+        self._watcher: Optional[threading.Thread] = None
         self.stats = {"direct": 0, "relay": 0, "fallbacks": 0, "not_worth": 0}
 
     def attach(self, *, send_direct, dial, rtt=None, relay_rtt=None) -> None:
@@ -288,7 +301,12 @@ class LinkTable:
         if self.direct_available(pipeline_id, stage_index):
             peer = self.neighbour(pipeline_id, stage_index)
             try:
-                self._send_direct(peer.peer_id, message)
+                # Handed over, not awaited. The acknowledgement costs a return
+                # trip that nothing here needs; watching for it happens on
+                # another thread, so a failure still quarantines the link and
+                # still relays what was lost.
+                pending = self._send_direct(peer.peer_id, message)
+                self._watch(peer, pending, message, relay)
                 with self._lock:
                     self.stats["direct"] += 1
                 return "direct"
@@ -301,6 +319,51 @@ class LinkTable:
         with self._lock:
             self.stats["relay"] += 1
         return "relay"
+
+    def _watch(self, peer, pending, message, relay) -> None:
+        """Follow a handed-over message to its acknowledgement, off the token path."""
+        if pending is None or not hasattr(pending, "result"):
+            return  # a transport that does not acknowledge; nothing to watch
+        self._start_watcher()
+        try:
+            self._pending.put_nowait((peer, pending, message, relay))
+        except queue.Full:
+            # More in flight than the watcher can follow. Waiting here is the
+            # backpressure: better a slow token than an unbounded queue.
+            self._settle(peer, pending, message, relay)
+
+    def _start_watcher(self) -> None:
+        with self._lock:
+            if self._watcher is not None:
+                return
+            self._watcher = threading.Thread(
+                target=self._watch_loop, name="loom-p2p-acks", daemon=True
+            )
+            self._watcher.start()
+
+    def _watch_loop(self) -> None:
+        while True:
+            peer, pending, message, relay = self._pending.get()
+            try:
+                self._settle(peer, pending, message, relay)
+            except Exception:
+                logger.exception("following up a direct send failed")
+
+    def _settle(self, peer, pending, message, relay) -> None:
+        """Wait for one acknowledgement and repair the damage if it never comes."""
+        try:
+            pending.result(timeout=max(1, int(self._timeout_s)))
+        except Exception as exc:  # noqa: BLE001 - every failure is handled alike
+            self._block(peer, exc)
+            # The message was never delivered. Sending it now is late, but a
+            # late token is a token; a lost one ends the request.
+            try:
+                relay(message)
+                with self._lock:
+                    self.stats["direct"] = max(0, self.stats["direct"] - 1)
+                    self.stats["relay"] += 1
+            except Exception:
+                logger.exception("relaying after a failed direct send also failed")
 
     def _block(self, peer: Neighbour, exc: BaseException) -> None:
         with self._lock:

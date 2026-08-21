@@ -187,7 +187,7 @@ class PeerLayer:
         self.node = node
         self._start_sampler()
         self.links.attach(
-            send_direct=node.send,
+            send_direct=node.send_nowait,
             dial=node.warm,
             rtt=node.rtt_ms,
             relay_rtt=node.relay_rtt_ms,

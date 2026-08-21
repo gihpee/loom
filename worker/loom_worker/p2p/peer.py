@@ -518,6 +518,26 @@ class PeerNode:
         result = future.result(timeout=seconds)
         return result if isinstance(result, dict) else {"ok": True}
 
+    def send_nowait(self, peer_id: str, message: dict):
+        """Hand a message to a peer WITHOUT waiting for the acknowledgement.
+
+        The difference is a whole round trip, and it decided which path was
+        faster. An activation is one-way traffic: the next stage needs it, and
+        nothing in the sender's next step depends on hearing back. Waiting for
+        the reply anyway made the direct path cost RTT while the relayed path
+        cost half of it — the relay is a queue, and handing something to a
+        queue does not wait for the far end. Measured across regions: direct
+        transport 219 ms per token against 116 ms relayed, over a link whose
+        actual round trip was 100 ms.
+
+        The returned future is not discarded — LinkTable watches it away from
+        the token path, so a failure still quarantines the link and still
+        relays the message that was lost.
+        """
+        if self._handler is None:
+            raise P2PUnavailable("the p2p node is not running")
+        return self._stub_for(peer_id).stage_forward(message)
+
     def _stub_for(self, peer_id: str):
         with self._lock:
             stub = self._stubs.get(peer_id)
