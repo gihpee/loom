@@ -475,3 +475,46 @@ def test_a_writable_directory_is_used_as_given(tmp_path):
     assert PeerNode(key_dir=str(target))._usable_key_dir() == str(target)
     assert target.is_dir()
     assert not (target / ".writable").exists(), "the probe file must be cleaned up"
+
+
+# --------------------------------------------------------- a port already taken
+def test_a_busy_port_does_not_cost_the_node_its_direct_path():
+    """One machine, several workers, and --network host: they share the ports.
+
+    The failure used to arrive as a Rust error nested eight levels deep —
+    `Transport(Left(Left(Left(Os { code: 98, kind: AddrInUse }))))` — and the
+    node gave up on the direct path entirely because of a number it could
+    simply have picked differently. The port is not meaningful: peers are
+    found by id, and the address a peer dials is announced, not assumed.
+    """
+    import socket
+    import tempfile
+
+    from loom_worker.p2p.peer import PeerNode, _address_in_use
+
+    assert _address_in_use(
+        RuntimeError('Transport(Left(Left(Left(Os { code: 98, kind: AddrInUse }))))')
+    )
+    assert not _address_in_use(RuntimeError("something else entirely"))
+
+    hog = socket.socket()
+    hog.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    hog.bind(("127.0.0.1", 0))
+    taken = hog.getsockname()[1]
+    hog.listen(1)
+    try:
+        built = []
+
+        class Probe(PeerNode):
+            def _build_on(self, port):
+                built.append(port)
+                if port == taken:
+                    raise RuntimeError("Os { code: 98, kind: AddrInUse }")
+                return object()
+
+        node = Probe(port=taken, key_dir=tempfile.mkdtemp())
+        assert node._build() is not None
+        assert built == [taken, taken + 1]
+        assert node.port == taken + 1  # and it reports where it actually is
+    finally:
+        hog.close()

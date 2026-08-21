@@ -63,6 +63,18 @@ class P2PUnavailable(RuntimeError):
     """No usable p2p stack on this node; the caller must fall back to relay."""
 
 
+def _address_in_use(exc: BaseException) -> bool:
+    """Is this the Rust core telling us the port is taken?
+
+    By string, because it arrives as a chain of anonymous Either wrappers with
+    no type to match on:
+
+        Transport(Left(Left(Left(Os { code: 98, kind: AddrInUse, ... }))))
+    """
+    text = str(exc)
+    return "AddrInUse" in text or "Address already in use" in text
+
+
 @dataclass
 class PeerIdentity:
     """What this node tells the orchestrator about how to reach it."""
@@ -254,7 +266,49 @@ class PeerNode:
             time.sleep(0.1)
         return False
 
+    # How many ports to try before giving up. One machine can host several
+    # workers, and with --network host they share the host's ports — so the
+    # second one to start finds 47100 taken. The port number itself does not
+    # have to be the configured one: peers are found by id, and the address
+    # a peer dials is announced, not assumed.
+    PORT_ATTEMPTS = 10
+
     def _build(self):
+        """The node, on the configured port or the next free one.
+
+        A busy port used to surface as a Rust error nested eight levels deep —
+        `Transport(Left(Left(Left(Os { code: 98 ... }))))` — and cost the node
+        its direct path entirely.
+        """
+        last: Optional[BaseException] = None
+        for offset in range(self.PORT_ATTEMPTS):
+            port = self.port + offset
+            try:
+                node = self._build_on(port)
+            except Exception as exc:  # noqa: BLE001 - re-raised below
+                if not _address_in_use(exc):
+                    raise
+                last = exc
+                continue
+            if offset:
+                logger.warning(
+                    "port %d was already in use (another worker on this host?); "
+                    "this node took %d instead. Open %d, not %d, if you forward "
+                    "ports for it",
+                    self.port,
+                    port,
+                    port,
+                    self.port,
+                )
+                self.port = port
+            return node
+        raise P2PUnavailable(
+            f"ports {self.port}-{self.port + self.PORT_ATTEMPTS - 1} are all in "
+            f"use on this host. With --network host every worker shares the "
+            f"host's ports, so give each one its own LOOM_P2P_PORT"
+        ) from last
+
+    def _build_on(self, port: int):
         from lattica import Lattica
 
         key_dir = self._usable_key_dir()
@@ -262,8 +316,8 @@ class PeerNode:
             Lattica.builder()
             .with_listen_addrs(
                 [
-                    f"/ip4/0.0.0.0/tcp/{self.port}",
-                    f"/ip4/0.0.0.0/udp/{self.port}/quic-v1",
+                    f"/ip4/0.0.0.0/tcp/{port}",
+                    f"/ip4/0.0.0.0/udp/{port}/quic-v1",
                 ]
             )
             # A stable identity across restarts (see DEFAULT_KEY_DIR).
