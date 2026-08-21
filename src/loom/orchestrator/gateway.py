@@ -193,6 +193,7 @@ class ControlGatewayServicer(gateway_pb2_grpc.ControlGatewayServicer):
                             # other worker. Empty when we run no p2p node, in
                             # which case it keeps relaying through us.
                             rendezvous=self.controller.rendezvous_addrs(),
+                            relays=self.controller.relay_addrs(),
                         )
                     )
                 )

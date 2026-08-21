@@ -74,6 +74,12 @@ message RegisterAck {
   // through a shared entry point. Empty when the orchestrator runs no p2p node,
   // in which case workers keep relaying through it as they always have.
   repeated string rendezvous = 4;
+  // Circuit-relay servers. A worker that nothing can dial into reserves a slot
+  // on one of these, and its peers reach it through that slot until hole
+  // punching upgrades the link to a direct one. Empty when no relay is run, in
+  // which case unreachable workers simply keep relaying through this
+  // orchestrator — correct, and two wide-area crossings per hop.
+  repeated string relays = 5;
 }
 
 // Sent by the worker once a backend for model_id is up and answering locally.

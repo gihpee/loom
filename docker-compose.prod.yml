@@ -13,6 +13,25 @@
 # inside the join key, so it must be identical inside and outside the container.
 
 services:
+  # The springboard for workers behind NAT: it carries a connection for a few
+  # seconds so two of them can punch through to each other, then steps out.
+  # Not the path activations travel — that is the orchestrator's tunnel, which
+  # keeps working whether this runs or not.
+  relay:
+    build:
+      context: .
+      dockerfile: docker/relay.Dockerfile
+    restart: unless-stopped
+    environment:
+      LOOM_RELAY_PORT: ${LOOM_P2P_RELAY_PORT:-47200}
+      # How the outside world reaches this host. Announced, not detected: the
+      # container cannot know which of its addresses a worker can use.
+      LOOM_RELAY_PUBLIC_HOST: ${LOOM_P2P_RELAY_PUBLIC_HOST:-}
+    ports:
+      - "${LOOM_P2P_RELAY_PORT:-47200}:${LOOM_P2P_RELAY_PORT:-47200}/tcp"
+    volumes:
+      - loom-data:/data
+
   orchestrator:
     build:
       context: .
@@ -31,6 +50,10 @@ services:
       # Direct worker-to-worker activations (docs/P2P_TRANSPORT.md).
       LOOM_P2P: ${LOOM_P2P:-1}
       LOOM_P2P_PORT: ${LOOM_P2P_PORT:-47100}
+      # Circuit-relay servers handed to workers. Without one, a worker nothing
+      # can dial into has no way to negotiate a direct link and every one of
+      # its activations is relayed through this process instead.
+      LOOM_P2P_RELAY: ${LOOM_P2P_RELAY:-}
       LOOM_PARAM_MEM_RATIO: ${LOOM_PARAM_MEM_RATIO:-0.6}
       LOOM_KVCACHE_MEM_RATIO: ${LOOM_KVCACHE_MEM_RATIO:-0.3}
       LOOM_QPS_PER_PIPELINE: ${LOOM_QPS_PER_PIPELINE:-10}

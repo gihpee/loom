@@ -37,6 +37,12 @@ logger = logging.getLogger("loom.orchestrator.rendezvous")
 DEFAULT_PORT = int(os.environ.get("LOOM_P2P_PORT", "47100"))
 DEFAULT_KEY_DIR = os.environ.get("LOOM_P2P_KEY_DIR", "/data/p2p")
 
+# Circuit-relay servers workers should reserve a slot on, comma separated.
+# A separate process from this one on purpose: Lattica speaks the relay CLIENT
+# protocol (/libp2p/circuit/relay/0.2.0/stop) and never the server half, so the
+# rendezvous cannot be the relay however reachable it is. See relay/relay.mjs.
+RELAY_ADDRS = [a.strip() for a in os.environ.get("LOOM_P2P_RELAY", "").split(",") if a.strip()]
+
 
 def lattica_available() -> bool:
     try:

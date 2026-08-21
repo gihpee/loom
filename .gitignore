@@ -5,3 +5,4 @@ __pycache__/
 *.pyc
 .pytest_cache/
 uv.lock.bak
+node_modules/

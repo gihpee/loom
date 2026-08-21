@@ -90,6 +90,11 @@ def build_hardware_message() -> gateway_pb2.HardwareInfo:
     )
 
 
+def _env_relays() -> List[str]:
+    """Relay servers from the environment, for a worker configured by hand."""
+    return [a.strip() for a in os.environ.get("LOOM_P2P_RELAY", "").split(",") if a.strip()]
+
+
 class PeerLayer:
     """This node's direct path: brought up when the rendezvous becomes known.
 
@@ -121,7 +126,7 @@ class PeerLayer:
             "no",
         )
 
-    def on_rendezvous(self, addrs: List[str]) -> None:
+    def on_rendezvous(self, addrs: List[str], relays: Optional[List[str]] = None) -> None:
         """Bring the node up against the orchestrator's rendezvous.
 
         Never fatal, and never retried in a loop: a worker that cannot join the
@@ -143,11 +148,17 @@ class PeerLayer:
                 "neighbours directly: pip install 'loom-worker[p2p]'"
             )
             return
-        # Bootstrap only. The rendezvous is a DHT entry point, not a libp2p
-        # relay service — asking it to be one leaves the node stuck outside the
-        # network. Traffic that cannot go directly uses the orchestrator's own
-        # tunnel, which every message already travels today.
-        options = {"bootstraps": addrs}
+        # The rendezvous is a DHT entry point and nothing else — pointing the
+        # relay client at it leaves the node waiting for a reservation that
+        # never comes (measured: 15 s and zero peers). A real circuit-relay
+        # server is a separate process; see relay/relay.mjs.
+        #
+        # The relay is what makes hole punching possible at all for a node
+        # nothing can dial into: it needs a working channel to agree on the
+        # moment to punch through. Without one such a node can only be reached
+        # by relaying its activations through the orchestrator.
+        relay_addrs = [a for a in (relays or []) if a.strip()] or _env_relays()
+        options = {"bootstraps": addrs, "relay_servers": relay_addrs}
         if self._port is not None:
             options["port"] = self._port
         if self._key_dir:

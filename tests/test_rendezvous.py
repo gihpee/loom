@@ -153,3 +153,56 @@ def test_reachability_is_reported_separately_from_nat_type():
     # Both are still attempted: an unreachable node can dial OUT, and a LAN
     # pair works without AutoNAT ever confirming anything.
     assert view["open"]["dialable"] and view["closed"]["dialable"]
+
+
+# --------------------------------------------------------------- relay wiring
+def test_relay_addresses_are_configured_not_discovered(monkeypatch):
+    """A relay is infrastructure somebody stood up, not something to find.
+
+    It is also a SEPARATE process from the rendezvous: Lattica announces
+    /libp2p/circuit/relay/0.2.0/stop and never the /hop half, so the
+    orchestrator's own node cannot be the relay however reachable it is.
+    """
+    import importlib
+
+    import loom.orchestrator.rendezvous as rdv
+
+    monkeypatch.setenv("LOOM_P2P_RELAY", "/ip4/1.2.3.4/tcp/47200/p2p/12D3KooWa, ")
+    assert importlib.reload(rdv).RELAY_ADDRS == ["/ip4/1.2.3.4/tcp/47200/p2p/12D3KooWa"]
+
+    monkeypatch.delenv("LOOM_P2P_RELAY", raising=False)
+    assert importlib.reload(rdv).RELAY_ADDRS == []
+
+
+def test_a_worker_takes_the_relay_from_the_registration_ack(monkeypatch):
+    """The same message that says where the rendezvous is says where to reserve."""
+    from loom_worker.main import PeerLayer
+
+    monkeypatch.delenv("LOOM_P2P_RELAY", raising=False)
+    monkeypatch.setenv("LOOM_P2P", "1")
+    captured = {}
+
+    class FakeNode:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+        def start(self, on_message):
+            raise RuntimeError("not starting a real node in this test")
+
+    monkeypatch.setattr("loom_worker.main.PeerNode", FakeNode)
+    monkeypatch.setattr("loom_worker.main.lattica_available", lambda: True)
+
+    layer = PeerLayer(SimpleNamespace(deliver_direct=lambda m: None))
+    layer.on_rendezvous(["/ip4/1.1.1.1/tcp/47100/p2p/12D3KooWr"], ["/ip4/2.2.2.2/tcp/47200/p2p/12D3KooWl"])
+
+    assert captured["bootstraps"] == ["/ip4/1.1.1.1/tcp/47100/p2p/12D3KooWr"]
+    assert captured["relay_servers"] == ["/ip4/2.2.2.2/tcp/47200/p2p/12D3KooWl"]
+    assert layer.node is None, "a node that failed to start must not be kept"
+
+
+def test_a_worker_can_be_given_a_relay_by_hand(monkeypatch):
+    """For a node configured outside the orchestrator's reach."""
+    from loom_worker.main import _env_relays
+
+    monkeypatch.setenv("LOOM_P2P_RELAY", "/ip4/9.9.9.9/tcp/47200/p2p/12D3KooWz")
+    assert _env_relays() == ["/ip4/9.9.9.9/tcp/47200/p2p/12D3KooWz"]

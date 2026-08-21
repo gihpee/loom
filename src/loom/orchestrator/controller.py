@@ -252,6 +252,18 @@ class MultiModelController:
         node = self.rendezvous
         return list(node.multiaddrs()) if node is not None else []
 
+    def relay_addrs(self) -> List[str]:
+        """Circuit-relay servers a worker should reserve a slot on.
+
+        Read straight from configuration rather than discovered: a relay is a
+        deliberate piece of infrastructure someone stood up, not something the
+        orchestrator can find. Empty means workers with no reachable address
+        keep relaying their activations through this process instead.
+        """
+        from loom.orchestrator.rendezvous import RELAY_ADDRS
+
+        return list(RELAY_ADDRS)
+
     async def on_telemetry(self, session: WorkerSession, report) -> None:
         self.node_last_seen[session.node_id] = time.time()
         # A worker learns where the rendezvous is from its registration ack, so

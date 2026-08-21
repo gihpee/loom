@@ -188,7 +188,10 @@ class GatewayClient:
                 # the p2p node comes up here rather than at process start.
                 if self.on_rendezvous is not None:
                     try:
-                        self.on_rendezvous(list(msg.register_ack.rendezvous))
+                        self.on_rendezvous(
+                            list(msg.register_ack.rendezvous),
+                            list(msg.register_ack.relays),
+                        )
                     except Exception:
                         logger.exception("bringing up the p2p node failed")
             else:
