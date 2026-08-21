@@ -241,17 +241,6 @@ def test_the_heartbeat_reports_a_relay_only_node_honestly(monkeypatch):
 
 
 # ------------------------------------------------- a link worth using at all
-def expire(table):
-    """Age every verdict out, as the re-check interval does.
-
-    Not the same as clearing the table: the previous verdict has to survive
-    its own expiry, or there is nothing for the hysteresis to hold on to and
-    every re-check starts from scratch.
-    """
-    for peer_id, (verdict, _deadline, direct, relayed) in list(table._worth.items()):
-        table._worth[peer_id] = (verdict, 0.0, direct, relayed)
-
-
 def worth_table(peer_rtt, relay_rtt, peer_relay_rtt=1.0, **kw):
     """A table whose only interesting property is what the two paths cost."""
     sent = []
@@ -265,6 +254,8 @@ def worth_table(peer_rtt, relay_rtt, peer_relay_rtt=1.0, **kw):
     neighbour = peer(1)
     neighbour.relay_rtt_ms = peer_relay_rtt
     table.set_neighbours("p#0", [neighbour])
+    # The sampler measures; the send path only reads what it left behind.
+    table.refresh()
     return table, sent
 
 
@@ -311,12 +302,13 @@ def test_a_link_is_re_examined_so_hole_punching_can_win_later():
     neighbour = peer(1)
     neighbour.relay_rtt_ms = 20.0
     table.set_neighbours("p#0", [neighbour])
+    table.refresh()
     assert table.send("p#0", 1, {"s": 1}, relay=lambda m: None) == "relay"
 
     rtt["value"] = 15.0  # hole punching succeeded
-    assert table.send("p#0", 1, {"s": 2}, relay=lambda m: None) == "relay"  # cached
+    assert table.send("p#0", 1, {"s": 2}, relay=lambda m: None) == "relay"  # not sampled yet
 
-    expire(table)  # what the re-check interval does on its own
+    table.refresh()  # what the sampler thread does on its own
     assert table.send("p#0", 1, {"s": 3}, relay=lambda m: None) == "direct"
 
 
@@ -565,15 +557,16 @@ def test_two_paths_of_the_same_cost_do_not_make_the_route_flap():
     neighbour = peer(1)
     neighbour.relay_rtt_ms = 90.0
     table.set_neighbours("p#0", [neighbour])
+    table.refresh()
     assert table.send("p#0", 1, {"s": 1}, relay=lambda m: None) == "direct"
 
     for jitter in (99.0, 105.0, 96.0, 102.0):  # both sides of 98 ms
         rtt["value"] = jitter
-        expire(table)  # what the re-check interval does on its own
+        table.refresh()  # what the sampler thread does on its own
         assert table.send("p#0", 1, {"s": 1}, relay=lambda m: None) == "direct", jitter
 
     rtt["value"] = 160.0  # a genuine change, well past the band
-    expire(table)
+    table.refresh()
     assert table.send("p#0", 1, {"s": 1}, relay=lambda m: None) == "relay"
 
 
@@ -581,3 +574,91 @@ def test_a_peer_that_never_reported_its_distance_is_trusted():
     """Guessing the unknown half as zero is exactly what rejected good links."""
     table, sent = worth_table(peer_rtt=94.0, relay_rtt=8.0, peer_relay_rtt=0.0)
     assert table.send("p#0", 1, {"s": 1}, relay=lambda m: None) == "direct"
+
+
+# ------------------------------------------- nothing may wait on the p2p stack
+def test_neither_the_token_path_nor_the_heartbeat_enters_the_p2p_runtime():
+    """The failure this prevents took a whole run down.
+
+    Measuring means calling into the p2p runtime. Both the send path and the
+    heartbeat used to do it, so when the runtime got busy — which it does, at
+    exactly the moment the link is in trouble — sends stalled at 100 ms of
+    real latency and one agent went four minutes without a heartbeat while its
+    GPU was serving normally.
+
+    The sampler measures. Everything else reads what it left behind.
+    """
+    calls = {"rtt": 0, "relay": 0}
+
+    def measured_rtt(_peer_id):
+        calls["rtt"] += 1
+        return 40.0
+
+    def measured_relay():
+        calls["relay"] += 1
+        return 30.0
+
+    table = LinkTable(
+        send_direct=lambda pid, msg: None,
+        dial=lambda pid, addrs: None,
+        rtt=measured_rtt,
+        relay_rtt=measured_relay,
+    )
+    neighbour = peer(1)
+    neighbour.relay_rtt_ms = 30.0
+    table.set_neighbours("p#0", [neighbour])
+    calls["rtt"] = calls["relay"] = 0
+
+    for step in range(20):
+        table.send("p#0", 1, {"s": step}, relay=lambda m: None)
+    table.snapshot()          # what every heartbeat asks for
+    table.direct_available("p#0", 1)
+    assert calls == {"rtt": 0, "relay": 0}, "the hot path measured something"
+
+    table.refresh()           # the sampler, and only the sampler
+    assert calls["rtt"] == 1 and calls["relay"] == 1
+
+
+def test_an_inbound_message_is_accepted_without_waiting_for_the_stage():
+    """The handler runs on the p2p runtime's thread. It must not linger there.
+
+    Delivery is a blocking HTTP POST to the local stage with a 60 s timeout,
+    and it used to happen inline — occupying a runtime thread while the sender
+    waited for a reply that could not come until it finished. Two nodes doing
+    that to each other at every token wedged both.
+    """
+    import threading
+    import time
+
+    from loom_worker.p2p.peer import _make_handler
+
+    started = threading.Event()
+    release = threading.Event()
+    delivered = []
+
+    def slow_deliver(message):
+        started.set()
+        release.wait(timeout=5)
+        delivered.append(message)
+
+    class FakeLattica:
+        """Enough of the stack for the handler to register itself against."""
+
+        def register_service(self, service):
+            self.service = service
+
+    handler = _make_handler(FakeLattica(), slow_deliver)
+
+    began = time.monotonic()
+    assert handler.stage_forward({"step": 1}) == {"ok": True}
+    took = time.monotonic() - began
+    assert took < 0.5, f"the handler blocked for {took:.2f}s waiting on delivery"
+    assert started.wait(timeout=5), "the message was never picked up"
+    assert not delivered, "it should still be in flight while we hold it"
+
+    release.set()
+    for _ in range(50):
+        if delivered:
+            break
+        time.sleep(0.02)
+    assert delivered == [{"step": 1}], "the message was accepted but never delivered"

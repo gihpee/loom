@@ -56,7 +56,12 @@ DEFAULT_KEY_DIR = os.environ.get(
 # How long one direct send may take before the relay is used instead. A token
 # budget is a couple of hundred milliseconds, so anything here is expensive —
 # but the cooldown means it is paid once per failure, not once per token.
-SEND_TIMEOUT_S = float(os.environ.get("LOOM_P2P_SEND_TIMEOUT_S", "5"))
+SEND_TIMEOUT_S = float(os.environ.get("LOOM_P2P_SEND_TIMEOUT_S", "2"))
+
+# How many undelivered direct messages to hold. A stage that has fallen far
+# enough behind to fill this is not going to catch up, and the queue is the
+# only thing standing between that and unbounded memory.
+INBOX_DEPTH = int(os.environ.get("LOOM_P2P_INBOX_DEPTH", "256"))
 
 
 class P2PUnavailable(RuntimeError):
@@ -540,8 +545,35 @@ def _make_handler(lattica, deliver: Callable[[dict], dict]):
     Defined here rather than at module scope because the decorators need the
     lattica package, which is optional. The service name is the class name, so
     both ends agree on `LoomStage` without configuring anything.
+
+    The handler ACCEPTS the message and returns; the work happens on a thread
+    of ours. It used to do the delivery inline, and delivery means a blocking
+    HTTP POST to the local stage — up to a minute of it — on a thread that
+    belongs to the p2p runtime. While it sat there the runtime had a thread
+    fewer for everything else: the reply the sender was waiting for, the next
+    activation, and the round-trip measurements. Two nodes doing this to each
+    other at every token wedged both: sends timed out at 100 ms of real
+    latency, and one agent went four minutes without a heartbeat.
+
+    One worker thread, not a pool: stage messages for a request must arrive in
+    the order they were sent, and a pool would race them.
     """
+    import queue
+    import threading
+
     from lattica import ConnectionHandler, rpc_method
+
+    inbox: "queue.Queue[dict]" = queue.Queue(maxsize=INBOX_DEPTH)
+
+    def pump() -> None:
+        while True:
+            message = inbox.get()
+            try:
+                deliver(message)
+            except Exception:
+                logger.exception("delivering a direct stage message failed")
+
+    threading.Thread(target=pump, name="loom-p2p-inbox", daemon=True).start()
 
     class LoomStage(ConnectionHandler):
         def __init__(self, node) -> None:
@@ -549,6 +581,13 @@ def _make_handler(lattica, deliver: Callable[[dict], dict]):
 
         @rpc_method
         def stage_forward(self, message):
-            return deliver(message)
+            try:
+                inbox.put_nowait(message)
+            except queue.Full:
+                # Refusing loudly beats accepting what we cannot deliver: the
+                # sender sees a failure, quarantines the link and relays.
+                logger.error("the direct inbox is full; refusing the message")
+                return {"ok": False, "error": "inbox full"}
+            return {"ok": True}
 
     return LoomStage(lattica)

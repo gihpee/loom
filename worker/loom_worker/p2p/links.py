@@ -35,9 +35,10 @@ logger = logging.getLogger("loom_worker.p2p.links")
 # costs one relayed hop and keeps the pipeline moving.
 DIRECT_COOLDOWN_S = 30.0
 
-# How often the worth of a link is re-examined. Long enough that the check is
-# free, short enough that a link which becomes direct (hole punching succeeds
-# some seconds after the first dial) starts being used within the same request.
+# How often the worth of a link is re-examined, on the sampler thread. Long
+# enough that the measuring is free, short enough that a link which becomes
+# direct (hole punching succeeds some seconds after the first dial) starts
+# being used within the same request.
 WORTH_RECHECK_S = 30.0
 
 # How much better the other path must be before the route is changed. Without
@@ -159,7 +160,20 @@ class LinkTable:
                 return False
             if time.monotonic() < self._blocked_until.get(peer.peer_id, 0.0):
                 return False
-        return self._worth_using(peer)
+            cached = self._worth.get(peer.peer_id)
+        # Cache only, never a measurement. Asking the p2p stack anything means
+        # calling into its runtime, and this runs on the token path and on the
+        # heartbeat path — both of which stalled outright when the runtime was
+        # busy. `refresh()` does the asking, on a thread of its own.
+        return True if cached is None else cached[0]
+
+    def refresh(self) -> None:
+        """Re-measure every link. Called from the sampler thread, only."""
+        with self._lock:
+            peers = list({p.peer_id: p for p in self._neighbours.values()}.values())
+        for peer in peers:
+            if peer.dialable:
+                self._worth_using(peer)
 
     def _worth_using(self, peer: Neighbour) -> bool:
         """Is reaching this peer over libp2p cheaper than relaying to it?
@@ -192,8 +206,6 @@ class LinkTable:
         now = time.monotonic()
         with self._lock:
             cached = self._worth.get(peer.peer_id)
-            if cached is not None and now < cached[1]:
-                return cached[0]
             previous = cached[0] if cached is not None else None
 
         direct = self._safe(lambda: self._rtt(peer.peer_id))
@@ -203,7 +215,7 @@ class LinkTable:
         relayed = (near or 0.0) + far
 
         with self._lock:
-            self._worth[peer.peer_id] = (verdict, now + WORTH_RECHECK_S, direct, relayed)
+            self._worth[peer.peer_id] = (verdict, now, direct, relayed)
             if not verdict:
                 self.stats["not_worth"] += 1
         if previous is not None and previous == verdict:

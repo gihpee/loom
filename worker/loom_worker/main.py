@@ -91,6 +91,11 @@ def build_hardware_message() -> gateway_pb2.HardwareInfo:
     )
 
 
+# How often the p2p state is re-measured. Nothing waits on this thread, so it
+# can be leisurely; what matters is that nothing else does the measuring.
+SAMPLE_INTERVAL_S = float(os.environ.get("LOOM_P2P_SAMPLE_S", "10"))
+
+
 def _env_relays() -> List[str]:
     """Relay servers from the environment, for a worker configured by hand."""
     return [a.strip() for a in os.environ.get("LOOM_P2P_RELAY", "").split(",") if a.strip()]
@@ -115,6 +120,12 @@ class PeerLayer:
         self.links = LinkTable()
         self.node: Optional[PeerNode] = None
         self.identity = None
+        # Everything the heartbeat reports about reachability, sampled on the
+        # sampler thread. Read from a cache and never measured here: asking the
+        # p2p stack means entering its runtime, and a heartbeat that does that
+        # stops arriving the moment the runtime is busy. One node went four
+        # minutes without one while its GPU was serving normally.
+        self._visible: List[str] = []
         # Overrides for the node's port and key directory. Defaults come from
         # the environment; both are explicit here so a test can run several
         # agents in one process — two nodes sharing a key directory interfere,
@@ -174,6 +185,7 @@ class PeerLayer:
             )
             return
         self.node = node
+        self._start_sampler()
         self.links.attach(
             send_direct=node.send,
             dial=node.warm,
@@ -225,6 +237,26 @@ class PeerLayer:
                     self.node.port if self.node else DEFAULT_P2P_PORT,
                 )
 
+    def _start_sampler(self) -> None:
+        """Keep the measurements fresh, away from every path that matters.
+
+        A daemon thread, and a slow one on purpose: the numbers it collects
+        change on the scale of a network path settling, not of a token.
+        """
+        import threading
+        import time as _time
+
+        def sample() -> None:
+            while self.node is not None:
+                try:
+                    self._visible = self.node.visible_addrs()
+                    self.links.refresh()
+                except Exception:
+                    logger.debug("sampling the p2p state failed", exc_info=True)
+                _time.sleep(SAMPLE_INTERVAL_S)
+
+        threading.Thread(target=sample, name="loom-p2p-sampler", daemon=True).start()
+
     def status(self):
         """What this node reports about its p2p state on every heartbeat.
 
@@ -239,7 +271,7 @@ class PeerLayer:
         # The counters are reported even with no identity at all: a node with
         # no p2p stack still relays every message, and that is exactly what the
         # orchestrator needs to see.
-        visible = self.node.visible_addrs() if self.node is not None else []
+        visible = self._visible
         return worker_control_pb2.PeerStatus(
             peer_id=identity.peer_id if identity else "",
             listen_addrs=identity.listen_addrs if identity else [],
