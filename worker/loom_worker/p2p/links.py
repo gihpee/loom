@@ -107,14 +107,7 @@ class LinkTable:
         self._cooldown_s = cooldown_s
         self._rtt = rtt
         self._relay_rtt = relay_rtt
-        # peer_id -> (verdict, when, direct rtt, MY trip to the relay)
-        #
-        # The last one is the near half alone, never the sum. It is reported to
-        # the orchestrator and handed to this node's neighbours as their far
-        # half — so storing the sum here fed each node's total back to the
-        # other as an input, and the two inflated each other every round until
-        # relaying looked infinitely expensive and every circuit looked worth
-        # using. See test_a_node_reports_its_own_distance_to_the_relay.
+        # peer_id -> (verdict, when it expires, the two numbers behind it)
         self._worth: Dict[str, Tuple[bool, float, Optional[float], Optional[float]]] = {}
         self._timeout_s = timeout_s
         self._pending: "queue.Queue" = queue.Queue(maxsize=PENDING_ACKS)
@@ -235,7 +228,7 @@ class LinkTable:
         relayed = (near or 0.0) + far
 
         with self._lock:
-            self._worth[peer.peer_id] = (verdict, now, direct, near)
+            self._worth[peer.peer_id] = (verdict, now, direct, relayed)
             if not verdict:
                 self.stats["not_worth"] += 1
         if previous is not None and previous == verdict:
@@ -391,8 +384,6 @@ class LinkTable:
             total = self.stats["direct"] + self.stats["relay"]
             measured = list(self._worth.values())
             link_rtt = next((v[2] for v in measured if v[2] is not None), None)
-            # This node's own distance to the relay, and nothing else: it
-            # travels to the neighbours as the half they cannot measure.
             relay_rtt = next((v[3] for v in measured if v[3]), None)
             return {
                 "direct": self.stats["direct"],

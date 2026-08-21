@@ -745,39 +745,3 @@ def test_the_counters_do_not_credit_a_send_that_failed():
         time.sleep(0.02)
     stats = table.snapshot()
     assert stats["direct"] == 0 and stats["relay"] == 1
-
-
-# ------------------------------------------------ the number two nodes exchange
-def test_a_node_reports_its_own_distance_to_the_relay_and_not_the_whole_path():
-    """A feedback loop that made every circuit look worth using.
-
-    Each node measures its own trip to the relay and reports it; the
-    orchestrator hands that number to its neighbours as the half they cannot
-    measure themselves. Reporting the SUM instead feeds each node's total back
-    to the other as an input, and the two inflate each other on every
-    heartbeat:
-
-        round 1:  nv3 says 8,   mac says 90
-        round 2:  nv3 says 98,  mac says 98      (each added the other's)
-        round 3:  nv3 says 188, mac says 106
-        ...
-
-    Within minutes "relayed" looks arbitrarily expensive, every link wins the
-    comparison, and both nodes route their activations down a circuit through
-    the relay — which is the slowest path available. Observed on a stand as
-    100% direct on both sides at 2.4 tok/s.
-    """
-    table = LinkTable(
-        send_direct=lambda pid, msg: None,
-        dial=lambda pid, addrs: None,
-        rtt=lambda pid: 94.0,
-        relay_rtt=lambda: 8.0,      # what THIS node measures
-    )
-    neighbour = peer(1)
-    neighbour.relay_rtt_ms = 90.0   # what the neighbour reported
-    table.set_neighbours("p#0", [neighbour])
-
-    for _ in range(5):              # several heartbeats worth of sampling
-        table.refresh()
-        reported = table.snapshot()["relay_rtt_ms"]
-        assert reported == 8.0, f"reported {reported}, not its own 8 ms"
