@@ -56,6 +56,14 @@ message PeerRoute {
   // relayed path costs my trip to the relay plus this one, and a node cannot
   // know the far half on its own.
   double relay_rtt_ms = 5;
+  // Can anything actually open a connection TO this peer? True only when it
+  // has an address of its own that the outside world can reach — a circuit
+  // address does not count, because reaching a peer "through the relay" is
+  // the relay path with extra steps.
+  //
+  // This, and not a latency measurement, decides whether the direct path is
+  // used. See docs/P2P_TRANSPORT.md.
+  bool reachable = 6;
 }
 
 message PipelineTopology {

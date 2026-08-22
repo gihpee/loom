@@ -157,17 +157,12 @@ function peerCell(p) {
             : (p.dialable ? `<span class="ok">peer</span>` : `<span class="dim">relay</span>`)));
   if (!total) return label + ` <span class="dim">—</span>`;
   const cls = share >= 90 ? "ok" : (share > 0 ? "warn" : "bad");
-  // A link refused as too expensive is not a link that failed to come up, and
-  // "0% прямо" alone cannot tell those apart. The two numbers are the whole
-  // argument: reaching the peer costs more than reaching the relay, so the
-  // "direct" path was a circuit through it.
-  const refused = p.not_worth
-    ? `<br><span class="dim">не выгодно: ${Math.round(p.link_rtt_ms)} ms ` +
-      `против ${Math.round(p.relay_rtt_ms)} ms до relay</span>`
-    : "";
-  return label + ` <span class="${cls}">${share}% прямо</span>` +
+  // "прямо" was a lie for most of this system's life: a circuit through the
+  // relay is a libp2p connection like any other, and it was counted here as
+  // if the two workers were talking to each other. They were not.
+  return label + ` <span class="${cls}">${share}% по p2p</span>` +
     `<br><span class="dim">${p.direct}/${total}` +
-    `${p.fallbacks ? ` · ${p.fallbacks} откат` : ""}</span>` + refused;
+    `${p.fallbacks ? ` · ${p.fallbacks} откат` : ""}</span>`;
 }
 
 // ------------------------------------------------------------------ views

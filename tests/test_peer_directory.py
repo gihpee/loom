@@ -80,7 +80,7 @@ def test_a_symmetric_nat_node_is_never_offered_for_direct_dialling():
     assert directory.get("n1").dialable is False
 
     rows = directory.routes_for([(0, "n1")])
-    assert rows == [(0, "n1", "", [], 0.0)], "a symmetric-NAT node must be relay-only"
+    assert rows == [(0, "n1", "", [], 0.0, False)], "a symmetric-NAT node must be relay-only"
 
 
 def test_a_worker_with_no_p2p_stack_is_recorded_but_not_dialable():
@@ -89,11 +89,11 @@ def test_a_worker_with_no_p2p_stack_is_recorded_but_not_dialable():
     directory.remember("old", None, observed_host="203.0.113.9")
     record = directory.get("old")
     assert record is not None and record.dialable is False
-    assert directory.routes_for([(1, "old")]) == [(1, "old", "", [], 0.0)]
+    assert directory.routes_for([(1, "old")]) == [(1, "old", "", [], 0.0, False)]
 
 
 def test_a_node_nobody_registered_is_relay_only():
-    assert PeerDirectory().routes_for([(2, "ghost")]) == [(2, "ghost", "", [], 0.0)]
+    assert PeerDirectory().routes_for([(2, "ghost")]) == [(2, "ghost", "", [], 0.0, False)]
 
 
 # ------------------------------------------------------------------ directory

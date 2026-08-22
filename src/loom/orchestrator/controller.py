@@ -742,8 +742,9 @@ class MultiModelController:
                 peer_id=peer_id,
                 addrs=addrs,
                 relay_rtt_ms=relay_rtt_ms,
+                reachable=reachable,
             )
-            for stage_index, node_id, peer_id, addrs, relay_rtt_ms in (
+            for stage_index, node_id, peer_id, addrs, relay_rtt_ms, reachable in (
                 self.peers.routes_for(stages)
             )
         ]

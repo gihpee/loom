@@ -147,8 +147,10 @@ def test_the_link_table_drives_a_real_peer(two_nodes):
     links = LinkTable(send_direct=b.send, dial=b.warm)
     links.set_neighbours(
         "p#0",
+        # reachable: both nodes are on loopback, so this is a real one-hop
+        # connection — the condition for taking the direct path at all.
         [Neighbour(stage_index=1, node_id="node-a", peer_id=id_a.peer_id,
-                   addrs=list(id_a.listen_addrs))]
+                   addrs=list(id_a.listen_addrs), reachable=True)]
     )
     relayed = []
     path = links.send("p#0", 1, {"kind": "activations", "step": 1}, relay=relayed.append)
@@ -225,9 +227,16 @@ def test_two_workers_meet_through_the_orchestrator_and_then_bypass_it(tmp_path_f
         topology = SimpleNamespace(
             peers=[
                 SimpleNamespace(
-                    stage_index=i, node_id=n, peer_id=p, addrs=a, relay_rtt_ms=r
+                    stage_index=i,
+                    node_id=n,
+                    peer_id=p,
+                    addrs=a,
+                    relay_rtt_ms=r,
+                    # Both peers are on loopback here: genuinely dialable, no
+                    # relay in sight. That is what makes the direct path apply.
+                    reachable=True,
                 )
-                for i, n, p, a, r in rows
+                for i, n, p, a, r, _reachable in rows
             ]
         )
         peers_a.links.set_neighbours(

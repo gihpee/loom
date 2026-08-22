@@ -37,8 +37,21 @@ def table(**kwargs):
     return links, sent, dialled
 
 
-def peer(stage, node="n2", pid="12D3KooWPeer", addrs=("/ip4/10.0.0.2/tcp/47100",)):
-    return Neighbour(stage_index=stage, node_id=node, peer_id=pid, addrs=list(addrs))
+def peer(stage, node="n2", pid="12D3KooWPeer", addrs=("/ip4/10.0.0.2/tcp/47100",),
+         reachable=True):
+    """A neighbour something can actually dial, unless a test says otherwise.
+
+    Reachability is what decides whether the direct path is used at all: with
+    neither end able to accept a connection, libp2p can only build a circuit
+    through the relay, which is the relay path by another name.
+    """
+    return Neighbour(
+        stage_index=stage,
+        node_id=node,
+        peer_id=pid,
+        addrs=list(addrs),
+        reachable=reachable,
+    )
 
 
 # ------------------------------------------------------------- the happy path
@@ -242,107 +255,78 @@ def test_the_heartbeat_reports_a_relay_only_node_honestly(monkeypatch):
 
 
 # ------------------------------------------------- a link worth using at all
-def worth_table(peer_rtt, relay_rtt, peer_relay_rtt=1.0, **kw):
-    """A table whose only interesting property is what the two paths cost."""
+def one_link(peer_reachable, self_reachable):
+    """A table with a single neighbour and a stated topology."""
     sent = []
     table = LinkTable(
         send_direct=lambda pid, msg: sent.append((pid, msg)),
         dial=lambda pid, addrs: None,
-        rtt=lambda pid: peer_rtt,
-        relay_rtt=lambda: relay_rtt,
-        **kw,
     )
-    neighbour = peer(1)
-    neighbour.relay_rtt_ms = peer_relay_rtt
-    table.set_neighbours("p#0", [neighbour])
-    # The sampler measures; the send path only reads what it left behind.
-    table.refresh()
+    table.set_self_reachable(self_reachable)
+    table.set_neighbours("p#0", [peer(1, reachable=peer_reachable)])
     return table, sent
 
 
-def test_a_link_costlier_than_the_relay_is_not_used():
-    """libp2p says "connected" for a circuit through the relay too.
+def test_with_neither_end_reachable_there_is_no_direct_path_to_use():
+    """The failure this rule ends, stated as plainly as it can be.
 
-    That is how this went wrong on a real stand: hole punching failed, every
-    activation went worker -> relay -> worker, transport per token rose from
-    200 ms to 320 ms, the run halved in speed — and the admin page reported
-    "100% прямо" the whole time, because a circuit is a connection like any
-    other as far as the API is concerned.
+    Two workers that both sit behind NAT cannot be connected by libp2p except
+    through a circuit — and Loom runs its relay on the orchestrator's own
+    machine, so that circuit is the same two hops as the tunnel, over the same
+    wire, with the tunnel's advantages removed. Using it is strictly worse,
+    and on a real stand it was: 6 tok/s over the circuit against 8 through the
+    orchestrator, same hardware, same minute.
 
-    The relay sits on the orchestrator's machine, so reaching a peer must cost
-    less than reaching the relay for the direct path to be saving anything at
-    all. A circuit runs THROUGH the relay and so can never pass this test.
+    libp2p reports such a circuit as an ordinary connection, which is how it
+    got counted as "direct" for so long.
     """
-    table, sent = worth_table(peer_rtt=180.0, relay_rtt=60.0, peer_relay_rtt=20.0)
+    table, sent = one_link(peer_reachable=False, self_reachable=False)
     relayed = []
-    assert table.send("p#0", 1, {"step": 1}, relay=relayed.append) == "relay"
+    assert table.send("p#0", 1, {"s": 1}, relay=relayed.append) == "relay"
     assert not sent and len(relayed) == 1
-    assert table.snapshot()["not_worth"] == 1
 
 
-def test_a_genuinely_direct_link_is_used():
-    table, sent = worth_table(peer_rtt=12.0, relay_rtt=60.0, peer_relay_rtt=20.0)
-    assert table.send("p#0", 1, {"step": 1}, relay=lambda m: None) == "direct"
+def test_a_reachable_peer_is_dialled():
+    """One hop instead of two, and no measurement needed to know it."""
+    table, sent = one_link(peer_reachable=True, self_reachable=False)
+    assert table.send("p#0", 1, {"s": 1}, relay=lambda m: None) == "direct"
     assert len(sent) == 1
 
 
-def test_a_link_is_re_examined_so_hole_punching_can_win_later():
-    """A circuit becomes a direct connection seconds later, or never.
+def test_being_reachable_ourselves_is_enough():
+    """A connection has two ends and either one may be the one that opens it.
 
-    Deciding once at deployment would settle the question before the answer
-    exists: DCUtR upgrades the connection after the first dial, and a verdict
-    taken at that moment is a verdict about the circuit.
+    If peers can dial US, the connection they open is a real one, and messages
+    in both directions travel over it. Requiring the far end to be reachable
+    too would throw away half the cases that work.
     """
-    rtt = {"value": 180.0}
-    table = LinkTable(
-        send_direct=lambda pid, msg: None,
-        dial=lambda pid, addrs: None,
-        rtt=lambda pid: rtt["value"],
-        relay_rtt=lambda: 60.0,
-    )
-    neighbour = peer(1)
-    neighbour.relay_rtt_ms = 20.0
-    table.set_neighbours("p#0", [neighbour])
-    table.refresh()
-    assert table.send("p#0", 1, {"s": 1}, relay=lambda m: None) == "relay"
-
-    rtt["value"] = 15.0  # hole punching succeeded
-    assert table.send("p#0", 1, {"s": 2}, relay=lambda m: None) == "relay"  # not sampled yet
-
-    table.refresh()  # what the sampler thread does on its own
-    assert table.send("p#0", 1, {"s": 3}, relay=lambda m: None) == "direct"
-
-
-def test_without_measurements_the_link_is_used_as_before():
-    """A missing number is not evidence of a bad link.
-
-    Nodes with no relay configured have nothing to compare against, and there
-    are no circuits for them to be fooled by either. They must behave exactly
-    as they did before any of this existed.
-    """
-    table, sent = worth_table(peer_rtt=None, relay_rtt=None)
-    assert table.send("p#0", 1, {"step": 1}, relay=lambda m: None) == "direct"
+    table, sent = one_link(peer_reachable=False, self_reachable=True)
+    assert table.send("p#0", 1, {"s": 1}, relay=lambda m: None) == "direct"
     assert len(sent) == 1
 
-    plain = LinkTable(send_direct=lambda pid, msg: None, dial=lambda pid, a: None)
-    plain.set_neighbours("p#0", [peer(1)])
-    assert plain.send("p#0", 1, {"step": 1}, relay=lambda m: None) == "direct"
 
+def test_a_peer_reachable_only_through_the_relay_does_not_count():
+    """"Reachable through the relay" is the relay path wearing a disguise."""
+    from loom.orchestrator.peers import PeerRecord
 
-def test_a_measurement_that_raises_does_not_lose_the_token():
-    """The transport may be mid-reconnect when we ask it anything."""
-
-    def explode(*_):
-        raise RuntimeError("no route")
-
-    table = LinkTable(
-        send_direct=lambda pid, msg: None,
-        dial=lambda pid, addrs: None,
-        rtt=explode,
-        relay_rtt=explode,
+    circuit_only = PeerRecord(
+        node_id="nv3",
+        peer_id="12D3KooWNv3",
+        visible_addrs=[
+            "/ip4/198.51.100.1/tcp/47200/p2p/12D3KooWRelay/p2p-circuit/p2p/12D3KooWNv3"
+        ],
     )
-    table.set_neighbours("p#0", [peer(1)])
-    assert table.send("p#0", 1, {"step": 1}, relay=lambda m: None) == "direct"
+    open_port = PeerRecord(
+        node_id="open",
+        peer_id="12D3KooWOpen",
+        visible_addrs=["/ip4/203.0.113.7/tcp/47100"],
+    )
+    nothing = PeerRecord(node_id="dark", peer_id="12D3KooWDark")
+
+    assert not circuit_only.reachable
+    assert open_port.reachable
+    assert not nothing.reachable
+
 
 # ----------------------------------------- several pipelines on one node
 def test_two_pipelines_on_one_node_do_not_share_routes():
@@ -526,57 +510,6 @@ def test_a_busy_port_does_not_cost_the_node_its_direct_path():
         assert node.port == taken + 1  # and it reports where it actually is
     finally:
         hog.close()
-
-
-def test_the_near_half_of_the_relay_path_is_not_the_whole_of_it():
-    """The numbers are from a real stand, and the old rule got them wrong.
-
-    nv3 sat 8 ms from the relay; the Mac it talked to sat 90 ms from the same
-    relay. Comparing the direct link (94 ms) against only nv3's own trip to
-    the relay (8 ms) rejected it — while the actual relayed path cost 98 ms
-    and was the slower of the two. A node cannot measure the far half, so the
-    peer reports it and the orchestrator passes it on.
-    """
-    table, sent = worth_table(peer_rtt=94.0, relay_rtt=8.0, peer_relay_rtt=90.0)
-    assert table.send("p#0", 1, {"s": 1}, relay=lambda m: None) == "direct"
-    assert len(sent) == 1
-
-
-def test_two_paths_of_the_same_cost_do_not_make_the_route_flap():
-    """94 ms against 98 ms, re-examined every 30 s, flipped every time.
-
-    Each flip costs a dial, and jitter alone decided the winner. A tie has to
-    resolve to "leave it as it is".
-    """
-    rtt = {"value": 94.0}
-    table = LinkTable(
-        send_direct=lambda pid, msg: None,
-        dial=lambda pid, addrs: None,
-        rtt=lambda pid: rtt["value"],
-        relay_rtt=lambda: 8.0,
-    )
-    neighbour = peer(1)
-    neighbour.relay_rtt_ms = 90.0
-    table.set_neighbours("p#0", [neighbour])
-    table.refresh()
-    assert table.send("p#0", 1, {"s": 1}, relay=lambda m: None) == "direct"
-
-    for jitter in (99.0, 105.0, 96.0, 102.0):  # both sides of 98 ms
-        rtt["value"] = jitter
-        table.refresh()  # what the sampler thread does on its own
-        assert table.send("p#0", 1, {"s": 1}, relay=lambda m: None) == "direct", jitter
-
-    rtt["value"] = 160.0  # a genuine change, well past the band
-    table.refresh()
-    assert table.send("p#0", 1, {"s": 1}, relay=lambda m: None) == "relay"
-
-
-def test_a_peer_that_never_reported_its_distance_is_trusted():
-    """Guessing the unknown half as zero is exactly what rejected good links."""
-    table, sent = worth_table(peer_rtt=94.0, relay_rtt=8.0, peer_relay_rtt=0.0)
-    assert table.send("p#0", 1, {"s": 1}, relay=lambda m: None) == "direct"
-
-
 # ------------------------------------------- nothing may wait on the p2p stack
 def test_neither_the_token_path_nor_the_heartbeat_enters_the_p2p_runtime():
     """The failure this prevents took a whole run down.

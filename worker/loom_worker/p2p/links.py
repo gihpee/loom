@@ -37,17 +37,6 @@ logger = logging.getLogger("loom_worker.p2p.links")
 # costs one relayed hop and keeps the pipeline moving.
 DIRECT_COOLDOWN_S = 30.0
 
-# How often the worth of a link is re-examined, on the sampler thread. Long
-# enough that the measuring is free, short enough that a link which becomes
-# direct (hole punching succeeds some seconds after the first dial) starts
-# being used within the same request.
-WORTH_RECHECK_S = 30.0
-
-# How much better the other path must be before the route is changed. Without
-# it a pair whose two paths cost about the same flips on every re-check, and
-# each flip costs a dial.
-HYSTERESIS = 0.15
-
 # How long to give an acknowledgement before treating the message as lost.
 SEND_TIMEOUT_S = float(os.environ.get("LOOM_P2P_SEND_TIMEOUT_S", "2"))
 
@@ -64,9 +53,12 @@ class Neighbour:
     node_id: str
     peer_id: str = ""
     addrs: List[str] = field(default_factory=list)
-    # What the trip from THIS peer to the relay costs it. The far half of the
-    # relayed path, which cannot be measured from here.
+    # What the trip from THIS peer to the relay costs it. Reported for the
+    # operator's benefit; it decides nothing.
     relay_rtt_ms: float = 0.0
+    # Can anything open a connection TO this peer? A circuit address does not
+    # count — see LinkTable._worth_using.
+    reachable: bool = False
 
     @property
     def dialable(self) -> bool:
@@ -117,9 +109,15 @@ class LinkTable:
         # using. See test_a_node_reports_its_own_distance_to_the_relay.
         self._worth: Dict[str, Tuple[bool, float, Optional[float], Optional[float]]] = {}
         self._timeout_s = timeout_s
+        # Whether peers can dial US. Either end being reachable is enough for
+        # a single-hop connection, so this is half of the rule.
+        self._self_reachable = False
+        # Peers we have already explained ourselves about, so the reason is
+        # logged once rather than on every token.
+        self._told: Dict[str, bool] = {}
         self._pending: "queue.Queue" = queue.Queue(maxsize=PENDING_ACKS)
         self._watcher: Optional[threading.Thread] = None
-        self.stats = {"direct": 0, "relay": 0, "fallbacks": 0, "not_worth": 0}
+        self.stats = {"direct": 0, "relay": 0, "fallbacks": 0}
 
     def attach(self, *, send_direct, dial, rtt=None, relay_rtt=None) -> None:
         """Hand over the p2p node once it exists.
@@ -149,6 +147,7 @@ class LinkTable:
             for peer in peers:
                 self._neighbours[(pipeline_id, peer.stage_index)] = peer
             self._blocked_until.clear()
+            self._told.clear()
         for peer in peers:
             if peer.dialable and self._dial is not None:
                 # Start connecting now, not on the first token: hole punching
@@ -180,109 +179,78 @@ class LinkTable:
                 return False
             if time.monotonic() < self._blocked_until.get(peer.peer_id, 0.0):
                 return False
-            cached = self._worth.get(peer.peer_id)
-        # Cache only, never a measurement. Asking the p2p stack anything means
-        # calling into its runtime, and this runs on the token path and on the
-        # heartbeat path — both of which stalled outright when the runtime was
-        # busy. `refresh()` does the asking, on a thread of its own.
-        return True if cached is None else cached[0]
+            worth = self._worth_using(peer)
+            if not worth and not self._told.get(peer.peer_id):
+                self._told[peer.peer_id] = True
+                relayed = True
+            else:
+                relayed = False
+        if relayed:
+            logger.info(
+                "neither this node nor %s can accept an incoming connection, "
+                "so libp2p could only build a circuit through the relay — the "
+                "same two hops as the orchestrator's tunnel. Relaying instead. "
+                "Open a port on either side to get a real direct link",
+                peer.node_id,
+            )
+        return worth
+
+    def set_self_reachable(self, reachable: bool) -> None:
+        """Tell the table whether the outside world can dial this node."""
+        with self._lock:
+            changed = reachable != self._self_reachable
+            self._self_reachable = reachable
+        if changed:
+            logger.info(
+                "this node %s reachable from outside; peers %s open a direct "
+                "link to it",
+                "is now" if reachable else "is no longer",
+                "can" if reachable else "cannot",
+            )
 
     def refresh(self) -> None:
-        """Re-measure every link. Called from the sampler thread, only."""
+        """Collect the numbers the operator sees. Sampler thread only.
+
+        Purely observational since the routing rule became topological: asking
+        the p2p stack anything means entering its runtime, which must never
+        happen on the token path or the heartbeat path — both stalled outright
+        when it was busy.
+        """
+        if self._rtt is None:
+            return
         with self._lock:
             peers = list({p.peer_id: p for p in self._neighbours.values()}.values())
+        near = self._safe(self._relay_rtt) if self._relay_rtt else None
         for peer in peers:
-            if peer.dialable:
-                self._worth_using(peer)
+            if not peer.dialable:
+                continue
+            direct = self._safe(lambda: self._rtt(peer.peer_id))
+            with self._lock:
+                self._worth[peer.peer_id] = (True, time.monotonic(), direct, near)
 
     def _worth_using(self, peer: Neighbour) -> bool:
-        """Is reaching this peer over libp2p cheaper than relaying to it?
+        """Is there a real connection to be had, or only a detour?
 
-        libp2p reports a link as established whether it is a real connection
-        or a circuit through the relay, and Loom used to treat both as direct.
-        When hole punching failed, every activation went worker -> relay ->
-        worker — the same two wide-area crossings as the orchestrator's tunnel
-        plus a general-purpose relay in the middle — while the admin page said
-        "100% прямо". Measured across regions: 200 ms per token became 320 ms.
+        One question, answered from the topology rather than from a stopwatch:
+        can either end accept an incoming connection? If yes, libp2p opens ONE
+        hop between the two workers and it is unambiguously shorter than going
+        through the orchestrator. If neither can, the only thing libp2p can
+        build is a circuit through the relay — and Loom runs that relay on the
+        orchestrator's own machine, so the circuit is the same two hops as the
+        tunnel, minus the tunnel's advantages.
 
-        The comparison is between two whole paths:
+        This replaces a latency comparison that could not work. It measured
+        the round trip to the peer and weighed it against "my trip to the relay
+        plus the peer's" — but when the connection IS a circuit, those two
+        quantities are the same journey, so the rule was comparing a path
+        against a formula describing that same path. The winner was decided by
+        jitter, the route flapped every 30 s, and no arrangement of the
+        arithmetic could have fixed it.
 
-            direct   = my trip to the peer
-            relayed  = my trip to the relay + the peer's trip to the relay
-
-        The second half cannot be measured from here, so the peer reports it
-        and the orchestrator passes it on with the rest of the directory.
-        Leaving it out is not a small simplification — it was wrong in a way
-        that showed up immediately on a real stand. A node 8 ms from the relay
-        rejected a genuinely direct 94 ms link to a peer that was itself 90 ms
-        from the relay, because 94 > 8. The relayed path was 98 ms; direct was
-        the better route and got refused.
-
-        A circuit is rejected by the same arithmetic without a special case:
-        it runs through the relay, so it costs both halves by construction.
+        Latency is still measured, and still reported. It just does not decide
+        anything: what matters here is topology, and topology is known.
         """
-        if self._relay_rtt is None or self._rtt is None:
-            return True  # nothing to compare against: no relay, no circuits
-        now = time.monotonic()
-        with self._lock:
-            cached = self._worth.get(peer.peer_id)
-            previous = cached[0] if cached is not None else None
-
-        direct = self._safe(lambda: self._rtt(peer.peer_id))
-        near = self._safe(self._relay_rtt)
-        far = peer.relay_rtt_ms or 0.0
-        verdict = self._verdict(direct, near, far, previous)
-        relayed = (near or 0.0) + far
-
-        with self._lock:
-            self._worth[peer.peer_id] = (verdict, now, direct, near)
-            if not verdict:
-                self.stats["not_worth"] += 1
-        if previous is not None and previous == verdict:
-            return verdict
-        if not verdict:
-            logger.info(
-                "link to %s costs %.0f ms against %.0f ms relayed (%.0f + %.0f): "
-                "a circuit or a detour, not a direct link. Relaying through the "
-                "orchestrator instead",
-                peer.node_id,
-                direct if direct is not None else -1,
-                relayed,
-                near or 0.0,
-                far,
-            )
-        elif previous is not None:
-            logger.info(
-                "link to %s is direct and cheaper: %.0f ms against %.0f ms relayed",
-                peer.node_id,
-                direct if direct is not None else -1,
-                relayed,
-            )
-        return verdict
-
-    def _verdict(self, direct, near, far, previous) -> bool:
-        """Which path wins, with enough hysteresis to stop it oscillating.
-
-        Both paths often cost nearly the same — on a stand where the relay sat
-        almost exactly between two nodes they measured 94 ms and 98 ms — and a
-        plain comparison then flips the route every time it is re-examined,
-        purely on jitter. Switching costs a dial and a cooldown, so a tie must
-        resolve to "leave it alone" rather than to whichever number won this
-        second.
-        """
-        if direct is None or near is None:
-            return True  # a missing measurement is not evidence of a bad link
-        if not far:
-            # The peer never reported its distance to the relay. The far half
-            # is unknown, and guessing it as zero is what rejected good links,
-            # so trust the link instead.
-            return True
-        relayed = near + far
-        if previous is True:
-            return direct <= relayed * (1.0 + HYSTERESIS)
-        if previous is False:
-            return direct < relayed * (1.0 - HYSTERESIS)
-        return direct <= relayed
+        return bool(peer.reachable or self._self_reachable)
 
     @staticmethod
     def _safe(call):
@@ -398,7 +366,6 @@ class LinkTable:
                 "direct": self.stats["direct"],
                 "relay": self.stats["relay"],
                 "fallbacks": self.stats["fallbacks"],
-                "not_worth": self.stats["not_worth"],
                 "link_rtt_ms": round(link_rtt, 1) if link_rtt is not None else 0.0,
                 "relay_rtt_ms": round(relay_rtt, 1) if relay_rtt is not None else 0.0,
                 "direct_share": round(self.stats["direct"] / total, 3) if total else 0.0,
@@ -433,6 +400,7 @@ def neighbours_from_topology(topology, *, self_node_id: str) -> List[Neighbour]:
                 peer_id=route.peer_id or "",
                 addrs=list(route.addrs or []),
                 relay_rtt_ms=float(getattr(route, "relay_rtt_ms", 0.0) or 0.0),
+                reachable=bool(getattr(route, "reachable", False)),
             )
         )
     return out

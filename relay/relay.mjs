@@ -122,18 +122,25 @@ const node = await createLibp2p({
       reservations: {
         maxReservations: Number(process.env.LOOM_RELAY_MAX_RESERVATIONS || 512),
         reservationTtl: 60 * 60 * 1000,
-        // The standard v2 limits, kept ON DELIBERATELY: 128 KB and two minutes
-        // per relayed connection. They are what stops this from becoming the
-        // data path — and it must not be one. Activations relayed here would
-        // take the same two wide-area crossings as the orchestrator's tunnel
-        // plus a general-purpose relay in the middle; measured on a two-stage
-        // pipeline, transport per token went 200 ms -> 320 ms that way.
+        // The standard v2 limits are OFF. They exist to stop a stranger's relay
+        // from being used as free bandwidth — 128 KB and two minutes per
+        // relayed connection, after which it is torn down.
         //
-        // For a 4B model 128 KB is about 25 tokens, so a pipeline that tried
-        // it would also be torn down and re-established mid-generation. Raising
-        // the limit hides that symptom and keeps the slower path; the worker
-        // instead measures the link and declines to use it (p2p/links.py).
-        applyDefaultLimit: true
+        // This relay is not a stranger's: Loom runs it on the orchestrator's
+        // own machine, alongside the tunnel that carries the same activations
+        // anyway. There is no bandwidth to protect and no detour to discourage
+        // — both paths are the same two hops to the same host.
+        //
+        // Leaving them on was expensive. A 4B model spends 5 KB of hidden
+        // state per token, so 128 KB is 25 tokens: a 267-token answer tore the
+        // connection down and rebuilt it ELEVEN times mid-generation, each
+        // rebuild a fresh dial and handshake across the same long path. That,
+        // and not the route, is why relayed traffic measured 44 ms per token
+        // against 83 ms for the identical path through here.
+        //
+        // Set LOOM_RELAY_LIMITS=1 to restore them if this relay is ever put
+        // somewhere it has to defend itself.
+        applyDefaultLimit: process.env.LOOM_RELAY_LIMITS === '1'
       }
     })
   }

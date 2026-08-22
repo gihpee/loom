@@ -256,6 +256,11 @@ class PeerLayer:
                 try:
                     self._visible = self.node.visible_addrs()
                     self._relay_rtt_ms = self.node.relay_rtt_ms() or 0.0
+                    # A circuit address is not reachability: it means "through
+                    # the relay", which is the relay path under another name.
+                    self.links.set_self_reachable(
+                        any("/p2p-circuit" not in a for a in self._visible)
+                    )
                     self.links.refresh()
                 except Exception:
                     logger.debug("sampling the p2p state failed", exc_info=True)
@@ -287,7 +292,6 @@ class PeerLayer:
             fallbacks=stats["fallbacks"],
             direct_share=stats["direct_share"],
             visible_addrs=visible or (identity.visible_addrs if identity else []),
-            not_worth=stats["not_worth"],
             link_rtt_ms=stats["link_rtt_ms"],
             relay_rtt_ms=self._relay_rtt_ms or stats["relay_rtt_ms"],
         )

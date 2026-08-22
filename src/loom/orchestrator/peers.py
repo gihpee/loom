@@ -55,13 +55,18 @@ class PeerRecord:
     relayed: int = 0
     fallbacks: int = 0
     direct_share: float = 0.0
-    # Links libp2p had established but which were not worth using — a circuit
-    # through the relay costs more than the relay it runs through. Without
-    # this, a deliberate refusal and a path that never came up both read as
-    # "0% direct", and they call for opposite reactions.
-    not_worth: int = 0
     link_rtt_ms: float = 0.0
     relay_rtt_ms: float = 0.0
+
+    @property
+    def reachable(self) -> bool:
+        """Can a peer open a connection to this node at all?
+
+        Only a real address counts. A circuit address means "reachable through
+        the relay", which is not reachability — it is the relay path wearing a
+        different name, over the same two hops to the same machine.
+        """
+        return any("/p2p-circuit" not in addr for addr in self.visible_addrs)
 
     @property
     def dialable(self) -> bool:
@@ -172,7 +177,6 @@ class PeerDirectory:
         record.relayed = int(getattr(status, "relayed", 0) or 0)
         record.fallbacks = int(getattr(status, "fallbacks", 0) or 0)
         record.direct_share = float(getattr(status, "direct_share", 0.0) or 0.0)
-        record.not_worth = int(getattr(status, "not_worth", 0) or 0)
         record.link_rtt_ms = float(getattr(status, "link_rtt_ms", 0.0) or 0.0)
         record.relay_rtt_ms = float(getattr(status, "relay_rtt_ms", 0.0) or 0.0)
         # Reachability is re-reported on every heartbeat and does change: a
@@ -189,8 +193,8 @@ class PeerDirectory:
 
     def routes_for(
         self, stages: Iterable[Tuple[int, str]]
-    ) -> List[Tuple[int, str, str, List[str], float]]:
-        """One pipeline's rows: (stage, node_id, peer_id, addrs, relay_rtt_ms).
+    ) -> List[Tuple[int, str, str, List[str], float, bool]]:
+        """One pipeline's rows: (stage, node_id, peer_id, addrs, rtt, reachable).
 
         Every stage is described to every other one, including stages that
         cannot be dialled — a peer with an empty id is how a node learns to
@@ -202,7 +206,7 @@ class PeerDirectory:
         for stage_index, node_id in stages:
             record = self._records.get(node_id)
             if record is None or not record.dialable:
-                rows.append((stage_index, node_id, "", [], 0.0))
+                rows.append((stage_index, node_id, "", [], 0.0, False))
                 continue
             rows.append(
                 (
@@ -211,6 +215,7 @@ class PeerDirectory:
                     record.peer_id,
                     record.candidate_addrs(self.default_port),
                     record.relay_rtt_ms,
+                    record.reachable,
                 )
             )
         return rows
@@ -239,7 +244,6 @@ class PeerDirectory:
                 "relayed": r.relayed,
                 "fallbacks": r.fallbacks,
                 "direct_share": r.direct_share,
-                "not_worth": r.not_worth,
                 "link_rtt_ms": r.link_rtt_ms,
                 "relay_rtt_ms": r.relay_rtt_ms,
             }
