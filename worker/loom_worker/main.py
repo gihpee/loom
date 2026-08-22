@@ -126,6 +126,11 @@ class PeerLayer:
         # stops arriving the moment the runtime is busy. One node went four
         # minutes without one while its GPU was serving normally.
         self._visible: List[str] = []
+        # This node's own distance to the relay. Measured directly rather than
+        # taken from the link table, because the neighbours need it BEFORE any
+        # link exists: it is handed to them with the peer directory, at deploy,
+        # and a zero there means they cannot judge their side of the path.
+        self._relay_rtt_ms: float = 0.0
         # Overrides for the node's port and key directory. Defaults come from
         # the environment; both are explicit here so a test can run several
         # agents in one process — two nodes sharing a key directory interfere,
@@ -250,6 +255,7 @@ class PeerLayer:
             while self.node is not None:
                 try:
                     self._visible = self.node.visible_addrs()
+                    self._relay_rtt_ms = self.node.relay_rtt_ms() or 0.0
                     self.links.refresh()
                 except Exception:
                     logger.debug("sampling the p2p state failed", exc_info=True)
@@ -283,7 +289,7 @@ class PeerLayer:
             visible_addrs=visible or (identity.visible_addrs if identity else []),
             not_worth=stats["not_worth"],
             link_rtt_ms=stats["link_rtt_ms"],
-            relay_rtt_ms=stats["relay_rtt_ms"],
+            relay_rtt_ms=self._relay_rtt_ms or stats["relay_rtt_ms"],
         )
 
 
