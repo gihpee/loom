@@ -714,3 +714,74 @@ def test_a_node_reports_its_own_distance_to_the_relay_and_not_the_whole_path():
         table.refresh()
         reported = table.snapshot()["relay_rtt_ms"]
         assert reported == 8.0, f"reported {reported}, not its own 8 ms"
+
+
+# --------------------------------------------------------------------- IPv6
+def test_a_node_with_ipv6_offers_it_alongside_ipv4(monkeypatch):
+    """The address family where none of the NAT machinery is needed.
+
+    An IPv6 host knows its own globally routable address: nothing translates
+    it, so there is no mapping to guess and no hole to punch. Two nodes that
+    both have IPv6 reach each other directly, and the routing rule takes them
+    without a special case — a global IPv6 address is simply a non-circuit
+    address, which is all it asks about.
+    """
+    from loom_worker.p2p import peer as peer_mod
+
+    monkeypatch.setattr(peer_mod, "_local_ips", lambda: ["10.0.0.4"])
+    monkeypatch.setattr(peer_mod, "_local_ipv6", lambda: ["2001:db8::4"])
+
+    addrs = peer_mod.local_candidate_addrs(47100)
+    assert "/ip4/10.0.0.4/tcp/47100" in addrs
+    assert "/ip6/2001:db8::4/tcp/47100" in addrs
+    assert "/ip6/2001:db8::4/udp/47100/quic-v1" in addrs
+
+
+def test_a_host_without_ipv6_does_not_try_to_listen_on_it(monkeypatch):
+    """Binding :: on a kernel with IPv6 off fails, and takes the node with it.
+
+    Losing the direct path over an address family the machine was never going
+    to use would be a poor trade, so the listener is conditional.
+    """
+    from loom_worker.p2p import peer as peer_mod
+
+    monkeypatch.setattr(peer_mod, "ipv6_supported", lambda: False)
+    assert peer_mod._listen_addrs(47100) == [
+        "/ip4/0.0.0.0/tcp/47100",
+        "/ip4/0.0.0.0/udp/47100/quic-v1",
+    ]
+
+    monkeypatch.setattr(peer_mod, "ipv6_supported", lambda: True)
+    assert "/ip6/::/tcp/47100" in peer_mod._listen_addrs(47100)
+    assert "/ip6/::/udp/47100/quic-v1" in peer_mod._listen_addrs(47100)
+
+
+def test_link_local_ipv6_is_never_advertised(monkeypatch):
+    """fe80:: means nothing without the interface it belongs to.
+
+    A multiaddr cannot carry a zone id, so a link-local address handed to a
+    neighbour is an address it can only fail to dial.
+    """
+    from loom_worker.p2p import peer as peer_mod
+
+    class FakeSocket:
+        def __init__(self, *a, **kw):
+            pass
+
+        def connect(self, *a):
+            raise OSError("no route")
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(peer_mod.socket, "socket", FakeSocket)
+    monkeypatch.setattr(
+        peer_mod.socket,
+        "getaddrinfo",
+        lambda *a, **kw: [
+            (None, None, None, None, ("fe80::1%en0", 0, 0, 4)),
+            (None, None, None, None, ("::1", 0, 0, 0)),
+            (None, None, None, None, ("2001:db8::9", 0, 0, 0)),
+        ],
+    )
+    assert peer_mod._local_ipv6() == ["2001:db8::9"]

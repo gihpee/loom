@@ -68,6 +68,20 @@ class P2PUnavailable(RuntimeError):
     """No usable p2p stack on this node; the caller must fall back to relay."""
 
 
+def _listen_addrs(port: int) -> List[str]:
+    """What to listen on: IPv4 always, IPv6 when the host has it.
+
+    Conditional rather than unconditional because a host with IPv6 disabled
+    refuses the bind, and Lattica reports that as a failure to build the node
+    at all — losing the direct path over an address family the machine was
+    never going to use.
+    """
+    addrs = [f"/ip4/0.0.0.0/tcp/{port}", f"/ip4/0.0.0.0/udp/{port}/quic-v1"]
+    if ipv6_supported():
+        addrs += [f"/ip6/::/tcp/{port}", f"/ip6/::/udp/{port}/quic-v1"]
+    return addrs
+
+
 def _address_in_use(exc: BaseException) -> bool:
     """Is this the Rust core telling us the port is taken?
 
@@ -123,12 +137,81 @@ def local_candidate_addrs(port: int) -> List[str]:
     address from the orchestrator is for. Both are offered to the neighbour,
     which tries them in order, because either can be the one that works: the
     private one when the peers share a LAN, the public one otherwise.
+
+    IPv6 addresses are offered on equal terms and are the most valuable ones
+    here. An IPv6 host has a globally routable address it knows about itself:
+    nothing is translated, so there is no mapping to guess and no hole to
+    punch — only a firewall rule to allow. Two nodes that both have IPv6 can
+    reach each other directly with none of the machinery below.
     """
     addrs: List[str] = []
     for ip in _local_ips():
         addrs.append(f"/ip4/{ip}/tcp/{port}")
         addrs.append(f"/ip4/{ip}/udp/{port}/quic-v1")
+    for ip in _local_ipv6():
+        addrs.append(f"/ip6/{ip}/tcp/{port}")
+        addrs.append(f"/ip6/{ip}/udp/{port}/quic-v1")
     return addrs
+
+
+def ipv6_supported() -> bool:
+    """Can this host bind an IPv6 socket at all?
+
+    Asked before listening rather than after failing. A kernel with IPv6
+    switched off refuses the bind, and the p2p node would go down with it —
+    taking the direct path away from a machine whose IPv4 was working fine.
+    """
+    if not socket.has_ipv6:
+        return False
+    try:
+        probe = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+    except OSError:
+        return False
+    try:
+        probe.bind(("::", 0))
+        return True
+    except OSError:
+        return False
+    finally:
+        probe.close()
+
+
+def _local_ipv6() -> List[str]:
+    """Globally routable IPv6 addresses of this host, best effort.
+
+    Link-local (fe80::) is excluded: it is only meaningful together with an
+    interface, and a multiaddr carrying a zone id means nothing on the other
+    machine. Unique-local (fd00::/8) is kept for the same reason 10.0.0.0/8 is
+    — two nodes on one network can use it.
+    """
+    found: List[str] = []
+    if not socket.has_ipv6:
+        return found
+
+    def keep(ip: str) -> bool:
+        ip = ip.split("%")[0]  # strip the zone id; a multiaddr cannot carry it
+        return bool(ip) and not ip.startswith(("fe80", "::")) and ip not in found
+
+    # Same routing-table trick as for IPv4, against a well-known address. No
+    # packet is sent; if there is no IPv6 route at all this simply fails.
+    probe = socket.socket(socket.AF_INET6, socket.SOCK_DGRAM)
+    try:
+        probe.connect(("2001:4860:4860::8888", 53))
+        ip = probe.getsockname()[0].split("%")[0]
+        if keep(ip):
+            found.append(ip)
+    except OSError:
+        pass
+    finally:
+        probe.close()
+    try:
+        for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET6):
+            ip = info[4][0].split("%")[0]
+            if keep(ip):
+                found.append(ip)
+    except OSError:
+        pass
+    return found
 
 
 # Docker's default address pools. A container on a bridge network sees only
@@ -319,12 +402,7 @@ class PeerNode:
         key_dir = self._usable_key_dir()
         builder = (
             Lattica.builder()
-            .with_listen_addrs(
-                [
-                    f"/ip4/0.0.0.0/tcp/{port}",
-                    f"/ip4/0.0.0.0/udp/{port}/quic-v1",
-                ]
-            )
+            .with_listen_addrs(_listen_addrs(port))
             # A stable identity across restarts (see DEFAULT_KEY_DIR).
             .with_key_path(key_dir)
             # Hole punching, and the reachability probe that tells us whether

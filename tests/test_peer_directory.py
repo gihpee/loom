@@ -124,3 +124,57 @@ def test_the_view_reports_why_a_node_is_relay_only():
     row = directory.view()[0]
     assert row["symmetric_nat"] is True and row["dialable"] is False
     assert row["observed_host"] == "1.2.3.4"
+
+
+# --------------------------------------------------------------------- IPv6
+def test_an_ipv6_node_is_described_to_its_neighbours():
+    """The address family that makes all the NAT machinery unnecessary.
+
+    IPv6 used to be discarded here with the comment "the node's own list
+    already covers it" — and that list was built from AF_INET only, so a node
+    reaching the orchestrator over IPv6 offered its neighbours nothing at all.
+
+    It is also the one observed address certain to be usable as seen: with no
+    translation in the way, the address we observe IS the address the node
+    listens on.
+    """
+    record = PeerRecord(
+        node_id="v6",
+        peer_id="12D3KooWV6",
+        listen_addrs=["/ip6/2001:db8::5/tcp/47100"],
+        observed_host="2001:db8::5",
+    )
+    addrs = record.candidate_addrs(47100)
+    assert "/ip6/2001:db8::5/tcp/47100" in addrs
+    assert "/ip6/2001:db8::5/udp/47100/quic-v1" in addrs
+    assert not any("/ip4/" in a for a in addrs)
+
+
+def test_a_global_ipv6_address_counts_as_reachable():
+    """No circuit, no relay — the routing rule needs no IPv6 special case."""
+    record = PeerRecord(
+        node_id="v6",
+        peer_id="12D3KooWV6",
+        visible_addrs=["/ip6/2001:db8::5/tcp/47100"],
+    )
+    assert record.reachable
+
+
+def test_a_lan_address_is_still_offered_first_in_either_family():
+    """A pair on one network should try the local address before the routable one."""
+    record = PeerRecord(
+        node_id="both",
+        peer_id="12D3KooWBoth",
+        listen_addrs=[
+            "/ip6/2001:db8::5/tcp/47100",   # global
+            "/ip4/10.0.0.4/tcp/47100",      # LAN
+            "/ip6/fd00::4/tcp/47100",       # unique-local: a LAN address too
+        ],
+    )
+    order = record.candidate_addrs(47100)
+    assert order.index("/ip4/10.0.0.4/tcp/47100") < order.index(
+        "/ip6/2001:db8::5/tcp/47100"
+    )
+    assert order.index("/ip6/fd00::4/tcp/47100") < order.index(
+        "/ip6/2001:db8::5/tcp/47100"
+    )

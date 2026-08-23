@@ -31,6 +31,7 @@ import { noise } from '@chainsafe/libp2p-noise'
 import { yamux } from '@chainsafe/libp2p-yamux'
 import { generateKeyPair, privateKeyFromProtobuf, privateKeyToProtobuf } from '@libp2p/crypto/keys'
 import { readFile, writeFile, mkdir } from 'node:fs/promises'
+import { networkInterfaces } from 'node:os'
 import { dirname, join } from 'node:path'
 
 const PORT = Number(process.env.LOOM_RELAY_PORT || 47200)
@@ -80,6 +81,18 @@ async function loadOrCreateKey () {
   }
 }
 
+// IPv6 only when the host has it: a kernel with it switched off refuses the
+// bind and takes the whole relay down with it. A node that reaches us over
+// IPv6 does not really need us — it has a routable address of its own — but
+// an IPv6-only node needs SOME way in, and this is it.
+const HAS_IPV6 = Object.values(networkInterfaces())
+  .flat()
+  .some(i => i && i.family === 'IPv6' && !i.internal)
+const LISTEN = [`/ip4/0.0.0.0/tcp/${PORT}`, `/ip4/0.0.0.0/udp/${PORT}/quic-v1`]
+if (HAS_IPV6) {
+  LISTEN.push(`/ip6/::/tcp/${PORT}`, `/ip6/::/udp/${PORT}/quic-v1`)
+}
+
 const privateKey = await loadOrCreateKey()
 const node = await createLibp2p({
   privateKey,
@@ -89,7 +102,7 @@ const node = await createLibp2p({
     // firewalls answer with an RST, while QUIC is plain UDP with no handshake
     // to interrupt. A relay that only speaks TCP forces every negotiation it
     // hosts down the harder path.
-    listen: [`/ip4/0.0.0.0/tcp/${PORT}`, `/ip4/0.0.0.0/udp/${PORT}/quic-v1`],
+    listen: LISTEN,
     ...(PUBLIC_HOST
       ? {
           announce: [

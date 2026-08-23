@@ -103,23 +103,41 @@ class PeerRecord:
         return out
 
     def _observed_multiaddrs(self, fallback_port: int) -> List[str]:
-        """The observed host, expressed on every transport the node listens on."""
-        if not self.observed_host or ":" in self.observed_host:
-            return []  # empty, or IPv6 which the node's own list already covers
+        """The observed host, expressed on every transport the node listens on.
+
+        IPv6 used to be dropped here, on the grounds that "the node's own list
+        already covers it" — which was untrue, because that list was built
+        from AF_INET only. A node reaching the orchestrator over IPv6 offered
+        its neighbours nothing at all, and IPv6 is the one case where the
+        observed address is certain to be usable: there is no translation
+        between what we see and what the node listens on.
+        """
+        host = self.observed_host
+        if not host:
+            return []
         port = _port_from(self.listen_addrs) or fallback_port
         if not port:
             return []
+        family = "ip6" if ":" in host else "ip4"
         return [
-            f"/ip4/{self.observed_host}/tcp/{port}",
-            f"/ip4/{self.observed_host}/udp/{port}/quic-v1",
+            f"/{family}/{host}/tcp/{port}",
+            f"/{family}/{host}/udp/{port}/quic-v1",
         ]
 
 
 def _private_first(addr: str) -> Tuple[int, str]:
-    """Sort key putting LAN addresses ahead of routable ones."""
+    """Sort key putting LAN addresses ahead of routable ones.
+
+    Unique-local IPv6 (fd00::/8) counts as a LAN address for the same reason
+    10.0.0.0/8 does: it works between two nodes on one network and nowhere
+    else. A global IPv6 address sorts with the routable ones — and unlike a
+    routable IPv4 address, it usually is one.
+    """
     for prefix in _PRIVATE_PREFIXES:
         if f"/ip4/{prefix}" in addr:
             return (0, addr)
+    if addr.startswith(("/ip6/fd", "/ip6/fc")):
+        return (0, addr)
     return (1, addr)
 
 
