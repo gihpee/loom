@@ -1045,10 +1045,21 @@ class MultiModelController:
                     # Whether anyone can dial IN. Without it "peer" only means
                     # "not symmetric NAT", which is not the same thing at all.
                     "reachable": bool(record and record.visible_addrs),
+                    # Reachable only through a circuit, which is the relay path
+                    # under another name. Without this the table called such a
+                    # node "peer" and looked exactly like a working direct one.
+                    "via_relay": bool(record and record.visible_addrs)
+                    and all("/p2p-circuit" in a for a in record.visible_addrs),
                     "direct": record.direct if record else 0,
                     "relayed": record.relayed if record else 0,
                     "fallbacks": record.fallbacks if record else 0,
                     "direct_share": record.direct_share if record else 0.0,
+                    # The two measurements that answer "is the transport time
+                    # the wire, or is it us?". Collected on every heartbeat and
+                    # dropped here until now, which made the question
+                    # unanswerable from outside the machines themselves.
+                    "link_rtt_ms": record.link_rtt_ms if record else 0.0,
+                    "relay_rtt_ms": record.relay_rtt_ms if record else 0.0,
                 },
                 "device": d.hardware.device,
                 "region": d.region,

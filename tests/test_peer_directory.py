@@ -178,3 +178,24 @@ def test_a_lan_address_is_still_offered_first_in_either_family():
     assert order.index("/ip6/fd00::4/tcp/47100") < order.index(
         "/ip6/2001:db8::5/tcp/47100"
     )
+
+
+def test_the_node_view_carries_the_measurements_it_collected():
+    """Numbers measured, reported, stored — and then dropped on the last step.
+
+    link_rtt_ms and relay_rtt_ms travel on every heartbeat and settle on the
+    record, but the per-node view built its `peer` dict by hand and left them
+    out. The admin page and /admin/nodes therefore could not answer the one
+    question worth asking about a slow pipeline: is the transport time the
+    wire, or is it us?
+
+    via_relay was lost the same way, which is why a node reachable only
+    through a circuit was labelled "peer" and looked like a working direct one.
+    """
+    import inspect
+
+    from loom.orchestrator import controller as controller_mod
+
+    source = inspect.getsource(controller_mod.MultiModelController.nodes_view)
+    for field in ("link_rtt_ms", "relay_rtt_ms", "via_relay"):
+        assert f'"{field}"' in source, f"{field} never reaches the node view"
