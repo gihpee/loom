@@ -325,6 +325,46 @@ curl -s localhost:8000/admin/models_view -H "X-Loom-Admin-Token: $LOOM_ADMIN_TOK
 - **Цена узла** пока не собирается (поле `price: null`) — это Фаза 4
   (онбординг с декларацией цены, калибровка, биллинг).
 
+
+## Нода со старым драйвером NVIDIA
+
+Симптом: контейнер не стартует вовсе, а в выводе — ошибка не от Loom:
+
+```
+nvidia-container-cli: requirement error: unsatisfied condition: cuda>=...
+please update your driver
+```
+
+Это отказ **среды выполнения NVIDIA**, до запуска воркера. Стандартный образ
+собран на `vllm/vllm-openai`, который тянется за свежей CUDA, и драйвер её не
+поддерживает. Никакой код Loom при этом не выполнялся, и логов воркера не будет.
+
+Проверить, что именно у клиента:
+
+```bash
+nvidia-smi --query-gpu=driver_version --format=csv,noheader
+```
+
+Для таких хостов есть отдельный образ на CUDA 12.1 — ему достаточно драйвера
+**530 и новее**:
+
+```bash
+scripts/build_worker.sh --cuda121 --push
+```
+
+```bash
+docker run -d --gpus all --restart unless-stopped --network host \
+  -v loom-hf:/root/.cache/huggingface \
+  gihpee/loomworker-cuda121 --key loom_<...>
+```
+
+Чем отличается: в нём нет vLLM, а значит нет бэкендов `vllm` и `vllm_shard`.
+Стадии пайплайна работают на `shard` (transformers) — то, чем CUDA-стадии и
+пользуются сейчас. Размещать модель на такую ноду надо с бэкендом `shard`.
+
+Стандартный образ при этом не меняется: это отдельный Dockerfile и отдельный
+тег.
+
 ## 8. Диагностика
 
 | Симптом | Куда смотреть |

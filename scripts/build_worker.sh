@@ -3,6 +3,7 @@
 #
 #   scripts/build_worker.sh                 # build for THIS machine, load locally
 #   scripts/build_worker.sh --vllm          # image with the vLLM stage engine
+#   scripts/build_worker.sh --cuda121       # for hosts with an older driver
 #   scripts/build_worker.sh --push          # build linux/amd64 and push
 #   scripts/build_worker.sh --push --platform linux/amd64,linux/arm64
 #
@@ -30,7 +31,14 @@ while [ $# -gt 0 ]; do
       DOCKERFILE="docker/worker.vllm.Dockerfile"
       IMAGE="${LOOM_WORKER_VLLM_IMAGE:-gihpee/loomworker-vllm:latest}"
       shift ;;
-    -h|--help) sed -n '2,13p' "$0"; exit 0 ;;
+    # For a host whose driver is older than the vLLM base image demands. The
+    # container runtime refuses those before Loom runs at all — see the header
+    # of docker/worker.cuda121.Dockerfile.
+    --cuda121)
+      DOCKERFILE="docker/worker.cuda121.Dockerfile"
+      IMAGE="${LOOM_WORKER_CUDA121_IMAGE:-gihpee/loomworker-cuda121:latest}"
+      shift ;;
+    -h|--help) sed -n '2,14p' "$0"; exit 0 ;;
     *) echo "unknown option: $1"; exit 2 ;;
   esac
 done
