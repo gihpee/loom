@@ -10,7 +10,12 @@
 # unless-stopped` gives: one command to set up, and a service that comes back
 # by itself after a crash or a reboot. That is launchd's job on macOS.
 #
+# From a checkout:
 #   bash scripts/install_mac_worker.sh --key loom_<...>
+#
+# On a machine that has never seen this repository — one line, nothing to
+# clone, no git required (pip fetches the source archive itself):
+#   curl -fsSL https://raw.githubusercontent.com/gihpee/loom/main/scripts/install_mac_worker.sh | bash -s -- --key loom_<...>
 #
 # Uninstall:
 #   launchctl bootout gui/$(id -u)/network.loom.worker
@@ -27,7 +32,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --key) KEY="$2"; shift 2 ;;
     --orchestrator) ORCH="$2"; shift 2 ;;
-    -h|--help) sed -n '2,20p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,26p' "$0" 2>/dev/null || echo "usage: --key loom_<...>"; exit 0 ;;
     *) echo "unknown option: $1" >&2; exit 2 ;;
   esac
 done
@@ -56,14 +61,39 @@ if [[ "$("$PY" -c 'import platform; print(platform.machine())')" != "arm64" ]]; 
   exit 1
 fi
 
+# --- where the worker comes from --------------------------------------------
+# Run from a checkout, it installs that checkout — the developer's case, and
+# the one where installing something else would be baffling. Piped from curl
+# there is no checkout at all (BASH_SOURCE is the pipe), so pip fetches the
+# repository archive instead.
+#
+# An archive URL rather than git+https on purpose: git on a fresh Mac means
+# the Xcode command line tools, which is a multi-gigabyte download and a
+# dialog box. pip needs neither to unpack a tarball.
+SOURCE="${LOOM_SOURCE:-}"
+if [[ -z "$SOURCE" ]]; then
+  HERE="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd || true)"
+  if [[ -n "$HERE" && -f "$HERE/../worker/pyproject.toml" ]]; then
+    SOURCE="$(cd "$HERE/.." && pwd)/worker"
+    echo "installing from this checkout: $SOURCE"
+  else
+    BRANCH="${LOOM_BRANCH:-main}"
+    SOURCE="https://github.com/gihpee/loom/archive/refs/heads/$BRANCH.tar.gz#subdirectory=worker"
+    echo "installing from github ($BRANCH)"
+  fi
+fi
+
 # --- install ----------------------------------------------------------------
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 echo "installing into $PREFIX"
 "$PY" -m venv "$PREFIX/venv"
 "$PREFIX/venv/bin/pip" install --quiet --upgrade pip
 # [p2p] as well as [mlx]: without it every activation is relayed through
 # the orchestrator, which on a spread-out pipeline is the whole cost.
-"$PREFIX/venv/bin/pip" install --quiet "$REPO_ROOT/worker[mlx,p2p]"
+if [[ "$SOURCE" == http* ]]; then
+  "$PREFIX/venv/bin/pip" install --quiet --upgrade "loom-worker[mlx,p2p] @ $SOURCE"
+else
+  "$PREFIX/venv/bin/pip" install --quiet --upgrade "$SOURCE[mlx,p2p]"
+fi
 
 echo -n "checking the GPU is actually reachable... "
 "$PREFIX/venv/bin/python" - <<'PY'
@@ -115,6 +145,8 @@ echo "worker installed and started."
 echo "  logs:    tail -f $PREFIX/logs/worker.log"
 echo "  stop:    launchctl bootout gui/$(id -u)/$LABEL"
 echo "  start:   launchctl bootstrap gui/$(id -u) $PLIST"
+echo
+echo "  update:  re-run this same command"
 echo
 echo "Deploy a model to it from the orchestrator's Deploy tab with backend"
 echo "'mlx_shard' — this node can serve a range of layers like any other."

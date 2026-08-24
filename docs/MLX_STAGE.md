@@ -221,3 +221,66 @@ and cannot be one of 2 pipeline stages
 - **Архитектуры**: ищется `model.model.layers` (и пара запасных имён). Если
   архитектура кладёт слои иначе, стадия падает с внятной ошибкой, а не режет
   не тот список.
+
+
+## Установка на чужой мак — одна строка
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/gihpee/loom/main/scripts/install_mac_worker.sh | bash -s -- --key loom_<...>
+```
+
+Больше ничего: ни клонирования, ни `git`, ни Xcode. Скрипт сам создаёт
+окружение в `~/.loom/venv`, ставит воркер прямо из архива репозитория,
+проверяет, что MLX видит GPU, и заводит службу launchd, которая поднимается
+при входе в систему и переживает падения — тот же контракт, что даёт
+`docker run --restart unless-stopped` на линуксе.
+
+Почему архив, а не `git+https`: `git` на свежем маке — это Xcode command line
+tools, несколько гигабайт и диалоговое окно. Для распаковки tarball pip не
+нужно ни то, ни другое.
+
+### Что владелец ноды увидит
+
+```
+installing from github (main)
+installing into /Users/<имя>/.loom
+checking the GPU is actually reachable... Device(gpu, 0)
+
+worker installed and started.
+  logs:    tail -f ~/.loom/logs/worker.log
+  stop:    launchctl bootout gui/501/network.loom.worker
+  update:  re-run this same command
+```
+
+Строка с `Device(gpu, 0)` — важная: она означает, что MLX действительно вышел
+на Metal. Если бы python оказался под Rosetta, колёса MLX встали бы, а GPU за
+ними не было бы — и выяснилось бы это сильно позже и невнятно. Скрипт
+отказывается работать заранее.
+
+### Обновление и удаление
+
+Обновление — та же команда: pip переустановит воркер, launchd перезапустит.
+
+```bash
+launchctl bootout gui/$(id -u)/network.loom.worker
+rm ~/Library/LaunchAgents/network.loom.worker.plist
+rm -rf ~/.loom
+```
+
+### Разработчику
+
+Из чекаута тот же скрипт ставит **этот чекаут**, а не GitHub — определяется по
+наличию `worker/pyproject.toml` рядом:
+
+```bash
+bash scripts/install_mac_worker.sh --key loom_<...>
+```
+
+Ветку можно подменить через `LOOM_BRANCH`, источник целиком — через
+`LOOM_SOURCE`, каталог установки — через `LOOM_PREFIX`.
+
+### Чего этот путь не делает
+
+Воркер на маке ставится **нативно, не в докер**, и это не недоработка: Metal —
+фреймворк пользовательского пространства macOS, а линуксовый контейнер на маке
+живёт в виртуалке, где GPU-устройства нет вовсе. Пробрасывать нечего.
