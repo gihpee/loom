@@ -148,6 +148,18 @@ class LinkTable:
                 self._neighbours[(pipeline_id, peer.stage_index)] = peer
             self._blocked_until.clear()
             self._told.clear()
+            # Forget peers this node no longer talks to. Their measurements
+            # outlived them otherwise, and `link_rtt_ms` reports whichever
+            # entry comes first — which is the OLDEST, so a node kept
+            # reporting the round trip to a neighbour it had not exchanged a
+            # message with in hours. On a live stand that showed 109 ms beside
+            # a transport time of 21 ms, and the two could not both be true.
+            live = {peer.peer_id for peer in self._neighbours.values()}
+            self._worth = {
+                peer_id: value
+                for peer_id, value in self._worth.items()
+                if peer_id in live
+            }
         for peer in peers:
             if peer.dialable and self._dial is not None:
                 # Start connecting now, not on the first token: hole punching
@@ -376,6 +388,10 @@ class LinkTable:
                         "node_id": peer.node_id,
                         "peer_id": peer.peer_id,
                         "direct": self.direct_available(pipeline_id, peer.stage_index),
+                        # Per link, because one number for a node with several
+                        # neighbours is a number about one of them and no way
+                        # to tell which.
+                        "rtt_ms": (self._worth.get(peer.peer_id) or (None, 0, None, None))[2],
                     }
                     for (pipeline_id, _index), peer in sorted(self._neighbours.items())
                 ],

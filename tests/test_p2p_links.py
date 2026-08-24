@@ -785,3 +785,31 @@ def test_link_local_ipv6_is_never_advertised(monkeypatch):
         ],
     )
     assert peer_mod._local_ipv6() == ["2001:db8::9"]
+
+
+def test_a_neighbour_that_left_stops_being_measured():
+    """Stale measurements outlived the pipeline they belonged to.
+
+    `link_rtt_ms` reports the first entry it finds, and dict order is
+    insertion order — so it reported the OLDEST neighbour this worker ever
+    had. On a live stand a node showed "RTT 109 ms" from a pipeline it had
+    left, next to a measured transport time of 21 ms per token. Both were on
+    the same screen and they could not both be true.
+    """
+    table = LinkTable(
+        send_direct=lambda pid, msg: None,
+        dial=lambda pid, addrs: None,
+        rtt=lambda pid: 109.0 if pid == "12D3KooWOld" else 8.0,
+        relay_rtt=lambda: 5.0,
+    )
+    table.set_neighbours("p#0", [peer(1, node="old", pid="12D3KooWOld")])
+    table.refresh()
+    assert table.snapshot()["link_rtt_ms"] == 109.0
+
+    # Redeployed onto a different peer: the old one is not a neighbour now.
+    table.set_neighbours("p#0", [peer(1, node="new", pid="12D3KooWNew")])
+    table.refresh()
+    assert table.snapshot()["link_rtt_ms"] == 8.0
+
+    rows = table.snapshot()["neighbours"]
+    assert [(r["node_id"], r["rtt_ms"]) for r in rows] == [("new", 8.0)]
