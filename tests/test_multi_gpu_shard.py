@@ -256,3 +256,26 @@ def test_the_console_shows_a_pipeline_error_instead_of_an_empty_answer():
         for i, line in enumerate(ui.splitlines())
         if "out.textContent" in line and i
     ), "the error is captured but never displayed"
+
+
+def test_a_failure_says_which_stage_produced_it():
+    """"list index out of range" from one of four machines is not a report.
+
+    The head is the only place an operator looks, and a bare exception string
+    told it nothing: not which stage, not which layers, not even the exception
+    type. Every failure began by grepping four sets of container logs.
+    """
+    from loom_worker.shard import server
+
+    server.STATE["layer_range"] = [32, 48]
+    try:
+        [][0]
+    except IndexError as exc:
+        described = server._describe_failure(
+            exc, {"stage_index": 2, "num_stages": 4}
+        )
+
+    assert "stage 2 of 4" in described
+    assert "[32, 48)" in described, "the layers are how you find the machine"
+    assert "IndexError" in described, "the type usually names the bug outright"
+    assert "test_multi_gpu_shard.py:" in described, "and the line says where"

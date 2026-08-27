@@ -187,6 +187,34 @@ def stage_inbox_loop() -> None:
 
 
 # ------------------------------------------------------------------- stage step
+def _describe_failure(exc: BaseException, topology: dict) -> str:
+    """Say which stage failed, and where, not just what it said.
+
+    A pipeline error used to arrive as the bare text of the exception —
+    "list index out of range" — with nothing to say which of four machines
+    produced it or what it was doing. The head is the only place the operator
+    looks, and it had no way to know either, so every failure started with
+    grepping four sets of container logs.
+
+    Carried instead: the stage and its layers (which machine to look at), the
+    exception type (usually enough to name the bug), and the line that raised
+    (where to look when it is not).
+    """
+    import traceback
+
+    layers = STATE.get("layer_range") or [0, 0]
+    where = ""
+    frames = traceback.extract_tb(exc.__traceback__)
+    if frames:
+        last = frames[-1]
+        where = f" at {os.path.basename(last.filename)}:{last.lineno}"
+    return (
+        f"stage {topology.get('stage_index', '?')} of "
+        f"{topology.get('num_stages', '?')} (layers [{layers[0]}, {layers[1]})): "
+        f"{type(exc).__name__}: {exc}{where}"
+    )
+
+
 def handle_stage_message(msg: dict) -> None:
     """Process one inter-stage message on this stage."""
     executor: ShardExecutor = STATE["executor"]
@@ -235,7 +263,7 @@ def handle_stage_message(msg: dict) -> None:
                 "kind": "error",
                 "request_id": request_id,
                 "target_stage": 0,
-                "error": str(exc),
+                "error": _describe_failure(exc, topology),
             }
         )
         return
@@ -777,7 +805,15 @@ class Handler(BaseHTTPRequestHandler):
             self._chunk("data: [DONE]\n\n")
         except Exception as exc:
             logger.exception("streaming generation failed")
-            self._chunk(f"data: {json.dumps({'error': str(exc)})}\n\n")
+            # A failure raised HERE is the head's own. One raised on another
+            # stage arrives already labelled (see _describe_failure) and is
+            # re-raised verbatim, so the label survives the trip home.
+            described = (
+                str(exc)
+                if str(exc).startswith("stage ")
+                else _describe_failure(exc, STATE.get("topology") or {})
+            )
+            self._chunk(f"data: {json.dumps({'error': described})}\n\n")
         finally:
             self._chunk("")
 

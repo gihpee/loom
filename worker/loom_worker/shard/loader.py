@@ -17,6 +17,7 @@ import glob
 import json
 import logging
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -26,31 +27,65 @@ logger = logging.getLogger("loom_worker.shard.loader")
 _DTYPES = {"float32": "float32", "float16": "float16", "bfloat16": "bfloat16"}
 
 
+_LAYER_KEY = re.compile(r"^(?P<prefix>.*?)layers\.(?P<index>\d+)\.(?P<tail>.+)$")
+
+
+def detect_key_prefix(keys, num_layers: int) -> Optional[str]:
+    """The prefix a checkpoint puts before `layers.N.`, if it uses one.
+
+    Plain text models write `model.layers.0....`. Others put the language
+    model deeper — `model.language_model.layers.0....` is what Qwen's
+    multimodal and MoE checkpoints use — and a loader that knows only the
+    first form matches nothing at all.
+
+    Which is exactly what happened, and quietly: every key was declared
+    somebody else's business, zero tensors were loaded, and the stage came up
+    "healthy" holding uninitialised memory.
+
+    The prefix is chosen by counting, not guessing: a multimodal checkpoint
+    also has `visual.blocks.N.` and similar, so the winner is the one whose
+    layer indices actually reach the model's layer count.
+    """
+    spans: Dict[str, set] = {}
+    for key in keys:
+        match = _LAYER_KEY.match(key)
+        if match:
+            spans.setdefault(match.group("prefix"), set()).add(int(match.group("index")))
+    if not spans:
+        return None
+    complete = [p for p, idx in spans.items() if max(idx) >= num_layers - 1]
+    candidates = complete or list(spans)
+    return max(candidates, key=lambda p: len(spans[p]))
+
+
 def shard_target_key(
-    key: str, *, start_layer: int, end_layer: int, is_first: bool, is_last: bool
+    key: str,
+    *,
+    start_layer: int,
+    end_layer: int,
+    is_first: bool,
+    is_last: bool,
+    prefix: str = "model.",
 ) -> Optional[str]:
     """Map a checkpoint key to this stage's local parameter name, or None.
 
-    `model.layers.{global}` -> `layers.{global - start_layer}`; embeddings and
-    head belong only to the stages whose role needs them. Returning None means
-    "this tensor is somebody else's" — which is also what tells the downloader
-    that a whole safetensors file can be skipped.
+    `{prefix}layers.{global}` -> `layers.{global - start_layer}`; embeddings
+    and head belong only to the stages whose role needs them. Returning None
+    means "this tensor is somebody else's" — which is also what tells the
+    downloader that a whole safetensors file can be skipped.
     """
-    if key.startswith("model.layers."):
-        rest = key[len("model.layers.") :]
-        idx_str, _, tail = rest.partition(".")
-        try:
-            idx = int(idx_str)
-        except ValueError:
-            return None
+    match = _LAYER_KEY.match(key)
+    if match and match.group("prefix") == prefix:
+        idx = int(match.group("index"))
         if not (start_layer <= idx < end_layer):
             return None
-        return f"layers.{idx - start_layer}.{tail}"
-    if key in ("model.embed_tokens.weight", "embed_tokens.weight"):
+        return f"layers.{idx - start_layer}.{match.group('tail')}"
+    if key in (f"{prefix}embed_tokens.weight", "embed_tokens.weight"):
         return "embed.weight" if is_first else None
-    if key in ("model.norm.weight", "norm.weight"):
+    if key in (f"{prefix}norm.weight", "norm.weight"):
         return "norm.weight" if is_last else None
-    if key == "lm_head.weight":
+    # The head is usually top level even when everything else is nested.
+    if key in ("lm_head.weight", f"{prefix}lm_head.weight"):
         return "lm_head.weight" if is_last else None
     return None
 
@@ -73,6 +108,9 @@ def needed_weight_files(
     An empty result means the checkpoint does not use the key naming we know,
     and the caller must fall back to all files rather than load nothing.
     """
+    prefix = detect_key_prefix(weight_map, end_layer)
+    if prefix is None:
+        return []
     files = set()
     for key, file_name in weight_map.items():
         if shard_target_key(
@@ -81,6 +119,7 @@ def needed_weight_files(
             end_layer=end_layer,
             is_first=is_first,
             is_last=is_last,
+            prefix=prefix,
         ) is not None:
             files.add(file_name)
     # Tied embeddings: the head is not in the checkpoint at all, so the last
@@ -205,6 +244,8 @@ class ShardModel:
         self.norm = None  # only on the last stage
         self.lm_head = None  # only on the last stage
         self.rotary = None
+        # How this checkpoint names its tensors; read from the file at load.
+        self._key_prefix = "model."
 
     # ------------------------------------------------------------------ build
     def build(self) -> "ShardModel":
@@ -352,6 +393,7 @@ class ShardModel:
             end_layer=self.spec.end_layer,
             is_first=self.spec.is_first,
             is_last=self.spec.is_last,
+            prefix=self._key_prefix,
         )
 
     def _modules_by_prefix(self) -> Dict[str, object]:
@@ -375,9 +417,15 @@ class ShardModel:
             for name, buf in module.named_buffers(recurse=True):
                 targets[f"{prefix}.{name}"] = buf
 
+        files = self._weight_files()
+        # Resolve the checkpoint's naming once, from the keys themselves. A
+        # model that nests its language model deeper than `model.layers.N`
+        # would otherwise match nothing and load nothing.
+        self._key_prefix = self._resolve_key_prefix(files)
+
         loaded, skipped = 0, 0
         seen_lm_head = False
-        for file in self._weight_files():
+        for file in files:
             with safe_open(file, framework="pt", device="cpu") as f:
                 for key in f.keys():
                     target_name = self._target_name(key)
@@ -402,6 +450,35 @@ class ShardModel:
             else:
                 raise RuntimeError("lm_head weights not found in checkpoint")
         logger.info("shard weights loaded: %d tensors (%d irrelevant keys skipped)", loaded, skipped)
+        if loaded == 0:
+            # Refusing here rather than serving. A stage that loaded nothing
+            # holds uninitialised memory: it starts, reports healthy, answers
+            # every request with noise, and the first sign of trouble is a
+            # crash several stages away with no hint of the cause.
+            raise RuntimeError(
+                f"no weights matched this stage: {skipped} keys in "
+                f"{len(files)} file(s), none of them for layers "
+                f"[{self.spec.start_layer}, {self.spec.end_layer}). The "
+                f"checkpoint names its tensors "
+                f"'{self._key_prefix}layers.N....' — if that looks wrong, this "
+                f"model's layout is one shard_target_key() does not know"
+            )
+
+    def _resolve_key_prefix(self, files: List[str]) -> str:
+        """Read the naming out of the checkpoint rather than assuming it."""
+        from safetensors import safe_open
+
+        total = int(getattr(self.config, "num_hidden_layers", self.spec.end_layer))
+        keys: List[str] = []
+        for file in files:
+            with safe_open(file, framework="pt", device="cpu") as handle:
+                keys.extend(handle.keys())
+        prefix = detect_key_prefix(keys, total)
+        if prefix is None:
+            return "model."  # nothing layer-shaped; the caller will refuse
+        if prefix != "model.":
+            logger.info("checkpoint nests its layers under %r", prefix)
+        return prefix
 
     def _load_tied_lm_head(self, targets: Dict[str, object]) -> None:
         """Fill lm_head from the (tied) input embedding matrix."""
