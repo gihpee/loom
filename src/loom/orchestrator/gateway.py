@@ -7,6 +7,7 @@ futures) and forwards worker events to the controller callbacks.
 from __future__ import annotations
 
 import asyncio
+import time
 import uuid
 from typing import Dict, Optional
 
@@ -105,6 +106,9 @@ class ControlGatewayServicer(gateway_pb2_grpc.ControlGatewayServicer):
         self.keystore = keystore
         self.controller = controller  # duck-typed: on_register/on_telemetry/on_endpoint/on_disconnect
         self.sessions: Dict[str, WorkerSession] = {}
+        # When each node id last registered, to tell a reconnect apart from
+        # two workers fighting over one name.
+        self._registered_at: Dict[str, float] = {}
 
     async def Attach(self, request_iterator, context):
         session: Optional[WorkerSession] = None
@@ -181,6 +185,22 @@ class ControlGatewayServicer(gateway_pb2_grpc.ControlGatewayServicer):
                 old = self.sessions.pop(reg.node_id, None)
                 if old is not None:
                     old.close()
+                    # A session replaced seconds after it opened is not a
+                    # reconnect — it is two different workers answering to one
+                    # name, each evicting the other. The node then blinks in
+                    # the table and serves nothing, which looks like a network
+                    # fault and is not one.
+                    previous = self._registered_at.get(reg.node_id)
+                    if previous is not None and time.time() - previous < 30:
+                        logger.warning(
+                            "node %s registered again %.1fs after the last one: "
+                            "two workers are probably sharing this node id. With "
+                            "--network host they share a hostname too — give each "
+                            "its own LOOM_NODE_ID",
+                            reg.node_id,
+                            time.time() - previous,
+                        )
+                self._registered_at[reg.node_id] = time.time()
                 self.sessions[reg.node_id] = session
                 holder["session"] = session
                 holder["ready"].set()

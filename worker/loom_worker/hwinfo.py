@@ -131,9 +131,75 @@ def _host_ram_gb() -> float:
         return 0.0
 
 
+def gpu_fingerprint() -> str:
+    """A short, stable id for the SET OF CARDS this process can see.
+
+    Two workers on one machine, each given different cards, are two nodes —
+    but with `--network host` they share a hostname, so the orchestrator saw
+    one node registering twice a second, each registration evicting the other.
+    The node blinked and served nothing.
+
+    Card UUIDs rather than indices: Docker renumbers what it passes through,
+    so the card handed over as `device=1` is index 0 inside the container.
+    UUIDs survive that, and survive restarts, so the id stays the same node.
+    """
+    try:
+        import pynvml
+
+        pynvml.nvmlInit()
+        uuids = []
+        for index in range(pynvml.nvmlDeviceGetCount()):
+            handle = pynvml.nvmlDeviceGetHandleByIndex(index)
+            uuid = pynvml.nvmlDeviceGetUUID(handle)
+            uuids.append(uuid.decode() if isinstance(uuid, bytes) else str(uuid))
+    except Exception:
+        uuids = []
+    if not uuids:
+        # No NVML: fall back to whatever the operator asked for. Worse than a
+        # UUID (it moves if the request changes) but still distinguishes two
+        # containers on one host, which is the whole point.
+        uuids = [_visible_devices()]
+    import hashlib
+
+    return hashlib.sha256("|".join(sorted(uuids)).encode()).hexdigest()[:6]
+
+
+def _visible_devices() -> str:
+    """What this container was told it may use, if anything."""
+    for name in ("NVIDIA_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES"):
+        value = os.environ.get(name, "").strip()
+        if value:
+            return value
+    return ""
+
+
+def sees_only_some_gpus() -> bool:
+    """Was this process handed a subset of the machine's cards?
+
+    Only then does the node id need a suffix. A worker with the whole machine
+    keeps the plain hostname it has always had, so existing nodes do not turn
+    into new ones on upgrade.
+    """
+    value = _visible_devices()
+    return bool(value) and value.lower() not in ("all", "void", "none")
+
+
 # --- NVIDIA detection paths (in priority order) -----------------------------
 def _nvidia_via_nvml() -> Optional[Tuple[int, str, int, int]]:
-    """(num_gpus, name, total_bytes, free_bytes) of device 0 via NVML."""
+    """(num_gpus, name, total_bytes, free_bytes) over EVERY visible GPU.
+
+    Summed, not device 0. A host with four cards used to offer one of them:
+    the memory of device 0 was reported, a stage was placed to fit it, and the
+    other three sat idle while their owner believed all four were earning.
+
+    Free memory rather than total, per card: a card someone else is already
+    using contributes only what is left on it, and one that is full
+    contributes nothing without making the node unusable.
+
+    The name is device 0's. Mixed-card hosts exist and the label is then
+    approximate — the memory figure, which is what placement actually uses,
+    stays exact.
+    """
     try:
         import pynvml
 
@@ -141,12 +207,17 @@ def _nvidia_via_nvml() -> Optional[Tuple[int, str, int, int]]:
         count = pynvml.nvmlDeviceGetCount()
         if count == 0:
             return None
-        handle = pynvml.nvmlDeviceGetHandleByIndex(0)
-        name = pynvml.nvmlDeviceGetName(handle)
-        if isinstance(name, bytes):
-            name = name.decode()
-        mem = pynvml.nvmlDeviceGetMemoryInfo(handle)
-        return count, name, int(mem.total), int(mem.free)
+        name, total, free = "", 0, 0
+        for index in range(count):
+            handle = pynvml.nvmlDeviceGetHandleByIndex(index)
+            if not name:
+                name = pynvml.nvmlDeviceGetName(handle)
+                if isinstance(name, bytes):
+                    name = name.decode()
+            mem = pynvml.nvmlDeviceGetMemoryInfo(handle)
+            total += int(mem.total)
+            free += int(mem.free)
+        return count, name, total, free
     except Exception:
         return None
 
@@ -158,14 +229,18 @@ def _nvidia_via_torch() -> Optional[Tuple[int, str, int, int]]:
         if not torch.cuda.is_available():
             return None
         count = torch.cuda.device_count()
-        props = torch.cuda.get_device_properties(0)
-        total = int(props.total_memory)
-        try:
-            free, _ = torch.cuda.mem_get_info(0)
-            free = int(free)
-        except Exception:
-            free = total
-        return count, str(props.name), total, free
+        # Every card, same as the NVML path: a multi-GPU host offers all of it.
+        name, total, free = "", 0, 0
+        for index in range(count):
+            props = torch.cuda.get_device_properties(index)
+            name = name or str(props.name)
+            total += int(props.total_memory)
+            try:
+                on_card, _ = torch.cuda.mem_get_info(index)
+                free += int(on_card)
+            except Exception:
+                free += int(props.total_memory)
+        return count, name, total, free
     except Exception:
         return None
 
@@ -186,13 +261,13 @@ def _nvidia_via_smi() -> Optional[Tuple[int, str, int, int]]:
         lines = [l for l in out.splitlines() if l.strip()]
         if not lines:
             return None
-        name, total_mib, free_mib = (p.strip() for p in lines[0].split(","))
-        return (
-            len(lines),
-            name,
-            int(float(total_mib)) * 1024 * 1024,
-            int(float(free_mib)) * 1024 * 1024,
-        )
+        name, total, free = "", 0, 0
+        for line in lines:  # one line per card; all of them count
+            card, total_mib, free_mib = (p.strip() for p in line.split(","))
+            name = name or card
+            total += int(float(total_mib)) * 1024 * 1024
+            free += int(float(free_mib)) * 1024 * 1024
+        return len(lines), name, total, free
     except Exception:
         return None
 

@@ -139,9 +139,23 @@ class ShardExecutor:
                 "position_embeddings": position_embeddings,
                 self._cache_kwarg: state.cache,
             }
-            for layer in self.shard.layers:
+            # Layers may live on different cards of this host. Where the card
+            # changes, the state moves with it — a copy over PCIe measured in
+            # microseconds for one token, against ~20 ms for the same boundary
+            # placed on another machine. This is why a multi-GPU host should be
+            # one node and not several.
+            devices = self.shard.layer_devices or [self.shard.device] * len(
+                self.shard.layers
+            )
+            here = devices[0]
+            for layer, device in zip(self.shard.layers, devices):
+                if device != here:
+                    h, layer_kwargs = self._move(h, layer_kwargs, device)
+                    here = device
                 out = layer(h, **layer_kwargs)
                 h = out[0] if isinstance(out, tuple) else out
+            if self.spec.is_last and here != self.shard.devices[-1]:
+                h, layer_kwargs = self._move(h, layer_kwargs, self.shard.devices[-1])
 
             state.seen_tokens += len(positions)
 
@@ -151,6 +165,24 @@ class ShardExecutor:
             h = self.shard.norm(h)
             logits = self.shard.lm_head(h[:, -1:, :])
             return None, logits[0, -1].float()
+
+    def _move(self, h, layer_kwargs, device):
+        """Carry the running state to another card of this host.
+
+        Everything a layer reads and that carries a device has to come along:
+        the hidden state, the positions, and the rotary tables. Leaving one
+        behind fails immediately with a device mismatch rather than silently,
+        which is the one mercy of this class of bug.
+        """
+        moved = dict(layer_kwargs)
+        for key in ("position_ids", "cache_position"):
+            value = moved.get(key)
+            if value is not None:
+                moved[key] = value.to(device)
+        embeddings = moved.get("position_embeddings")
+        if embeddings is not None:
+            moved["position_embeddings"] = tuple(e.to(device) for e in embeddings)
+        return h.to(device), moved
 
     # ---------------------------------------------------------------- sampling
     def sample(

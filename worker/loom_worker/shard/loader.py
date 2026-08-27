@@ -93,6 +93,84 @@ def needed_weight_files(
     return sorted(files)
 
 
+def resolve_devices(device: str) -> list:
+    """Every card this stage may use, in order.
+
+    "cuda" means all of them — the whole point of this: a host with four cards
+    should offer four, not the one torch picks by default. "cuda:1" pins to
+    exactly that card, which is how an operator splits a machine between two
+    workers, and how a test asks for one device on a multi-card box.
+
+    LOOM_SHARD_DEVICES overrides both, as a comma-separated list.
+    """
+    import torch
+
+    override = os.environ.get("LOOM_SHARD_DEVICES", "").strip()
+    if override:
+        return [torch.device(d.strip()) for d in override.split(",") if d.strip()]
+    if device != "cuda":
+        return [torch.device(device)]
+    try:
+        count = torch.cuda.device_count()
+    except Exception:
+        count = 0
+    if count <= 1:
+        return [torch.device("cuda")]
+    return [torch.device(f"cuda:{i}") for i in range(count)]
+
+
+def plan_layer_devices(num_layers: int, devices: list) -> list:
+    """Which card each layer goes on, proportional to what is free on it.
+
+    Contiguous runs, never interleaved: the hidden state crosses between cards
+    once per boundary, so k cards cost k-1 crossings and nothing more. An even
+    split would be simpler and wrong on a mixed host — a 4090 next to a 3090
+    should carry more of the model, not half of it.
+
+    A card with no room for even one layer is dropped rather than assigned a
+    layer that will not fit.
+    """
+    if len(devices) == 1:
+        return [devices[0]] * num_layers
+
+    weights = [max(_free_bytes(d), 0) for d in devices]
+    usable = [(d, w) for d, w in zip(devices, weights) if w > 0]
+    if not usable:
+        return [devices[0]] * num_layers
+    devices = [d for d, _ in usable]
+    weights = [w for _, w in usable]
+
+    total = float(sum(weights))
+    shares = [max(1, round(num_layers * w / total)) for w in weights]
+    # Rounding can overshoot or undershoot; settle it on the largest card.
+    biggest = weights.index(max(weights))
+    shares[biggest] += num_layers - sum(shares)
+    while shares[biggest] < 1:  # a pathological split; give the rest back
+        donor = max(range(len(shares)), key=lambda i: shares[i])
+        if donor == biggest:
+            break
+        shares[donor] -= 1
+        shares[biggest] += 1
+
+    plan = []
+    for device, share in zip(devices, shares):
+        plan.extend([device] * max(0, share))
+    return plan[:num_layers] or [devices[0]] * num_layers
+
+
+def _free_bytes(device) -> int:
+    """Free memory on one card, or a neutral weight when it cannot be read."""
+    import torch
+
+    if getattr(device, "type", None) != "cuda":
+        return 1  # CPU, or anything without a memory figure: weigh them alike
+    try:
+        free, _total = torch.cuda.mem_get_info(device)
+        return int(free)
+    except Exception:
+        return 1
+
+
 @dataclass
 class ShardSpec:
     model_path: str
@@ -114,8 +192,14 @@ class ShardModel:
         self.config = config
         self.torch = torch
         self.dtype = torch_dtype
-        self.device = torch.device(spec.device)
+        # Every card this process may use, in order. One entry for a single
+        # device or for CPU; several when the host has several GPUs and the
+        # stage was not pinned to one of them.
+        self.devices = resolve_devices(spec.device)
+        self.device = self.devices[0]
         self.num_layers = spec.end_layer - spec.start_layer
+        # Which card each of this stage's layers lives on. Filled at build.
+        self.layer_devices: List = []
         self.embed = None  # only on the first stage
         self.layers = None
         self.norm = None  # only on the last stage
@@ -150,10 +234,18 @@ class ShardModel:
             self.norm = inner.norm
             self.lm_head = skeleton.lm_head
 
-        # Materialise only the modules this stage keeps (meta -> real memory).
-        for module in (self.embed, self.layers, self.norm, self.lm_head):
+        # Materialise only the modules this stage keeps (meta -> real memory),
+        # spreading the layers over the cards this host actually has. The
+        # embeddings sit with the first layer and the head with the last, so
+        # the hidden state enters and leaves the stage without an extra move.
+        self.layer_devices = plan_layer_devices(self.num_layers, self.devices)
+        for layer, device in zip(self.layers, self.layer_devices):
+            layer.to_empty(device=device)
+        if self.embed is not None:
+            self.embed.to_empty(device=self.devices[0])
+        for module in (self.norm, self.lm_head):
             if module is not None:
-                module.to_empty(device=self.device)
+                module.to_empty(device=self.devices[-1])
 
         # Rotary embeddings must NOT go through meta + to_empty(): `inv_freq` is
         # a non-persistent buffer computed in __init__ and absent from the
@@ -179,12 +271,21 @@ class ShardModel:
             self.spec.start_layer,
             self.spec.end_layer,
             total_layers,
-            self.spec.device,
+            self._device_summary(),
             self.spec.is_first,
             self.spec.is_last,
             self.spec.dtype,
         )
         return self
+
+    def _device_summary(self) -> str:
+        """How the layers ended up spread, for the one line that says so."""
+        if len(self.devices) == 1:
+            return str(self.devices[0])
+        counts: dict = {}
+        for device in self.layer_devices:
+            counts[str(device)] = counts.get(str(device), 0) + 1
+        return ", ".join(f"{d}: {n} layers" for d, n in counts.items())
 
     def _assert_materialised(self) -> None:
         """Fail loudly if any tensor is still meta or holds garbage.
@@ -289,7 +390,7 @@ class ShardModel:
                         continue
                     tensor = f.get_tensor(key).to(dtype=self.dtype)
                     with self.torch.no_grad():
-                        param.copy_(tensor.to(self.device))
+                        param.copy_(tensor.to(param.device))
                     loaded += 1
                     if target_name == "lm_head.weight":
                         seen_lm_head = True
@@ -313,7 +414,7 @@ class ShardModel:
                     if key in ("model.embed_tokens.weight", "embed_tokens.weight"):
                         tensor = f.get_tensor(key).to(dtype=self.dtype)
                         with self.torch.no_grad():
-                            param.copy_(tensor.to(self.device))
+                            param.copy_(tensor.to(param.device))
                         logger.info("lm_head filled from tied embeddings")
                         return
         raise RuntimeError("tie_word_embeddings=True but no embedding weights found")

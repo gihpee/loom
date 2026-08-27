@@ -206,12 +206,34 @@ class DataPlaneClient:
                 return
             yield msg
 
-    def _run_once(self) -> None:
+    def channel_options(self) -> list:
+        """gRPC options for the tunnel. Public so a test can check them.
+
+        There is nothing to observe from outside about a stream that fails to
+        notice it is dead — it simply sits there — so the guarantee has to be
+        asserted on the configuration itself.
+        """
         limit = self.max_message_mb * 1024 * 1024
-        options = [
+        return [
             ("grpc.max_send_message_length", limit),
             ("grpc.max_receive_message_length", limit),
+            # Keepalive, the same as the control channel already has. Without
+            # it this stream is silent between requests, and a path that
+            # disappears — a VPN switched on or off, a laptop changing
+            # networks — leaves it half open: the worker keeps reading a
+            # stream whose far end is gone, forever. The control channel
+            # notices within seconds and reconnects, so the node looks alive
+            # while its tunnel is dead and no inference can reach it.
+            #
+            # 20 s is well inside the idle timeouts of the NATs and VPNs this
+            # has to survive, and the traffic is a few bytes.
+            ("grpc.keepalive_time_ms", 20000),
+            ("grpc.keepalive_timeout_ms", 10000),
+            ("grpc.keepalive_permit_without_calls", 1),
         ]
+
+    def _run_once(self) -> None:
+        options = self.channel_options()
         outbox: "queue.Queue[object]" = queue.Queue()
         self._outbox = outbox
         try:

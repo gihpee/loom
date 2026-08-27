@@ -30,7 +30,7 @@ from loom_worker import __version__
 from loom_worker.dataplane_client import DataPlaneClient
 from loom_worker.gateway_client import GatewayClient
 from loom_worker.handlers import CommandHandlers
-from loom_worker.hwinfo import detect_hardware
+from loom_worker.hwinfo import detect_hardware, gpu_fingerprint, sees_only_some_gpus
 from loom_worker.p2p import (
     DEFAULT_P2P_PORT,
     LinkTable,
@@ -94,6 +94,42 @@ def build_hardware_message() -> gateway_pb2.HardwareInfo:
 # How often the p2p state is re-measured. Nothing waits on this thread, so it
 # can be leisurely; what matters is that nothing else does the measuring.
 SAMPLE_INTERVAL_S = float(os.environ.get("LOOM_P2P_SAMPLE_S", "10"))
+
+
+def default_node_id() -> str:
+    """What this worker calls itself when nobody said.
+
+    The hostname, plus the cards it was given when that is only some of them.
+    Two containers on one machine with `--gpus device=0` and `--gpus device=1`
+    are two nodes and must say so: sharing a hostname (which `--network host`
+    guarantees) made the orchestrator treat them as one, and every
+    registration evicted the other's session. The node blinked and served
+    nothing.
+
+    A worker holding the whole machine keeps the bare hostname it always had,
+    so upgrading does not turn every existing node into a new one.
+    """
+    hostname = socket.gethostname()
+    if not sees_only_some_gpus():
+        return hostname
+    suffix = gpu_fingerprint()
+    node_id = f"{hostname}-{suffix}" if suffix else hostname
+    logger.info(
+        "this worker was given only some of the machine's GPUs; calling itself "
+        "%s so it does not collide with the others on %s",
+        node_id,
+        hostname,
+    )
+    return node_id
+
+
+def _per_card(hardware) -> int:
+    """The host's VRAM divided by its cards.
+
+    Exact on the usual host, where the cards are identical; approximate on a
+    mixed one, which is the same approximation `gpu_name` already makes.
+    """
+    return int(hardware.vram_total_bytes // max(1, hardware.num_gpus or 1))
 
 
 def _env_relays() -> List[str]:
@@ -327,8 +363,8 @@ def main(argv=None) -> None:
         )
         sys.exit(2)
 
-    hostname = socket.gethostname()
-    state = WorkerState(node_id=args.node_id or hostname, advertise_host="127.0.0.1")
+    node_id = args.node_id or default_node_id()
+    state = WorkerState(node_id=node_id, advertise_host="127.0.0.1")
     hardware = build_hardware_message()
 
     verifier = None
@@ -360,8 +396,13 @@ def main(argv=None) -> None:
         links=peers.links,
         peer_status=peers.status,
         backend_kwargs={
-            "vllm": {"total_vram_bytes": hardware.vram_total_bytes},
-            "sglang": {"total_vram_bytes": hardware.vram_total_bytes},
+            # Per CARD, not per host. The hardware report sums every GPU, so a
+            # node with two 24 GB cards declares 48 — right for placement,
+            # wrong here: vLLM's --gpu-memory-utilization is a fraction of the
+            # single card it runs on, and handing it the host total would make
+            # it claim half of what the quota actually allows.
+            "vllm": {"total_vram_bytes": _per_card(hardware)},
+            "sglang": {"total_vram_bytes": _per_card(hardware)},
         },
     )
     client = GatewayClient(
