@@ -614,6 +614,7 @@ async function sendChat() {
   // between the two is what the API hop plus the worker tunnel cost.
   const t0 = performance.now();
   let firstChunkAt = null, chunkTimes = [], text = "", reason = null;
+  let streamError = null;
   let usage = null, timings = null;
   try {
     const r = await fetch("/v1/chat/completions", {method:"POST", headers: headers(), body: JSON.stringify(body)});
@@ -648,12 +649,21 @@ async function sendChat() {
               if (choice.finish_reason) reason = choice.finish_reason;
               if (frame.usage) usage = frame.usage;        // closing chunk
               if (frame.timings) timings = frame.timings;  // closing chunk
+              // A stage that fails sends this instead of tokens. It used to be
+              // parsed and dropped: the run ended with an empty answer, zero
+              // tokens and no hint of why — the failure looked like a timeout
+              // and was a message nobody read.
+              if (frame.error) streamError = String(frame.error);
             } catch (e) { /* a frame we cannot parse is not worth breaking the view */ }
           }
         }
         out.textContent = text;  // grows live, like a chat
       }
       if (reason) out.textContent = text + reasonNote(reason);
+      if (streamError) {
+        out.textContent = (text ? text + "\n\n" : "") +
+          "\u2717 пайплайн вернул ошибку:\n" + streamError;
+      }
     } else {
       const j = await r.json();
       if (r.ok && j.choices) {

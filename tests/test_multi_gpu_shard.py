@@ -234,3 +234,25 @@ def test_an_explicit_node_id_still_wins(monkeypatch):
 
     monkeypatch.setenv("NVIDIA_VISIBLE_DEVICES", "1")
     assert parse_args(["--node-id", "chosen"]).node_id == "chosen"
+
+
+# --------------------------------------------- an error must reach the operator
+def test_the_console_shows_a_pipeline_error_instead_of_an_empty_answer():
+    """A failing stage used to produce silence, and silence reads as a hang.
+
+    The head turns a stage's failure into an SSE frame carrying `error`. The
+    test console parsed that frame, found no `delta.content` in it, and moved
+    on — so a four-stage deployment that raised on its first token showed an
+    empty answer, "0 tokens", and no reason anywhere on the page.
+    """
+    ui = (Path(__file__).resolve().parent.parent
+          / "src/loom/api/admin_ui.html").read_text()
+
+    assert "frame.error" in ui, "the console still ignores the error frame"
+    # And it must reach the visible output, not just sit in a variable.
+    shown = [line for line in ui.splitlines() if "out.textContent" in line]
+    assert any("streamError" in line for line in shown) or any(
+        "streamError" in ui.splitlines()[i - 1]
+        for i, line in enumerate(ui.splitlines())
+        if "out.textContent" in line and i
+    ), "the error is captured but never displayed"
