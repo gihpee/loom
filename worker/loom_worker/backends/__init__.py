@@ -8,7 +8,9 @@ from loom_worker.backends.base import BackendAdapter
 from loom_worker.backends.echo import EchoBackend
 from loom_worker.backends.mlx import MlxBackend
 from loom_worker.backends.mlx_shard import MlxShardBackend
+from loom_worker.backends.compute import ComputeBackend
 from loom_worker.backends.shard import ShardBackend
+from loom_worker.backends.train_shard import TrainShardBackend
 from loom_worker.backends.sglang import SglangBackend
 from loom_worker.backends.vllm import VllmBackend
 from loom_worker.backends.vllm_shard import VllmShardBackend
@@ -27,6 +29,10 @@ BACKENDS = {
     "mlx_shard": MlxShardBackend,
     # Test-only stub: lets the control plane and API be exercised end-to-end on
     # hosts without GPUs. Not a production backend.
+    # Trains a stage instead of serving one (docs/TRAINING.md).
+    "train_shard": TrainShardBackend,
+    # Rents this node out for arbitrary work (docs/COMPUTE.md).
+    "compute": ComputeBackend,
     "echo": EchoBackend,
 }
 
@@ -44,7 +50,9 @@ __all__ = [
     "VllmBackend",
     "SglangBackend",
     "MlxBackend",
+    "ComputeBackend",
     "ShardBackend",
+    "TrainShardBackend",
     "VllmShardBackend",
     "MlxShardBackend",
     "EchoBackend",

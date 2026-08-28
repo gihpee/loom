@@ -296,6 +296,98 @@ def create_app(controller: MultiModelController) -> FastAPI:
             return _error(403, "invalid admin token")
         return controller.nodes_view()
 
+    # ------------------------------------------------------------- compute
+    @app.post("/admin/jobs")
+    async def admin_submit_job(
+        payload: dict, x_loom_admin_token: str | None = Header(default=None)
+    ):
+        """Place a job on the fleet and start it.
+
+        `tasks` decides how several providers combine. Loom cannot look inside
+        a container, so it cannot split the work: it either spreads
+        independent tasks (kind "array") or allocates a group that coordinates
+        itself (kind "gang").
+        """
+        if _admin_forbidden(x_loom_admin_token):
+            return _error(403, "invalid admin token")
+        from loom.orchestrator.jobs import JobError
+
+        try:
+            job = controller.submit_job(payload or {})
+        except JobError as exc:
+            return _error(409, str(exc))
+        started = await controller.start_job(job.job_id)
+        return {**job.as_dict(), **started}
+
+    @app.get("/admin/jobs")
+    async def admin_jobs(x_loom_admin_token: str | None = Header(default=None)):
+        if _admin_forbidden(x_loom_admin_token):
+            return _error(403, "invalid admin token")
+        return controller.jobs_view()
+
+    @app.get("/admin/jobs/{job_id}")
+    async def admin_job(job_id: str, x_loom_admin_token: str | None = Header(default=None)):
+        if _admin_forbidden(x_loom_admin_token):
+            return _error(403, "invalid admin token")
+        try:
+            return await controller.job_status(job_id)
+        except ValueError as exc:
+            return _error(404, str(exc))
+
+    @app.get("/admin/jobs/{job_id}/logs/{index}")
+    async def admin_job_logs(
+        job_id: str, index: int, tail: int = 200,
+        x_loom_admin_token: str | None = Header(default=None),
+    ):
+        if _admin_forbidden(x_loom_admin_token):
+            return _error(403, "invalid admin token")
+        try:
+            return await controller.job_logs(job_id, index, tail)
+        except ValueError as exc:
+            return _error(404, str(exc))
+
+    @app.delete("/admin/jobs/{job_id}")
+    async def admin_cancel_job(
+        job_id: str, x_loom_admin_token: str | None = Header(default=None)
+    ):
+        if _admin_forbidden(x_loom_admin_token):
+            return _error(403, "invalid admin token")
+        try:
+            return await controller.cancel_job(job_id)
+        except ValueError as exc:
+            return _error(404, str(exc))
+
+    # ------------------------------------------------------------ training
+    @app.post("/admin/train/{model_id}/{action}")
+    async def admin_train(
+        model_id: str,
+        action: str,
+        payload: dict | None = None,
+        x_loom_admin_token: str | None = Header(default=None),
+    ):
+        """Start, stop or ask after a training run on a deployed pipeline.
+
+        Deploy first, with backend `train_shard`: a training pipeline is laid
+        out exactly the way a serving one is, so placement, quotas and the
+        stage transport are the ones that already work.
+        """
+        if _admin_forbidden(x_loom_admin_token):
+            return _error(403, "invalid admin token")
+        if action not in ("start", "stop", "status", "save"):
+            return _error(400, f"unknown training action {action!r}")
+        try:
+            return await controller.train_control(model_id, action, payload or {})
+        except ValueError as exc:
+            return _error(404, str(exc))
+        except Exception as exc:  # noqa: BLE001 - reported, not hidden
+            return _error(502, f"the head stage did not answer: {exc}")
+
+    @app.get("/admin/train")
+    async def admin_train_runs(x_loom_admin_token: str | None = Header(default=None)):
+        if _admin_forbidden(x_loom_admin_token):
+            return _error(403, "invalid admin token")
+        return controller.training_view()
+
     @app.get("/admin/models_view")
     async def admin_models_view(x_loom_admin_token: str | None = Header(default=None)):
         if _admin_forbidden(x_loom_admin_token):

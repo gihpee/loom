@@ -18,6 +18,7 @@ so a node's VRAM is never oversubscribed.
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from collections import deque
 from typing import Deque, Dict, List, Optional, Tuple
@@ -116,6 +117,10 @@ class MultiModelController:
         self.nodes: Dict[str, NodeDescriptor] = {}
         self.sessions: Dict[str, WorkerSession] = {}
         self.deployed: Deployment = {}
+        # Rented compute, kept apart from model deployments on purpose: a job
+        # is opaque work on borrowed machines, not a model this orchestrator
+        # knows how to split.
+        self.jobs: Dict[str, object] = {}
         # model_id -> Placement. A model in the catalog is a model that MAY
         # run; it runs only once someone deploys it. Deliberately not
         # persisted: after a restart the stand comes up idle and the next
@@ -1008,6 +1013,233 @@ class MultiModelController:
         return min(candidates, key=lambda ep: ep.metrics.inflight)
 
     # ---------------------------------------------------- admin UI (read-only)
+    # -------------------------------------------------------------- compute
+    def _fleet_capacity(self) -> dict:
+        """What each node could give a task, as the scheduler wants it."""
+        return {
+            node_id: {
+                "vram_free_bytes": d.vram_free_bytes,
+                "ram_bytes": int((d.hardware.host_ram_gb or 0) * GIB),
+                "cpus": float(getattr(d.hardware, "num_cpus", 0) or 8),
+                "num_gpus": int(d.hardware.num_gpus or 0),
+            }
+            for node_id, d in self.nodes.items()
+            if node_id in self.sessions
+        }
+
+    def _reserved(self) -> dict:
+        """What running tasks already hold, so nothing is promised twice."""
+        from loom.orchestrator.jobs import Resources
+
+        held: dict = {}
+        for job in self.jobs.values():
+            if job.state in ("done", "failed", "cancelled"):
+                continue
+            for task in job.tasks:
+                if not task.node_id or task.state in ("done", "failed", "cancelled"):
+                    continue
+                current = held.get(task.node_id)
+                r = job.resources
+                held[task.node_id] = Resources(
+                    vram_bytes=(current.vram_bytes if current else 0) + r.vram_bytes,
+                    ram_bytes=(current.ram_bytes if current else 0) + r.ram_bytes,
+                    cpus=(current.cpus if current else 0.0) + r.cpus,
+                    gpus=max(current.gpus if current else 0, r.gpus),
+                    disk_bytes=(current.disk_bytes if current else 0) + r.disk_bytes,
+                )
+        return held
+
+    def submit_job(self, request: dict):
+        """Place a job on the fleet. Raises JobError with a readable reason."""
+        from loom.orchestrator.jobs import Resources, plan
+
+        job = plan(
+            image=request.get("image", ""),
+            command=list(request.get("command") or []),
+            env=dict(request.get("env") or {}),
+            nodes=self._fleet_capacity(),
+            resources=Resources.from_request(request.get("resources")),
+            task_count=int(request.get("tasks", 1)),
+            kind=request.get("kind", "array"),
+            timeout_s=int(request.get("timeout_s", 3600)),
+            reserved=self._reserved(),
+        )
+        self.jobs[job.job_id] = job
+        return job
+
+    async def start_job(self, job_id: str) -> dict:
+        """Send every placed task to its node.
+
+        A gang job is started only if every task can be handed over: its ranks
+        expect each other, and half a gang is a set of processes waiting for
+        peers that will never arrive.
+        """
+        from loom.orchestrator.jobs import gang_env
+
+        job = self.jobs.get(job_id)
+        if job is None:
+            raise ValueError(f"no job {job_id!r}")
+        addresses = {t.index: t.node_id for t in job.tasks}
+        started, failures = [], []
+        for task in job.tasks:
+            if not task.node_id:
+                continue
+            env = dict(job.env)
+            if job.kind == "gang":
+                env.update(gang_env(job, task, addresses))
+            body = {
+                "task_id": task.task_id,
+                "image": job.image,
+                "command": job.command,
+                "env": env,
+                "timeout_s": job.timeout_s,
+                **{k: v for k, v in (
+                    ("vram_bytes", job.resources.vram_bytes),
+                    ("ram_bytes", job.resources.ram_bytes),
+                    ("cpus", job.resources.cpus),
+                    ("gpus", job.resources.gpus),
+                )},
+            }
+            try:
+                answer = await self._task_call(task.node_id, "run", body)
+            except Exception as exc:  # noqa: BLE001
+                task.state, task.error = "failed", f"{type(exc).__name__}: {exc}"
+                failures.append(task.task_id)
+                continue
+            if answer.get("error"):
+                task.state, task.error = "failed", str(answer["error"])
+                failures.append(task.task_id)
+                continue
+            task.state = answer.get("state", "running")
+            task.started_at = time.time()
+            started.append(task.task_id)
+        job.state = "running" if started else "failed"
+        return {"job_id": job.job_id, "started": started, "failed": failures}
+
+    async def job_status(self, job_id: str) -> dict:
+        job = self.jobs.get(job_id)
+        if job is None:
+            raise ValueError(f"no job {job_id!r}")
+        for task in job.tasks:
+            if not task.node_id or task.state in ("pending", "done", "failed", "cancelled"):
+                continue
+            try:
+                answer = await self._task_call(task.node_id, "status",
+                                               {"task_id": task.task_id})
+            except Exception as exc:  # noqa: BLE001
+                task.state, task.error = "failed", f"the node stopped answering: {exc}"
+                continue
+            task.state = answer.get("state", task.state)
+            task.exit_code = answer.get("exit_code")
+            task.error = answer.get("error") or task.error
+            if task.state in ("done", "failed", "cancelled") and not task.finished_at:
+                task.finished_at = time.time()
+        live = [t for t in job.tasks if t.state in ("pending", "starting", "running")]
+        if not live and job.state == "running":
+            job.state = "failed" if any(t.state == "failed" for t in job.tasks) else "done"
+        return job.as_dict()
+
+    async def job_logs(self, job_id: str, index: int, tail: int = 200) -> dict:
+        job = self.jobs.get(job_id)
+        if job is None:
+            raise ValueError(f"no job {job_id!r}")
+        task = next((t for t in job.tasks if t.index == index), None)
+        if task is None or not task.node_id:
+            raise ValueError(f"job {job_id} has no running task {index}")
+        return await self._task_call(
+            task.node_id, "logs", {"task_id": task.task_id, "tail": tail}
+        )
+
+    async def cancel_job(self, job_id: str) -> dict:
+        job = self.jobs.get(job_id)
+        if job is None:
+            raise ValueError(f"no job {job_id!r}")
+        for task in job.tasks:
+            if not task.node_id or task.state in ("done", "failed", "cancelled"):
+                continue
+            try:
+                await self._task_call(task.node_id, "stop", {"task_id": task.task_id})
+            except Exception:  # noqa: BLE001 - a node that is gone is already stopped
+                pass
+            task.state = "cancelled"
+            task.finished_at = time.time()
+        job.state = "cancelled"
+        return job.as_dict()
+
+    def jobs_view(self) -> dict:
+        return {"jobs": [job.as_dict() for job in self.jobs.values()]}
+
+    async def _task_call(self, node_id: str, action: str, body: dict) -> dict:
+        _head, raw = await self.tunnel.request_bytes(
+            node_id,
+            model_id=body.get("task_id", ""),
+            path=f"/task/{action}",
+            body=json.dumps(body).encode(),
+            headers={"Content-Type": "application/json"},
+            timeout_s=60,
+        )
+        try:
+            return json.loads(raw or b"{}")
+        except ValueError:
+            return {"error": (raw or b"").decode()[:400]}
+
+    # ------------------------------------------------------------- training
+    def head_node(self, model_id: str) -> Optional[str]:
+        """Which node holds stage 0 of this model's pipeline.
+
+        Stage 0 drives a training run: it holds the data, hands out the
+        micro-batches and is the only stage that knows a step happened. The
+        orchestrator talks to it and to nobody else.
+        """
+        for (mid, node_id), entry in self.deployed.items():
+            if mid == model_id and entry[4] == 0:
+                return node_id
+        return None
+
+    async def train_control(self, model_id: str, action: str, payload: dict) -> dict:
+        """Start, stop or ask after a training run, through the head's tunnel.
+
+        Deliberately thin. The orchestrator decides WHERE a run happens — that
+        is placement, which it already does — and the head decides how it
+        proceeds. Driving micro-batches from here would put every one of them
+        on the wire twice.
+        """
+        node_id = self.head_node(model_id)
+        if node_id is None:
+            raise ValueError(f"{model_id} is not deployed, so it cannot be trained")
+        head, body = await self.tunnel.request_bytes(
+            node_id,
+            model_id=model_id,
+            path=f"/train/{action}",
+            body=json.dumps(payload).encode(),
+            headers={"Content-Type": "application/json"},
+            timeout_s=120,
+        )
+        try:
+            answer = json.loads(body or b"{}")
+        except ValueError:
+            answer = {"error": (body or b"").decode()[:400]}
+        answer.setdefault("node_id", node_id)
+        answer.setdefault("status_code", getattr(head, "status", 0))
+        return answer
+
+    def training_view(self) -> dict:
+        """Every deployment that is a training run rather than a serving one."""
+        runs = {}
+        for (model_id, node_id), entry in self.deployed.items():
+            spec = self.registry.get(model_id)
+            if spec is None or getattr(spec, "backend_type", "") != "train_shard":
+                continue
+            runs.setdefault(model_id, {"model_id": model_id, "stages": []})
+            runs[model_id]["stages"].append({
+                "node_id": node_id,
+                "stage_index": entry[4],
+                "layers": [entry[1], entry[2]],
+            })
+        for run in runs.values():
+            run["stages"].sort(key=lambda s: s["stage_index"])
+        return {"runs": list(runs.values())}
+
     def nodes_view(self) -> dict:
         """Per-node view: hardware, liveness, hosted shards. Pure state read."""
         now = time.time()

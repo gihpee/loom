@@ -48,7 +48,7 @@
 </header>
 <main id="view"></main>
 <script>
-const TABS = ["Nodes","Models","Deploy","Keys","Perf-map","SLO / Rebalance","Console"];
+const TABS = ["Nodes","Models","Deploy","Compute","Keys","Perf-map","SLO / Rebalance","Console"];
 let active = localStorage.getItem("loom_tab") || "Nodes";
 let perfModel = null;
 const $ = s => document.querySelector(s);
@@ -1143,7 +1143,125 @@ function renderHistory() {
 }
 
 // ------------------------------------------------------------------ refresh
-const VIEWS = {"Nodes":viewNodes, "Models":viewModels, "Deploy":viewDeploy, "Keys":viewKeys,
+// ------------------------------------------------------------------ compute
+// Renting the fleet for work that is not a model. Loom cannot look inside a
+// client's container, so it cannot split the work: it spreads independent
+// tasks, or allocates a group that coordinates itself. The form says so,
+// because the difference decides whether a job runs at all.
+let jobMsg = "";
+
+async function submitJob() {
+  const command = $("#j-cmd").value.trim();
+  const body = {
+    image: $("#j-image").value.trim(),
+    command: command ? command.split(/\s+/) : [],
+    kind: $("#j-kind").value,
+    tasks: Number($("#j-tasks").value) || 1,
+    timeout_s: Number($("#j-timeout").value) || 3600,
+    resources: {
+      vram_gb: Number($("#j-vram").value) || 0,
+      ram_gb: Number($("#j-ram").value) || 0,
+      cpus: Number($("#j-cpus").value) || 1,
+    },
+  };
+  jobMsg = "размещаю...";
+  await refresh({reset: true});
+  try {
+    const r = await api("/admin/jobs", {method: "POST", body: JSON.stringify(body)});
+    jobMsg = `${r.job_id}: запущено ${(r.started || []).length}` +
+             ((r.failed || []).length ? `, не удалось ${r.failed.length}` : "");
+  } catch (e) { jobMsg = "не размещено: " + e.message; }
+  await refresh({reset: true});
+}
+
+async function cancelJob(id) {
+  try { await api("/admin/jobs/" + encodeURIComponent(id), {method: "DELETE"}); }
+  catch (e) { jobMsg = e.message; }
+  await refresh({reset: true});
+}
+
+async function showJobLogs(id, index) {
+  const out = $("#j-logs");
+  out.textContent = "...";
+  try {
+    const r = await api(`/admin/jobs/${encodeURIComponent(id)}/logs/${index}?tail=200`);
+    out.textContent = r.logs || "(пусто)";
+  } catch (e) { out.textContent = "логи недоступны: " + e.message; }
+}
+
+function jobStateCls(state) {
+  if (state === "done") return "ok";
+  if (state === "failed") return "bad";
+  if (state === "running") return "ok";
+  return "dim";
+}
+
+async function viewCompute() {
+  const data = await api("/admin/jobs");
+  const nodes = await api("/admin/nodes");
+  const free = Object.entries(data.jobs ? nodes.nodes : {})
+    .map(([id, n]) => `${esc(id)} ${n.vram_declared_gb} GB`).join(" · ");
+
+  const rows = (data.jobs || []).slice().reverse().map(j => {
+    const tasks = j.tasks.map(t =>
+      `<span class="${jobStateCls(t.state)}">#${t.index}</span> ` +
+      `<span class="dim">${esc(t.node_id || "в очереди")}</span>` +
+      (t.exit_code !== null && t.exit_code !== undefined
+        ? ` <span class="dim">код ${t.exit_code}</span>` : "") +
+      (t.node_id ? ` <button onclick="showJobLogs('${j.job_id}',${t.index})">логи</button>` : "")
+    ).join("<br>");
+    return [
+      esc(j.job_id),
+      `${esc(j.image)}<br><span class="dim">${esc((j.command || []).join(" "))}</span>`,
+      `${j.kind}<br><span class="dim">${j.tasks.length} задач</span>`,
+      `${j.resources.vram_gb} GB VRAM<br><span class="dim">${j.resources.ram_gb} GB RAM · ` +
+        `${j.resources.cpus} CPU</span>`,
+      `<span class="${jobStateCls(j.state)}">${j.state}</span>`,
+      tasks,
+      `<button onclick="cancelJob('${j.job_id}')">отменить</button>`,
+    ];
+  });
+
+  return `
+  <h2>ЗАПУСТИТЬ ЗАДАНИЕ</h2>
+  <div class="dim" style="margin-bottom:8px">
+    свободно сейчас: ${free || "нет подключённых нод"}
+  </div>
+  <div class="row">
+    <label>образ <input id="j-image" style="width:280px"
+      placeholder="ghcr.io/acme/render:1"></label>
+    <label>команда <input id="j-cmd" style="width:280px"
+      placeholder="python render.py --frames 100"></label>
+  </div>
+  <div class="row">
+    <label>как <select id="j-kind">
+      <option value="array">array — независимые задачи</option>
+      <option value="gang">gang — одна задача на нескольких машинах</option>
+    </select></label>
+    <label>задач <input id="j-tasks" type="number" value="1" style="width:70px"></label>
+    <label>VRAM ГБ <input id="j-vram" type="number" value="8" style="width:70px"></label>
+    <label>RAM ГБ <input id="j-ram" type="number" value="4" style="width:70px"></label>
+    <label>CPU <input id="j-cpus" type="number" value="2" style="width:70px"></label>
+    <label>лимит с <input id="j-timeout" type="number" value="3600" style="width:90px"></label>
+    <button onclick="submitJob()">запустить</button>
+  </div>
+  <div class="dim" style="margin:6px 0 14px">
+    <b>array</b> — задачи независимы, Loom раскладывает их по стольким нодам,
+    сколько нужно; отвалившаяся нода стоит одной задачи.
+    <b>gang</b> — одно вычисление на нескольких машинах: Loom выделяет группу и
+    передаёт каждой задаче RANK, WORLD_SIZE и адреса соседей, а координируют
+    они себя сами. Разрезать чужой контейнер Loom не может — программа должна
+    быть написана под несколько машин.
+  </div>
+  ${jobMsg ? `<pre>${esc(jobMsg)}</pre>` : ""}
+  <h2>ЗАДАНИЯ</h2>
+  ${table(["job","образ / команда","вид","ресурсы","состояние","задачи",""], rows)}
+  <h2>ЛОГИ ЗАДАЧИ</h2>
+  <pre id="j-logs" style="max-height:320px;overflow:auto">выберите «логи» у задачи</pre>`;
+}
+
+const VIEWS = {"Nodes":viewNodes, "Models":viewModels, "Deploy":viewDeploy,
+               "Compute":viewCompute, "Keys":viewKeys,
                "Perf-map":viewPerfmap, "SLO / Rebalance":viewSlo, "Console":viewConsole};
 let timer = null;
 

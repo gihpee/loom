@@ -37,12 +37,16 @@ from typing import Dict, List, Optional, Sequence, Tuple
 # and enforces it again on arrival; this copy exists so the orchestrator can
 # refuse an impossible split immediately, instead of letting three nodes
 # discover it separately after downloading a checkpoint each.
-SHARDABLE_BACKENDS = frozenset({"shard", "vllm_shard", "mlx_shard", "echo"})
+SHARDABLE_BACKENDS = frozenset(
+    # train_shard splits like any stage backend: a training pipeline is laid
+    # out exactly the way a serving one is.
+    {"shard", "vllm_shard", "mlx_shard", "train_shard", "echo"}
+)
 
 # Every backend a worker can be asked for. Validating the name here turns a
 # typo into a message on the deploy form instead of a NACK from three nodes.
 KNOWN_BACKENDS = frozenset(
-    {"shard", "vllm_shard", "mlx_shard", "vllm", "sglang", "mlx", "echo"}
+    {"shard", "vllm_shard", "mlx_shard", "train_shard", "vllm", "sglang", "mlx", "echo"}
 )
 
 
