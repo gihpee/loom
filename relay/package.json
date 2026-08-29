@@ -7,7 +7,7 @@
   "main": "relay.mjs",
   "dependencies": {
     "@chainsafe/libp2p-noise": "^16.0.0",
-    "@chainsafe/libp2p-quic": "^2.1.3",
+    "@chainsafe/libp2p-quic": "~1.1.8",
     "@chainsafe/libp2p-yamux": "^7.0.0",
     "@libp2p/circuit-relay-v2": "^3.0.0",
     "@libp2p/identify": "^3.0.0",

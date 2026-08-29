@@ -23,7 +23,8 @@ import socket
 from dataclasses import dataclass
 from typing import Optional
 
-import httpx
+import json as _json
+import urllib.request
 
 from loom.logging_config import get_logger
 
@@ -98,14 +99,31 @@ class PublicAddress:
         return self.note if self.severity == "warn" else None
 
 
+def _fetch(url: str, timeout: float = 3.0) -> Optional[str]:
+    """One short GET, or None. Never raises.
+
+    Two calls in this module are the orchestrator's only outbound HTTP, and
+    both are guesses about our own address that must not delay or fail the
+    start. urllib rather than a client library for exactly that reason: this is
+    not worth a dependency in an image whose whole point is being small.
+    """
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as answer:
+            if answer.status != 200:
+                return None
+            return answer.read(4096).decode(errors="replace")
+    except Exception:
+        return None
+
+
 def _from_ngrok(grpc_port: int) -> Optional[str]:
     """Ask a co-located ngrok agent for its public TCP endpoint."""
     for api in (NGROK_API, NGROK_API_LOCAL):
+        body = _fetch(api)
+        if body is None:
+            continue
         try:
-            resp = httpx.get(api, timeout=3)
-            if resp.status_code != 200:
-                continue
-            for tunnel in resp.json().get("tunnels", []):
+            for tunnel in _json.loads(body).get("tunnels", []):
                 url = tunnel.get("public_url", "")
                 if url.startswith("tcp://"):
                     return url[len("tcp://") :]
@@ -119,14 +137,12 @@ def _public_ip_via_service() -> Optional[str]:
     if os.environ.get("LOOM_SKIP_IP_LOOKUP", "").lower() in ("1", "true", "yes"):
         return None
     for url in IP_SERVICES:
-        try:
-            resp = httpx.get(url, timeout=3)
-            if resp.status_code == 200:
-                ip = resp.text.strip()
-                if ip and not _is_private(ip) and len(ip) <= 45:
-                    return ip
-        except Exception:
+        body = _fetch(url)
+        if body is None:
             continue
+        ip = body.strip()
+        if ip and not _is_private(ip) and len(ip) <= 45:
+            return ip
     return None
 
 

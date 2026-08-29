@@ -24,6 +24,10 @@
 import { createLibp2p } from 'libp2p'
 import { circuitRelayServer } from '@libp2p/circuit-relay-v2'
 import { tcp } from '@libp2p/tcp'
+// Pinned to 1.x in package.json, and not out of caution: 2.x moved to
+// multiaddr 13 while libp2p is still on 12, so npm installs both and the
+// addresses QUIC hands back are foreign objects to libp2p. It fails at start
+// with "ma.stringTuples is not a function", which names neither package.
 import { quic } from '@chainsafe/libp2p-quic'
 import { identify } from '@libp2p/identify'
 import { ping } from '@libp2p/ping'

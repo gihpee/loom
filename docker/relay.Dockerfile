@@ -7,8 +7,13 @@
 FROM node:22-alpine
 
 WORKDIR /app
-COPY relay/package.json ./
-RUN npm install --omit=dev --no-audit --no-fund
+# The lockfile, and `npm ci` rather than `npm install`, because the ranges in
+# package.json resolve differently every month: a rebuild picked up a libp2p
+# newer than the multiaddr beside it and the relay died on start with
+# "ma.stringTuples is not a function". Pinning is the difference between an
+# image that builds and an image that builds and runs.
+COPY relay/package.json relay/package-lock.json ./
+RUN npm ci --omit=dev --no-audit --no-fund
 
 COPY relay/relay.mjs ./
 
