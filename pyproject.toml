@@ -1,33 +1,30 @@
 [project]
 name = "loom"
-version = "0.0.1"
-description = "Loom — multi-model LLM inference marketplace. Planning core adapted from Parallax."
+version = "0.2.0"
+description = "Loom orchestrator — distributed compute and inference on machines nobody can dial"
 requires-python = ">=3.11"
 dependencies = [
     "grpcio>=1.60",
-    "protobuf>=4.25",
+    "protobuf>=5.29",
     "fastapi>=0.110",
     "uvicorn>=0.29",
-    "httpx>=0.27",
 ]
 
 [project.optional-dependencies]
-redis = ["redis>=5.0"]
-# The rendezvous node workers bootstrap to, so they can reach each other
-# directly (docs/P2P_TRANSPORT.md). Without it the orchestrator relays every
-# inter-stage message, exactly as it did before.
+# The rendezvous node agents bootstrap to, so they can reach each other
+# directly (docs/P2P_TRANSPORT.md). Without it the orchestrator carries every
+# message between nodes — correct, and two wide-area crossings instead of one.
 p2p = ["lattica==1.0.21"]
-# Pinned deliberately: protobuf gencode must stay OLD enough to load under the
-# protobuf runtime shipped in backend images (e.g. vllm/vllm-openai has 6.x).
-# A runtime may be newer than the gencode, never older.
 grpc-tools = ["grpcio-tools==1.71.0"]
 
 [dependency-groups]
-# psutil is a loom-worker dependency; the e2e tests import the worker package in-process.
+# The integration tests run a real agent and a real model stage in-process, so
+# the node's and the payload's dependencies are dev dependencies here.
 dev = [
     "pytest>=8.0",
     "grpcio-tools==1.71.0",
     "psutil>=5.9",
+    "cryptography>=42",
     "torch>=2.2",
     "transformers>=4.44",
     "safetensors>=0.4",
@@ -41,4 +38,5 @@ build-backend = "hatchling.build"
 packages = ["src/loom"]
 
 [tool.pytest.ini_options]
+markers = ["slow: runs a real model; minutes, not seconds"]
 testpaths = ["tests"]

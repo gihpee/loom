@@ -35,6 +35,8 @@
         padding:10px; white-space:pre-wrap; word-break:break-word; }
   .muted { color:var(--dim); font-size:12px; }
   #err { color:var(--bad); margin-left:auto; }
+  .row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin:8px 0; }
+  input[type=file] { color:var(--dim); font:inherit; }
 </style>
 </head>
 <body>
@@ -47,1272 +49,302 @@
   <span id="err"></span>
 </header>
 <main id="view"></main>
-<script>
-const TABS = ["Nodes","Models","Deploy","Compute","Keys","Perf-map","SLO / Rebalance","Console"];
+<script>// Loom admin. Four things an operator does: watch nodes, run work, hand out
+// join keys, roll out a new agent. Everything else belongs in the API.
+const $ = (s) => document.querySelector(s);
 let active = localStorage.getItem("loom_tab") || "Nodes";
-let perfModel = null;
-const $ = s => document.querySelector(s);
+let timer = null;
+let message = "";
+let taskLogs = "select «logs» on a task";
 
-const tokenInput = $("#token");
-tokenInput.value = localStorage.getItem("loom_admin_token") || "";
-tokenInput.onchange = () => { localStorage.setItem("loom_admin_token", tokenInput.value); refresh(); };
-
-function headers(extra) {
-  const h = Object.assign({"Content-Type":"application/json"}, extra || {});
-  if (tokenInput.value) h["X-Loom-Admin-Token"] = tokenInput.value;
-  return h;
+function headers() {
+  const token = $("#token").value.trim();
+  return token ? {"Content-Type": "application/json", "X-Loom-Admin-Token": token}
+               : {"Content-Type": "application/json"};
 }
+
 async function api(path, opts) {
-  const r = await fetch(path, Object.assign({headers: headers()}, opts || {}));
-  const body = await r.json().catch(() => ({}));
-  if (!r.ok) throw new Error(body.error ? body.error.message : r.status);
-  return body;
-}
-function esc(s) { return String(s).replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c])); }
-function statusCls(s) {
-  return {serving:"ok", loading:"warn", loaded:"warn", starting:"warn", failed:"bad", stopped:"dim", unknown:"dim"}[s] || "dim";
-}
-function selectAll(el) {
-  if (!el) return;
-  const range = document.createRange();
-  range.selectNodeContents(el);
-  const sel = window.getSelection();
-  sel.removeAllRanges();
-  sel.addRange(range);
-}
-
-async function copyText(text, btn, fallbackEl) {
-  let ok = false;
-  // 1. Modern API. Works on https and on localhost; may still throw on a plain
-  //    http:// LAN address or when the document is not focused — hence step 2.
-  try {
-    if (navigator.clipboard) { await navigator.clipboard.writeText(text); ok = true; }
-  } catch (e) { ok = false; }
-  // 2. Legacy path: a hidden textarea + execCommand (needs a user gesture).
-  if (!ok) {
-    const ta = document.createElement("textarea");
-    ta.value = text;
-    ta.setAttribute("readonly", "");
-    ta.style.position = "fixed";
-    ta.style.top = "0";
-    ta.style.left = "0";
-    ta.style.opacity = "0";
-    document.body.appendChild(ta);
-    ta.focus();
-    ta.select();
-    ta.setSelectionRange(0, text.length);
-    try { ok = document.execCommand("copy"); } catch (e) { ok = false; }
-    document.body.removeChild(ta);
+  opts = Object.assign({}, opts || {});
+  // A result file is bytes, not JSON, and it cannot be a plain <a href>
+  // because the admin token travels in a header.
+  const raw = opts.raw; delete opts.raw;
+  const r = await fetch(path, Object.assign({headers: headers()}, opts));
+  if (!r.ok) {
+    const body = await r.json().catch(() => ({}));
+    throw new Error(body.error ? body.error.message : r.status);
   }
-  // 3. Last resort: select the text on screen so Ctrl+C / Cmd+C just works.
-  if (!ok && fallbackEl) { selectAll(fallbackEl); }
-  if (btn) {
-    const prev = btn.dataset.label || btn.textContent;
-    btn.dataset.label = prev;
-    btn.textContent = ok ? "скопировано ✓" : "выделено — Ctrl+C";
-    setTimeout(() => { btn.textContent = btn.dataset.label; }, 2000);
-  }
-  return ok;
-}
-// Values referenced by copy buttons (avoids quoting problems in inline JS).
-const COPY = {};
-function copyFrom(id, btn) {
-  // Selecting the visible command block is the graceful degradation path.
-  return copyText(COPY[id] || "", btn, document.querySelector("#k-cmd"));
+  return raw ? await r.blob() : await r.json();
 }
 
-function table(headersArr, rows) {
-  return `<table><tr>${headersArr.map(h=>`<th>${h}</th>`).join("")}</tr>` +
-    rows.map(r=>`<tr>${r.map(c=>`<td>${c}</td>`).join("")}</tr>`).join("") + `</table>`;
+const esc = (s) => String(s ?? "").replace(/[&<>"]/g,
+  c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const gb = (bytes) => (Number(bytes || 0) / 1073741824).toFixed(1);
+const stateCls = (s) => ({running:"ok", done:"ok", provisioning:"warn", pending:"warn",
+                          failed:"bad", cancelled:"dim", gone:"dim"}[s] || "dim");
+
+function table(cols, rows) {
+  if (!rows.length) return `<p class="dim">nothing here yet</p>`;
+  return `<table><tr>${cols.map(c => `<th>${esc(c)}</th>`).join("")}</tr>` +
+    rows.map(r => `<tr>${r.map(c => `<td>${c}</td>`).join("")}</tr>`).join("") + `</table>`;
 }
 
-// ------------------------------------------------------------------ tabs
-function renderTabs() {
-  $("#tabs").innerHTML = TABS.map(t =>
-    `<button class="${t===active?"active":""}" onclick="setTab('${t}')">${t}</button>`).join("");
-}
-function setTab(t) {
-  active = t;
-  localStorage.setItem("loom_tab", t);
-  renderTabs();
-  refresh({reset: true});
-}
-
-// How this node's activations travel. The direct path falls back to the relay
-// silently — that is the right behaviour and it makes a degraded pipeline look
-// exactly like a healthy one, so the split has to be visible somewhere.
-function peerCell(p) {
-  if (!p || !p.peer_id) return `<span class="dim">relay</span>`;
-  const total = (p.direct || 0) + (p.relayed || 0);
-  const share = Math.round(100 * (p.direct_share || 0));
-  // "peer" used to mean only "not behind a symmetric NAT", which reads as
-  // "this will work" and often does not: a node nobody can dial into cannot
-  // accept a direct link however willing both sides are.
-  const label = p.symmetric_nat
-    ? `<span class="warn">symmetric NAT</span>`
-    : (!p.reachable
-        ? `<span class="warn">не достучаться</span>`
-        : (p.via_relay
-            ? `<span class="ok">peer</span> <span class="dim">через relay</span>`
-            : (p.dialable ? `<span class="ok">peer</span>` : `<span class="dim">relay</span>`)));
-  if (!total) return label + ` <span class="dim">—</span>`;
-  const cls = share >= 90 ? "ok" : (share > 0 ? "warn" : "bad");
-  // "прямо" was a lie for most of this system's life: a circuit through the
-  // relay is a libp2p connection like any other, and it was counted here as
-  // if the two workers were talking to each other. They were not.
-  // The round trip to the neighbour, beside the share. Transport time in the
-  // request stats is one of these per token plus our own overhead, so seeing
-  // the two next to each other is what separates "the wire is slow" from
-  // "we are slow".
-  const rtt = p.link_rtt_ms
-    ? `<br><span class="dim">RTT ${Math.round(p.link_rtt_ms)} ms</span>`
-    : "";
-  return label + ` <span class="${cls}">${share}% по p2p</span>` +
-    `<br><span class="dim">${p.direct}/${total}` +
-    `${p.fallbacks ? ` · ${p.fallbacks} откат` : ""}</span>` + rtt;
-}
-
-// ------------------------------------------------------------------ views
+// ------------------------------------------------------------------- nodes
 async function viewNodes() {
-  const data = await api("/admin/nodes");
-  const rows = Object.entries(data.nodes).map(([nid, n]) => {
-    const shards = n.shards.length
-      ? n.shards.map(s => `<span class="${statusCls(s.status)}">${esc(s.model_id)}</span>` +
-          ` <span class="dim">[${s.layers[0]},${s.layers[1]}) ${s.vram_quota_gb}G ` +
-          `req=${s.current_requests}${s.latency_ms?` τ=${s.latency_ms}ms`:""} ${s.status}</span>`).join("<br>")
-      : `<span class="dim">—</span>`;
-    return [
-      esc(nid),
-      `${esc(n.device)} <span class="dim">${esc(n.gpu_name||"")} x${n.num_gpus||1}</span>`,
-      esc(n.region),
-      `${n.vram_declared_gb} GB <span class="dim">of ${n.vram_total_gb} · ${esc(n.detected_by||"")}</span>`,
-      n.tflops_fp16,
-      n.price === null ? `<span class="dim">n/a (ph.4)</span>` : n.price,
-      (n.connected ? `<span class="ok">ctrl</span>` : `<span class="bad">ctrl</span>`) + " / " +
-        (n.tunnel ? `<span class="ok">tunnel</span>` : `<span class="bad">tunnel</span>`),
-      peerCell(n.peer),
-      n.last_heartbeat_s_ago === null ? `<span class="dim">—</span>`
-        : (n.last_heartbeat_s_ago < 10 ? `<span class="ok">${n.last_heartbeat_s_ago}s ago</span>`
-                                       : `<span class="warn">${n.last_heartbeat_s_ago}s ago</span>`),
-      shards,
-    ];
-  });
-  return `<h2>Registered workers</h2>` +
-    table(["node","device","region","VRAM decl.","TFLOPs","price","link","p2p","heartbeat","shards (status)"], rows);
-}
-
-async function viewModels() {
-  const data = await api("/admin/models_view");
-  const rows = Object.entries(data.models).map(([mid, m]) => {
-    const place = m.placement.length
-      ? m.placement.map((p, i) => `<span class="dim">stage ${i}</span> ${esc(p.node_id)} ` +
-          `<span class="dim">[${p.layers[0]},${p.layers[1]}) ${p.vram_quota_gb}G</span> ` +
-          `<span class="${statusCls(p.status)}">${p.status}</span>`).join("<br>")
-      : (m.unscheduled ? `<span class="bad">unscheduled — не хватает ёмкости пула</span>` : `<span class="dim">—</span>`);
-    // Why a model is not running: the last start error, verbatim from the worker.
-    const fails = (m.failures || []).map(f =>
-      `<div class="bad">✗ ${esc(f.node_id)}: ${esc(f.error)}` +
-      `<span class="dim"> (${f.age_s}s назад, повтор через ${f.retry_in_s}s)</span></div>`).join("");
-    const stages = m.placement.length > 1 ? ` <span class="acc">${m.placement.length} стадии</span>` : "";
-    return [
-      esc(mid) + (m.unscheduled ? ` <span class="bad">●</span>` : "") + stages,
-      `${m.priority} / ${m.demand_qps} / ${m.price_willing}<br><span class="dim">score ${m.score}</span>`,
-      `${m.k_actual} / ${m.k_target}`,
-      `${m.num_layers}L · ${esc(m.backend_type)}`,
-      place + fails,
-      m.endpoints.map(e => `${esc(e.url)} <span class="dim">inflight=${e.inflight}</span>`).join("<br>") || `<span class="dim">—</span>`,
-      `<button class="action danger" onclick="removeModel('${esc(mid)}')">remove</button>`,
-    ];
-  });
-  return `<h2>Добавить модель в каталог (архитектура определяется автоматически)</h2>
-    <p class="dim">Добавление НЕ запускает модель на нодах — это делается на вкладке
-       <b>Deploy</b>, где выбираются ноды и число слоёв на каждую.</p>
-    <p><input id="m-repo" type="text" placeholder="HuggingFace repo, напр. Qwen/Qwen3-32B" style="width:320px">
-       <select id="m-backend">
-         <option value="shard">shard — режется по слоям между узлами (transformers)</option>
-         <option value="vllm_shard">vllm_shard — то же, но слои считает vLLM (нужен образ loomworker-vllm)</option>
-         <option value="vllm">vllm — быстрее всех, но модель должна влезть на одну карту</option>
-       </select>
-       prio <input id="m-prio" type="text" value="1" style="width:50px">
-       реплик <input id="m-k" type="text" value="1" style="width:50px">
-       <button class="action" onclick="deployModel()">в каталог</button></p>
-    <pre id="m-out" class="muted">${esc(lastDeploy)}</pre>
-    <h2>Каталог</h2>` +
-    table(["model","prio/qps/price","k (act/target)","shape","placement (стадии пайплайна)","endpoints",""], rows);
-}
-let lastDeploy = "— укажите HF-имя модели, затем разверните её на вкладке Deploy —";
-async function deployModel() {
-  const repo = $("#m-repo").value.trim();
-  if (!repo) { lastDeploy = "укажите repo"; $("#m-out").textContent = lastDeploy; return; }
-  lastDeploy = "resolving " + repo + " …";
-  $("#m-out").textContent = lastDeploy;
-  try {
-    const r = await api("/admin/models/from_hf", {method:"POST", body: JSON.stringify({
-      repo,
-      backend_type: $("#m-backend").value,
-      priority: parseFloat($("#m-prio").value) || 1,
-      target_pipelines: parseInt($("#m-k").value, 10) || 1,
-    })});
-    const d = r.detected, s = r.sizing;
-    lastDeploy =
-      `added: ${r.added}\n` +
-      `detected: ${d.num_layers} слоёв, hidden ${d.hidden_dim}, kv_heads ${d.num_kv_heads}, ` +
-      `${d.dtype_bytes} байт/параметр${d.architectures ? " (" + d.architectures.join(",") + ")" : ""}\n` +
-      `веса ~${s.weights_gb} GB · слоёв на карту: ` +
-      Object.entries(s.layers_per_card).map(([k,v]) => `${k}=${v}`).join(", ") +
-      ` (param_mem_ratio ${s.param_mem_ratio})`;
-    refresh({reset: true});  // model added — start the form empty for the next one
-  } catch (e) { lastDeploy = "error: " + e.message; $("#m-out").textContent = lastDeploy; }
-}
-async function removeModel(id) {
-  try { await api("/admin/models/" + encodeURIComponent(id), {method:"DELETE"}); refresh(); }
-  catch (e) { $("#err").textContent = e.message; }
-}
-
-// ------------------------------------------------------------------ deploy
-// Hand placement: which nodes run a model and how many layers each gets.
-// The broker normally decides this, which is right for a marketplace and
-// useless for a measurement — comparing one node against two against three
-// needs the split pinned by hand and identical between runs.
-function depKey(nodeId) { return String(nodeId).replace(/[^A-Za-z0-9_-]/g, "_"); }
-let depNodeIds = [];
-let depSplittable = {};
-let depMsg = "";
-
-async function viewDeploy() {
-  const data = await api("/admin/placement");
-  depNodeIds = data.nodes.map(n => n.node_id);
-  if (!data.models.length) {
-    return `<h2>Deploy</h2><p class="dim">каталог пуст — добавьте модель на вкладке Models</p>`;
-  }
-  if (!data.nodes.length) {
-    return `<h2>Deploy</h2><p class="dim">нет подключённых нод</p>`;
-  }
-  const sel = document.querySelector("#dep-model");
-  const chosenId = (sel && sel.value) || data.models[0].model_id;
-  const chosen = data.models.find(m => m.model_id === chosenId) || data.models[0];
-
-  const options = data.models.map(m =>
-    `<option value="${esc(m.model_id)}" ${m.model_id===chosen.model_id?"selected":""}>` +
-    `${esc(m.model_id)} — ${m.num_layers} слоёв, ~${m.weights_gb} GB</option>`).join("");
-
-  // Backend is a property of the RUN, not of the catalog entry: the same
-  // checkpoint is served whole by `vllm` and split by `shard`. Backends that
-  // cannot be a pipeline stage are labelled, because picking one and ticking
-  // two nodes is exactly how three nodes end up downloading a checkpoint each
-  // only to refuse the load.
-  const backends = data.backends.map(b =>
-    `<option value="${esc(b.name)}" ${b.name===chosen.backend_type?"selected":""}>` +
-    `${esc(b.name)}${b.splits ? "" : " — только целиком, на одну ноду"}</option>`).join("");
-  depSplittable = {};
-  data.backends.forEach(b => { depSplittable[b.name] = b.splits; });
-
-  const rows = data.nodes.map((n, i) => {
-    const k = depKey(n.node_id);
-    const ceiling = chosen.max_layers_per_node[n.node_id] || 0;
-    const busy = n.busy_with.length ? `<span class="warn">занята: ${n.busy_with.map(esc).join(", ")}</span>` : `<span class="dim">свободна</span>`;
-    return [
-      `<input type="checkbox" id="dep-on-${k}" onchange="depTotal()">`,
-      `<input type="text" id="dep-ord-${k}" value="${i+1}" style="width:36px" onchange="depTotal()">`,
-      esc(n.node_id),
-      `${esc(n.gpu_name || n.device)} · ${n.vram_free_gb} / ${n.vram_total_gb} GB`,
-      `<span class="dim">${ceiling}</span>`,
-      `<input type="text" id="dep-lay-${k}" value="0" style="width:60px" onchange="depTotal()" oninput="depTotal()">`,
-      `<select id="dep-be-${k}" onchange="depTotal()">` +
-        `<option value="">как у модели</option>` +
-        data.backends.filter(b => b.splits).map(b =>
-          `<option value="${esc(b.name)}">${esc(b.name)}</option>`).join("") +
-        `</select>`,
-      busy,
-    ];
-  });
-
-  const current = chosen.deployed
-    ? `<p>сейчас развёрнута на <b>${esc(chosen.backend_type)}</b>: <b>${chosen.placement.mode === "manual"
-        ? chosen.placement.stages.map(s => `${esc(s.node_id)}[${s.start_layer}:${s.end_layer}]`).join(" → ")
-        : "auto (брокер выбирает сам)"}</b>
-       <button class="action danger" onclick="undeployModel('${esc(chosen.model_id)}')">снять</button></p>`
-    : `<p class="dim">не развёрнута</p>`;
-
-  return `<h2>Deploy — ручная раскладка по нодам</h2>
-    <p>модель <select id="dep-model" onchange="refresh({reset:true})">${options}</select>
-       бэкенд <select id="dep-backend" onchange="depTotal()">${backends}</select>
-       <span class="dim">${chosen.num_layers} слоёв · param_mem_ratio ${data.param_mem_ratio}</span></p>
-    ${current}
-    <p><button class="action" onclick="depEven()">разделить поровну между отмеченными</button>
-       <button class="action" onclick="depDeploy()">развернуть</button>
-       <button class="action" onclick="depDeploy(true)">развернуть, игнорируя оценку VRAM</button></p>
-    <p id="dep-total" class="dim">отметьте ноды и укажите слои</p>
-    <pre id="dep-out" class="muted">${esc(depMsg)}</pre>` +
-    table(["","№","node","GPU · VRAM свободно","влезет слоёв","слоёв","бэкенд","состояние"], rows);
-}
-
-function depSelected() {
-  // Checked nodes, in the stage order the operator typed. Order is not
-  // cosmetic: stage 0 owns the embeddings and answers clients, so on nodes of
-  // different speed it decides which card carries them.
-  return depNodeIds
-    .map(id => {
-      const k = depKey(id);
-      const on = document.querySelector("#dep-on-" + k);
-      if (!on || !on.checked) return null;
-      const layers = parseInt((document.querySelector("#dep-lay-" + k) || {}).value, 10);
-      const order = parseFloat((document.querySelector("#dep-ord-" + k) || {}).value);
-      const backend = ((document.querySelector("#dep-be-" + k) || {}).value || "").trim();
-      return {node_id: id, layers: isNaN(layers) ? 0 : layers,
-              order: isNaN(order) ? 999 : order, backend};
-    })
-    .filter(Boolean)
-    .sort((a, b) => a.order - b.order);
-}
-
-function depModelLayers() {
-  const sel = document.querySelector("#dep-model");
-  if (!sel) return 0;
-  const text = sel.options[sel.selectedIndex].textContent;
-  const match = text.match(/—\s*(\d+)\s*слоёв/);
-  return match ? parseInt(match[1], 10) : 0;
-}
-
-function depTotal() {
-  const el = document.querySelector("#dep-total");
-  if (!el) return;
-  const picked = depSelected();
-  const total = depModelLayers();
-  if (!picked.length) { el.className = "dim"; el.textContent = "отметьте ноды и укажите слои"; return; }
-  const sum = picked.reduce((a, s) => a + s.layers, 0);
-  const chain = picked.map(s => `${s.node_id}=${s.layers}`).join(" + ");
-  const backendEl = document.querySelector("#dep-backend");
-  const backend = backendEl ? backendEl.value : "";
-  if (picked.length > 1) {
-    // Each stage runs its own engine, so the deployment default only matters
-    // for the stages that did not pick one.
-    const bad = picked.filter(s => depSplittable[s.backend || backend] === false);
-    if (bad.length) {
-      el.className = "bad";
-      el.textContent = `${bad.map(s => s.node_id).join(", ")}: бэкенд ` +
-        `${bad[0].backend || backend} обслуживает модель только целиком — ` +
-        `стадией быть не может. Выберите shard, vllm_shard или mlx_shard`;
-      return;
-    }
-  }
-  if (sum === total) { el.className = "ok"; el.textContent = `${chain} = ${sum} из ${total} ✓`; }
-  else { el.className = "bad"; el.textContent = `${chain} = ${sum}, а нужно ровно ${total}`; }
-}
-
-function depEven() {
-  const picked = depSelected();
-  const total = depModelLayers();
-  if (!picked.length || !total) return;
-  const base = Math.floor(total / picked.length), extra = total % picked.length;
-  picked.forEach((s, i) => {
-    const el = document.querySelector("#dep-lay-" + depKey(s.node_id));
-    if (el) el.value = base + (i < extra ? 1 : 0);
-  });
-  depTotal();
-}
-
-async function depDeploy(force) {
-  const sel = document.querySelector("#dep-model");
-  const picked = depSelected();
-  if (!sel || !picked.length) { depMsg = "отметьте хотя бы одну ноду"; document.querySelector("#dep-out").textContent = depMsg; return; }
-  depMsg = "разворачиваю… (первый запуск скачивает веса, это долго)";
-  document.querySelector("#dep-out").textContent = depMsg;
-  try {
-    const backendEl = document.querySelector("#dep-backend");
-    const r = await api("/admin/deploy", {method:"POST", body: JSON.stringify({
-      model_id: sel.value,
-      backend_type: backendEl ? backendEl.value : undefined,
-      // A per-stage backend, when one was chosen: an Apple node can run
-      // mlx_shard next to a CUDA node running vllm_shard.
-      stages: picked.map(s => Object.assign(
-        {node_id: s.node_id, layers: s.layers}, s.backend ? {backend: s.backend} : {})),
-      force: !!force,
-    })});
-    depMsg = "развёрнута на " + (r.placement.backend_type || "бэкенде из каталога") + ": " +
-      r.placement.stages
-        .map(s => `${s.node_id}[${s.start_layer}:${s.end_layer}] (${s.layers} слоёв` +
-                  `${s.backend_type ? ", " + s.backend_type : ""})`).join(" → ");
-  } catch (e) { depMsg = "ошибка: " + e.message; }
-  document.querySelector("#dep-out").textContent = depMsg;
-  refresh();
-}
-
-async function undeployModel(id) {
-  try {
-    await api("/admin/deploy/" + encodeURIComponent(id), {method:"DELETE"});
-    depMsg = "снята: " + id;
-  } catch (e) { depMsg = "ошибка: " + e.message; }
-  refresh();
-}
-
-async function viewKeys() {
-  const conn = await api("/admin/connect");
-  const data = await api("/admin/keys");
-  COPY.cmd = localStorage.getItem("loom_last_key_only_cmd") || "";
-  COPY.key = lastKeyRaw;
-  COPY.addr = conn.dial_address || "";
-  const rows = (data.keys || []).map(k => [
-    esc(k.key_id),
-    esc(k.label || "—"),
-    esc(k.address),
-    k.max_nodes ? k.max_nodes : `<span class="dim">∞</span>`,
-    k.nodes.length ? k.nodes.map(esc).join("<br>") : `<span class="dim">unused</span>`,
-    k.revoked ? `<span class="bad">revoked</span>` : `<span class="ok">active</span>`,
-    k.revoked ? "" : `<button class="action danger" onclick="revokeKey('${esc(k.key_id)}')">revoke</button>`,
+  const nodes = (await api("/admin/agents")).nodes || [];
+  const connect = await api("/admin/connect").catch(() => ({}));
+  const rows = nodes.map(n => [
+    `${esc(n.node_id)}<br><span class="dim">agent ${esc(n.agent_version)}</span>`,
+    esc(n.gpu_name || n.device || "—"),
+    `${n.gpus_free} / ${n.gpus_total}`,
+    `${gb(n.vram_free_bytes)} GB`,
+    n.accepts_tasks
+      ? `<span class="ok">takes work</span><br><span class="dim">${esc((n.environment_kinds||[]).join(", "))}</span>`
+      : `<span class="bad">refuses</span><br><span class="dim">${esc(n.refusal)}</span>`,
+    `${n.tasks_running} running<br><span class="dim">env cache ${gb(n.env_cache_bytes)} GB</span>`,
+    `<span class="dim">${n.seconds_since_seen}s ago</span>`,
   ]);
-  const sev = conn.severity || (conn.warning ? "warn" : "ok");
-  const cls = {ok:"ok", info:"warn", warn:"bad"}[sev] || "dim";
-  const icon = {ok:"✓", info:"ℹ", warn:"⚠"}[sev] || "";
-  const status = conn.note
-    ? `<p class="${cls}">${icon} ${esc(conn.note)}</p>`
-    : `<p class="ok">✓ адрес доступен воркерам</p>`;
-  const check = {true:"TCP-проверка прошла", false:"TCP-проверка не прошла",
-                 null:"TCP-проверка не выполнялась"}[String(conn.self_check)];
-  return `<h2>Адрес подключения воркеров</h2>
-    <p>воркеры звонят на <b>${esc(conn.dial_address)}</b>
-       <button class="action" onclick="copyFrom('addr', this)">copy</button>
-       <span class="dim">(источник: ${esc(conn.source)}${conn.source === "env" ? " — задан вами в .env" : " — определён автоматически"}; ${esc(check || "")})</span></p>
-    ${status}
-    <h2>Join keys — всё, что нужно владельцу GPU</h2>
-    <p><input id="k-label" type="text" placeholder="label, e.g. gpu-box-1">
-       <input id="k-max" type="text" placeholder="max nodes (blank = ∞)" style="width:170px">
-       <button class="action" onclick="issueKey()">issue key</button>
-       ${lastKeyRaw ? `<button class="action" onclick="copyFrom('cmd', this)">copy команду</button>
-         <button class="action" onclick="copyFrom('key', this)">copy только ключ</button>` : ""}</p>
-    ${lastKeyRaw
-      ? `<p class="muted">На GPU-машине выполнить ОДНУ команду (клик по строке выделяет её):</p>
-         <pre id="k-cmd" onclick="selectAll(this)">${esc(COPY.cmd)}</pre>
-         <p class="muted">адрес оркестратора ${esc(conn.dial_address)} уже внутри ключа</p>`
-      : `<pre id="k-out" class="muted">${esc(lastKey)}</pre>`}` +
-    table(["key id","label","dial address","max nodes","used by","state",""], rows);
+  const warn = connect.severity === "warn"
+    ? `<p class="bad">${esc(connect.warning || "nodes may not be able to reach this address")}</p>` : "";
+  return `
+  <h2>Nodes</h2>
+  ${table(["node","hardware","gpus free","vram","state","load","seen"], rows)}
+  <h2>How a machine joins</h2>
+  <p class="dim">Address nodes dial: <b>${esc(connect.dial_address || "unknown")}</b>
+     <span class="dim">(${esc(connect.source || "—")})</span></p>
+  ${warn}
+  <p class="dim">Issue a key on the Keys tab; it carries this address, so the owner
+     passes one string and nothing else.</p>`;
 }
-let lastKey = localStorage.getItem("loom_last_key_cmd") ||
-  "— issue a key, then run the printed command on the GPU machine —";
-let lastKeyRaw = localStorage.getItem("loom_last_key_raw") || "";
-let connCache = null;
+
+// -------------------------------------------------------------------- work
+async function viewWork() {
+  const tasks = (await api("/admin/tasks")).tasks || [];
+  const groups = (await api("/admin/groups")).groups || [];
+  const nodes = (await api("/admin/agents")).nodes || [];
+
+  const groupRows = groups.map(g => [
+    `${esc(g.group_id)}${g.label ? `<br><span class="acc">${esc(g.label)}</span>` : ""}`,
+    g.size,
+    g.ranks.map(r => `<span class="dim">${r.rank}:</span> ${esc(r.node_id)}`).join("<br>"),
+    `<button onclick="stopGroup('${g.group_id}')">stop</button>`,
+  ]);
+
+  const taskRows = tasks.map(t => {
+    const results = (t.results || []).map(f =>
+      `<a href="#" onclick="download('${t.task_id}','${esc(f.name)}');return false">${esc(f.name)}</a>` +
+      ` <span class="dim">${(f.size_bytes/1024).toFixed(1)} KB</span>`).join("<br>")
+      || `<span class="dim">—</span>`;
+    const done = ["done","failed","cancelled","gone"].includes(t.state);
+    return [
+      `${esc(t.task_id)}<br><span class="dim">${esc(t.node_id)}${t.group_id ? ` · rank ${t.rank}` : ""}</span>`,
+      `<span class="dim">${esc((t.command || []).join(" ").slice(0, 70))}</span>`,
+      `<span class="${stateCls(t.state)}">${esc(t.state)}</span>` +
+        (t.error ? `<br><span class="dim">${esc(t.error)}</span>` : ""),
+      `${t.seconds}s` + ((t.devices||[]).length ? `<br><span class="dim">gpu ${t.devices.join(",")}</span>` : ""),
+      results,
+      `<button onclick="showLogs('${t.task_id}')">logs</button> ` +
+        (done ? `<button onclick="forget('${t.task_id}')">remove</button>`
+              : `<button onclick="stopTask('${t.task_id}')">stop</button>`),
+    ];
+  });
+
+  const free = nodes.filter(n => n.accepts_tasks).length;
+  return `
+  <h2>Run a task</h2>
+  <div class="row">
+    <input id="t-cmd" type="text" placeholder='python -c "print(1)"' style="min-width:340px">
+    <input id="t-reqs" type="text" placeholder="dependencies: numpy, pillow" style="min-width:200px">
+    <input id="t-gpus" type="text" value="0" title="gpus" style="width:60px">
+    <input id="t-timeout" type="text" value="600" title="timeout, s" style="width:80px">
+    <input id="t-file" type="file" title="input file">
+    <button class="action" onclick="runTask()">run</button>
+  </div>
+  <p class="muted">${free} of ${nodes.length} nodes take work. The file lands in the task's
+     working directory; the result is whatever it writes to $LOOM_TASK_OUT.</p>
+  ${message ? `<pre>${esc(message)}</pre>` : ""}
+  <h2>Groups</h2>
+  ${table(["group","size","ranks",""], groupRows)}
+  <h2>Tasks</h2>
+  ${table(["task","command","state","time","result",""], taskRows)}
+  <h2>Logs</h2>
+  <pre id="t-logs">${esc(taskLogs)}</pre>`;
+}
+
+async function runTask() {
+  const command = $("#t-cmd").value.trim();
+  if (!command) { message = "a task needs a command"; return render(); }
+  const reqs = $("#t-reqs").value.split(/[,\s]+/).filter(Boolean);
+  const body = {
+    command: command.split(/\s+/),
+    timeout_s: parseInt($("#t-timeout").value, 10) || 3600,
+    resources: {gpus: parseInt($("#t-gpus").value, 10) || 0},
+    environment: reqs.length ? {kind: "python", requirements: reqs} : {kind: "none"},
+  };
+  const file = $("#t-file").files[0];
+  if (file) {
+    const raw = new Uint8Array(await file.arrayBuffer());
+    let binary = ""; raw.forEach(b => binary += String.fromCharCode(b));
+    body.inputs = {[file.name]: btoa(binary)};
+  }
+  try {
+    const r = await api("/admin/tasks", {method:"POST", body: JSON.stringify(body)});
+    message = `task ${r.task_id} placed on ${r.node_id}`;
+  } catch (e) { message = "not accepted: " + e.message; }
+  render();
+}
+
+const act = (path, opts) => api(path, opts).catch(e => { message = e.message; }).then(render);
+const stopTask = (id) => act("/admin/tasks/" + id + "/stop", {method:"POST"});
+const forget = (id) => act("/admin/tasks/" + id, {method:"DELETE"});
+const stopGroup = (id) => act("/admin/groups/" + id + "/stop", {method:"POST"});
+
+async function showLogs(id) {
+  try { taskLogs = (await api("/admin/tasks/" + id + "/logs?tail=200")).text || "(empty)"; }
+  catch (e) { taskLogs = "no logs: " + e.message; }
+  render();
+}
+
+function download(id, name) {
+  api(`/admin/tasks/${id}/results/${encodeURIComponent(name)}`, {raw: true})
+    .then(blob => {
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url; a.download = name.split("/").pop();
+      document.body.appendChild(a); a.click(); a.remove();
+      URL.revokeObjectURL(url);
+    })
+    .catch(e => { message = "could not collect: " + e.message; render(); });
+}
+
+// -------------------------------------------------------------------- keys
+async function viewKeys() {
+  const keys = (await api("/admin/keys")).keys || [];
+  const rows = keys.map(k => [
+    esc(k.key_id), esc(k.label || "—"),
+    `${k.nodes_joined ?? 0}${k.max_nodes ? " / " + k.max_nodes : ""}`,
+    `<button onclick="revokeKey('${k.key_id}')">revoke</button>`,
+  ]);
+  return `
+  <h2>Issue a join key</h2>
+  <div class="row">
+    <input id="k-label" type="text" placeholder="label, e.g. misha's 4090" style="min-width:220px">
+    <input id="k-max" type="text" value="0" title="max nodes, 0 = unlimited" style="width:80px">
+    <button class="action" onclick="issueKey()">issue</button>
+  </div>
+  ${message ? `<pre>${esc(message)}</pre>` : ""}
+  <h2>Keys</h2>
+  ${table(["id","label","nodes",""], rows)}`;
+}
+
 async function issueKey() {
-  const label = $("#k-label").value;
-  const maxNodes = parseInt($("#k-max").value, 10);
   try {
     const r = await api("/admin/keys", {method:"POST", body: JSON.stringify(
-      {label, max_nodes: Number.isFinite(maxNodes) ? maxNodes : 0})});
-    // --network host: without it the worker's p2p port lives inside the
-    // container and nothing can reach it, so every activation is relayed.
-    const cmd = "docker run -d --gpus all --restart unless-stopped --network host " +
-      (r.worker_image || "gihpee/loomworker") + " --key " + r.key;
-    lastKeyRaw = r.key;
-    lastKey = "На GPU-машине выполнить ОДНУ команду:\n\n" + cmd +
-      "\n\n(адрес оркестратора " + r.address + " уже внутри ключа)";
-    localStorage.setItem("loom_last_key_cmd", lastKey);
-    localStorage.setItem("loom_last_key_raw", r.key);
-    localStorage.setItem("loom_last_key_only_cmd", cmd);
-    refresh();
-  } catch (e) { lastKey = "error: " + e.message; $("#k-out").textContent = lastKey; }
-}
-async function revokeKey(id) {
-  try { await api("/admin/keys/" + id, {method:"DELETE"}); refresh(); }
-  catch (e) { $("#err").textContent = e.message; }
+      {label: $("#k-label").value, max_nodes: parseInt($("#k-max").value, 10) || 0})});
+    message = "On the GPU machine, ONE command:\n\n" +
+      `docker run -d --gpus all --restart unless-stopped --network host \\\n` +
+      `  -v loom-data:/var/lib/loom ${r.agent_image} --key ${r.key}\n\n` +
+      `(the orchestrator address ${r.address} is already inside the key)`;
+  } catch (e) { message = "error: " + e.message; }
+  render();
 }
 
-async function viewPerfmap() {
-  const models = await api("/admin/models_view");
-  const ids = Object.keys(models.models);
-  if (!ids.length) return `<p class="dim">no models</p>`;
-  if (!perfModel || !ids.includes(perfModel)) perfModel = ids[0];
-  const pm = await api("/admin/perfmap/" + encodeURIComponent(perfModel));
-  const sel = `<select onchange="perfModel=this.value;refresh()">` +
-    ids.map(i=>`<option ${i===perfModel?"selected":""}>${esc(i)}</option>`).join("") + `</select>`;
+const revokeKey = (id) => act("/admin/keys/" + id, {method:"DELETE"});
 
-  const tauRows = Object.entries(pm.tau_effective).map(([nid, t]) => {
-    const meas = pm.tau_measured[nid];
-    return [
-      esc(nid),
-      t.layers[0]===null ? `<span class="dim">—</span>` : `[${t.layers[0]}, ${t.layers[1]})`,
-      t.layer_latency_ms === null ? `<span class="bad">inf</span>` : `${t.layer_latency_ms} ms`,
-      `<span class="${t.source==="measured"?"ok":"warn"}">${t.source}</span>`,
-      meas ? `${meas.latency_ms ?? "—"} ms <span class="dim">(age ${meas.age_s}s, req=${meas.current_requests}, ${meas.healthy?"healthy":"unhealthy"})</span>` : `<span class="dim">no report</span>`,
-    ];
-  });
-  const nodes = Object.keys(pm.tau_effective);
-  const rhoRows = nodes.map(src => [esc(src), ...nodes.map(dst => {
-    if (src===dst) return `<span class="dim">0</span>`;
-    const v = pm.tau_effective[src].rtt_to[dst];
-    return v === undefined ? `<span class="dim">∞</span>` : `${v}`;
-  })]);
-  const route = pm.route_preview
-    ? `chain: <b>${pm.route_preview.path.map(esc).join(" → ") || "∅"}</b>` +
-      (pm.route_preview.est_latency_ms !== null ? ` <span class="dim">est ${pm.route_preview.est_latency_ms} ms</span>` : ` <span class="bad">no finite route</span>`)
-    : `<span class="dim">no scheduler instance</span>`;
-  return `<h2>Perf-map · model ${sel}</h2>
-    <p>Phase-2 route preview → ${route}</p>
-    <h2>τ — per-shard latency</h2>` +
-    table(["node","layers","effective τ (DP input)","source","measured (perf-map store)"], tauRows) +
-    `<h2>ρ — RTT matrix (ms)</h2>` +
-    (nodes.length ? table(["src \\ dst", ...nodes.map(esc)], rhoRows) : `<p class="dim">no nodes</p>`);
-}
-
-async function viewSlo() {
-  const st = await api("/admin/status");
-  const rows = Object.entries(st.models).map(([mid, m]) => {
-    const s = m.slo;
-    return [
-      esc(mid),
-      s && s.slo_p95_ttft_ms ? `${s.slo_p95_ttft_ms} ms` : `<span class="dim">no SLO</span>`,
-      s ? `${s.p95_ttft_ms} ms <span class="dim">(${s.samples} samples)</span>` : `<span class="dim">no traffic</span>`,
-      s ? `${(s.error_rate*100).toFixed(1)}%` : `<span class="dim">—</span>`,
-      s && s.boost > 1 ? `<span class="bad">BOOSTED ×${s.boost}</span>` : `<span class="ok">off</span>`,
-      m.endpoints.length ? `<span class="ok">serving</span>` : `<span class="bad">no capacity</span>`,
-    ];
-  });
-  return `<h2>SLO per model</h2>` +
-    table(["model","SLO p95 TTFT","current p95","error rate","boost","state"], rows) +
-    `<p><button class="action danger" onclick="forceRebalance()">force rebalance</button>
-     <span class="muted">runs the Resource Broker pass right now (same as the timer trigger)</span></p>
-     <pre id="rebalance-out" class="muted">${esc(lastRebalance)}</pre>
-     <p class="dim">unscheduled: ${st.unscheduled.length ? st.unscheduled.map(esc).join(", ") : "none"}</p>`;
-}
-let lastRebalance = "—";
-async function forceRebalance() {
-  lastRebalance = "running…";
-  $("#rebalance-out").textContent = lastRebalance;
-  try {
-    const r = await api("/admin/rebalance", {method:"POST"});
-    lastRebalance = new Date().toLocaleTimeString() + "\n" + JSON.stringify(r, null, 2);
-    refresh();
-  } catch (e) { lastRebalance = "error: " + e.message; $("#rebalance-out").textContent = lastRebalance; }
-}
-
-async function viewConsole() {
-  const models = await api("/v1/models");
-  const opts = models.data.map(m=>`<option>${esc(m.id)}</option>`).join("");
-  return `<h2>Test console → POST /v1/chat/completions</h2>
-    <p>model <select id="c-model">${opts}</select>
-       max_tokens <input id="c-maxtok" type="text" value="1024" style="width:70px">
-       <label class="muted"><input type="checkbox" id="c-stream"> stream</label>
-       <label class="muted" title="Qwen3 и другие reasoning-модели: выключает блок &lt;think&gt;">
-         <input type="checkbox" id="c-nothink"> без think</label></p>
-    <textarea id="c-prompt" placeholder="prompt…">привет, loom</textarea>
-    <p><button class="action" onclick="sendChat()">send</button></p>
-    <pre id="c-out" class="muted">—</pre>
-    <div id="c-stats"></div>
-    <div id="c-hist">${renderHistory()}</div>`;
-}
-async function sendChat() {
-  const out = $("#c-out");
-  out.textContent = "…";
-  $("#c-stats").innerHTML = "";
-  const body = {model: $("#c-model").value, stream: $("#c-stream").checked,
-                messages: [{role:"user", content: $("#c-prompt").value}]};
-  const maxTok = parseInt($("#c-maxtok").value, 10);
-  if (maxTok > 0) body.max_tokens = maxTok;
-  // Reasoning models burn hundreds of tokens inside <think> before answering.
-  const noThink = $("#c-nothink").checked;
-  if (noThink) body.chat_template_kwargs = {enable_thinking: false};
-
-  // Client-side clock. The server reports its own numbers; the difference
-  // between the two is what the API hop plus the worker tunnel cost.
-  const t0 = performance.now();
-  let firstChunkAt = null, chunkTimes = [], text = "", reason = null;
-  let streamError = null;
-  let usage = null, timings = null;
-  try {
-    const r = await fetch("/v1/chat/completions", {method:"POST", headers: headers(), body: JSON.stringify(body)});
-    if (body.stream) {
-      if (!r.ok) { out.textContent = JSON.stringify(await r.json().catch(() => ({})), null, 2); return; }
-      // Render the stream as text, the way a chat looks — not as raw SSE frames.
-      out.textContent = "";
-      const reader = r.body.getReader(), dec = new TextDecoder();
-      let buf = "";
-      while (true) {
-        const {done, value} = await reader.read();
-        if (done) break;
-        buf += dec.decode(value, {stream: true});
-        // SSE events are separated by a blank line; a chunk can split one in
-        // half, so keep the unterminated tail for the next read.
-        const events = buf.split("\n\n");
-        buf = events.pop();
-        for (const ev of events) {
-          for (const line of ev.split("\n")) {
-            if (!line.startsWith("data:")) continue;
-            const payload = line.slice(5).trim();
-            if (!payload || payload === "[DONE]") continue;
-            try {
-              const frame = JSON.parse(payload);
-              const choice = (frame.choices || [])[0] || {};
-              if (choice.delta && choice.delta.content) {
-                const now = performance.now();
-                if (firstChunkAt === null) firstChunkAt = now;
-                chunkTimes.push(now);
-                text += choice.delta.content;
-              }
-              if (choice.finish_reason) reason = choice.finish_reason;
-              if (frame.usage) usage = frame.usage;        // closing chunk
-              if (frame.timings) timings = frame.timings;  // closing chunk
-              // A stage that fails sends this instead of tokens. It used to be
-              // parsed and dropped: the run ended with an empty answer, zero
-              // tokens and no hint of why — the failure looked like a timeout
-              // and was a message nobody read.
-              if (frame.error) streamError = String(frame.error);
-            } catch (e) { /* a frame we cannot parse is not worth breaking the view */ }
-          }
-        }
-        out.textContent = text;  // grows live, like a chat
-      }
-      if (reason) out.textContent = text + reasonNote(reason);
-      if (streamError) {
-        out.textContent = (text ? text + "\n\n" : "") +
-          "\u2717 пайплайн вернул ошибку:\n" + streamError;
-      }
-    } else {
-      const j = await r.json();
-      if (r.ok && j.choices) {
-        reason = j.choices[0].finish_reason;
-        text = j.choices[0].message.content;
-        usage = j.usage || null;
-        timings = j.timings || null;
-        out.textContent = text + reasonNote(reason);
-      } else {
-        out.textContent = JSON.stringify(j, null, 2);
-        return;
-      }
-    }
-  } catch (e) { out.textContent = "error: " + e.message; return; }
-
-  const totalMs = performance.now() - t0;
-  const run = buildRun({body, noThink, totalMs, firstChunkAt, t0, chunkTimes, usage, timings, reason, text});
-  lastRun = run;  // full resolution, for the single-run export
-  $("#c-stats").innerHTML = renderRunStats(run);
-  pushRun(run);
-  $("#c-hist").innerHTML = renderHistory();
-}
-
-function reasonNote(reason) {
-  // "length" means the cap cut the answer off, not that the model stopped.
-  return reason === "length"
-    ? `\n\n⚠ finish_reason=length — ответ обрезан лимитом max_tokens, поднимите его`
-    : `\n\nfinish_reason=${reason}`;
-}
-
-// ---------------------------------------------------------------- run stats
-function pct(sorted, q) {
-  if (!sorted.length) return 0;
-  return sorted[Math.min(sorted.length - 1, Math.floor(q * sorted.length))];
-}
-
-function buildRun({body, noThink, totalMs, firstChunkAt, t0, chunkTimes, usage, timings, reason, text}) {
-  // Gaps between streamed tokens as the client saw them (empty for non-stream).
-  const gaps = [];
-  for (let i = 1; i < chunkTimes.length; i++) gaps.push(chunkTimes[i] - chunkTimes[i-1]);
-  const sortedGaps = gaps.slice().sort((a,b) => a-b);
-  const clientTtft = firstChunkAt === null ? null : firstChunkAt - t0;
-  // Prefer the server's token count; fall back to counting stream chunks.
-  const completion = usage ? usage.completion_tokens : chunkTimes.length;
-  const decodeMs = clientTtft === null ? null : totalMs - clientTtft;
-  return {
-    at: Date.now(),
-    model: body.model,
-    stream: !!body.stream,
-    noThink,
-    maxTokens: body.max_tokens || null,
-    reason,
-    chars: text.length,
-    promptTokens: usage ? usage.prompt_tokens : null,
-    completionTokens: completion,
-    totalMs,
-    clientTtftMs: clientTtft,
-    // Steady-state speed: prefill excluded, which is the number worth comparing.
-    // Needs a real decode window: a backend that flushes every chunk at once
-    // (the echo stub, a proxy that buffers) would otherwise report thousands
-    // of tokens/s, which is a measurement artefact, not a speed.
-    clientDecodeTps: (decodeMs && decodeMs >= 5 && completion > 1)
-      ? ((completion - 1) / (decodeMs / 1000)) : null,
-    clientTps: totalMs > 0 && completion ? completion / (totalMs / 1000) : null,
-    gapP50: pct(sortedGaps, 0.5),
-    gapP95: pct(sortedGaps, 0.95),
-    gaps,
-    server: timings || null,
-    series: runSeries(timings, chunkTimes, t0),
-  };
-}
-
-// One shape for the charts and the export, whatever measured it.
-//
-// The head stage's own series is preferred and is the honest one: it times
-// each token where it is produced. The client's is a fallback for backends
-// that send no timings — and it measures something slightly different, because
-// several tokens can arrive in one network chunk, which flattens the cadence.
-// `source` says which is which, so an exported file is never ambiguous.
-function runSeries(timings, chunkTimes, t0) {
-  const s = timings && timings.series;
-  if (s && s.t_ms && s.t_ms.length > 1) {
-    return {
-      source: "head-stage",
-      everyNTokens: s.every_n_tokens || 1,
-      tokens: s.tokens || s.t_ms.length,
-      t_ms: s.t_ms,
-      gap_ms: s.gap_ms,
-      head_ms: s.head_ms || [],
-      peer_ms: s.peer_ms || [],
-      wire_ms: s.wire_ms || [],
-    };
-  }
-  if (chunkTimes.length > 1) {
-    const t = chunkTimes.map(x => Math.round((x - t0) * 10) / 10);
-    const gap = t.map((v, i) => i === 0 ? v : Math.round((t[i] - t[i-1]) * 100) / 100);
-    return {source: "client-chunks", everyNTokens: 1, tokens: t.length,
-            t_ms: t, gap_ms: gap, head_ms: [], peer_ms: [], wire_ms: []};
-  }
-  return null;
-}
-
-// Instantaneous rate, token by token. A gap of 200 ms is 5 tok/s at that
-// moment; averaging the whole request hides everything that varies.
-function seriesRates(series) {
-  const n = series.everyNTokens || 1;
-  // Index 0 is the prefill, whose "rate" is not a decode rate at all.
-  return series.gap_ms.slice(1).map(g => g > 0 ? (1000 * n) / g : 0);
-}
-
-// A per-token rate is jagged even on a perfectly steady pipeline, so the raw
-// line is drawn faintly and a centred moving average is drawn over it. The
-// window scales with the run: a fixed one either erases a short answer or
-// leaves a long one unreadable.
-function smoothed(values, window) {
-  const w = window || Math.max(3, Math.round(values.length / 25));
-  const half = Math.floor(w / 2);
-  return values.map((_, i) => {
-    const from = Math.max(0, i - half), to = Math.min(values.length, i + half + 1);
-    let sum = 0;
-    for (let j = from; j < to; j++) sum += values[j];
-    return sum / (to - from);
-  });
-}
-
-function ms(v) { return v === null || v === undefined ? "—" : (v >= 1000 ? (v/1000).toFixed(2) + " s" : v.toFixed(0) + " ms"); }
-function num(v, d) { return v === null || v === undefined ? "—" : v.toFixed(d === undefined ? 1 : d); }
-
-function card(label, value, hint) {
-  return `<div style="border:1px solid var(--line);border-radius:6px;padding:8px 10px;min-width:120px">
-    <div class="muted">${label}</div>
-    <div style="font-size:17px;color:var(--acc)">${value}</div>
-    ${hint ? `<div class="muted">${hint}</div>` : ""}</div>`;
-}
-
-
-// ------------------------------------------------------------------ charts
-// A sparkline is enough to spot a spike; reading a rate off one is not
-// possible. These carry axes, because the question here is "how many tok/s at
-// second 12", not "is the shape bumpy".
-function lineChart(sets, {xs, yLabel, xLabel, height}) {
-  const w = 760, h = height || 200, padL = 46, padR = 10, padT = 10, padB = 26;
-  const all = sets.flatMap(s => s.values).filter(v => isFinite(v));
-  if (!all.length || xs.length < 2) return "";
-  const yMax = Math.max(...all) * 1.08 || 1;
-  const xMax = Math.max(...xs) || 1;
-  const px = v => padL + (v / xMax) * (w - padL - padR);
-  const py = v => h - padB - (Math.max(0, v) / yMax) * (h - padT - padB);
-
-  const ticksY = [0, 0.25, 0.5, 0.75, 1].map(f => {
-    const v = yMax * f, y = py(v);
-    return `<line x1="${padL}" y1="${y.toFixed(1)}" x2="${w - padR}" y2="${y.toFixed(1)}"
-              stroke="var(--line)" stroke-width="0.5"/>
-            <text x="${padL - 6}" y="${(y + 3.5).toFixed(1)}" text-anchor="end"
-              font-size="9" fill="var(--muted)">${v >= 10 ? v.toFixed(0) : v.toFixed(1)}</text>`;
-  }).join("");
-  const ticksX = [0, 0.25, 0.5, 0.75, 1].map(f => {
-    const v = xMax * f, x = px(v);
-    return `<text x="${x.toFixed(1)}" y="${h - 8}" text-anchor="middle"
-              font-size="9" fill="var(--muted)">${(v / 1000).toFixed(1)}s</text>`;
-  }).join("");
-  const lines = sets.map(s => {
-    const pts = s.values.map((v, i) =>
-      `${px(xs[i]).toFixed(1)},${py(v).toFixed(1)}`).join(" ");
-    return `<polyline points="${pts}" fill="none" stroke="${s.color}"
-              stroke-width="${s.width || 1.5}" opacity="${s.opacity || 1}"/>`;
-  }).join("");
-  const legend = sets.filter(s => s.label).map((s, i) =>
-    `<g transform="translate(${padL + 6 + i * 132}, ${padT + 8})">
-       <line x1="0" y1="0" x2="14" y2="0" stroke="${s.color}" stroke-width="2"
-         opacity="${s.opacity || 1}"/>
-       <text x="19" y="3.5" font-size="10" fill="var(--muted)">${esc(s.label)}</text></g>`).join("");
-
-  return `<svg viewBox="0 0 ${w} ${h}" style="width:100%;max-width:${w}px;height:auto;
-      background:var(--panel);border:1px solid var(--line);border-radius:6px">
-      ${ticksY}${ticksX}
-      <text x="10" y="${padT + 4}" font-size="9" fill="var(--muted)">${esc(yLabel)}</text>
-      <text x="${w - padR}" y="${h - 8}" text-anchor="end" font-size="9"
-        fill="var(--muted)">${esc(xLabel || "время запроса")}</text>
-      ${lines}${legend}
-    </svg>`;
-}
-
-function renderSeriesCharts(run) {
-  const s = run.series;
-  if (!s || !s.t_ms || s.t_ms.length < 3) return "";
-  const rates = seriesRates(s);
-  const xs = s.t_ms.slice(1);              // drop the prefill point
-  if (rates.length < 2) return "";
-  // Tokens divided by the time they took — NOT the mean of the per-token
-  // rates. Averaging rates weights a 1 ms token the same as a 100 ms one and
-  // comes out higher than the request actually ran; this line has to agree
-  // with the tokens/s card above it or one of the two is lying.
-  const n = s.everyNTokens || 1;
-  const decodeMs = s.gap_ms.slice(1).reduce((a, b) => a + b, 0);
-  const avg = decodeMs > 0 ? (1000 * n * rates.length) / decodeMs : 0;
-
-  const rateChart = lineChart([
-    {values: rates, color: "var(--acc)", width: 1, opacity: 0.28, label: "мгновенно"},
-    {values: smoothed(rates), color: "var(--ok)", width: 2, label: "скользящее среднее"},
-    {values: rates.map(() => avg), color: "var(--muted)", width: 1, opacity: 0.6,
-     label: `за весь прогон ${avg.toFixed(2)}`},
-  ], {xs, yLabel: "tok/s", xLabel: "время от начала запроса"});
-
-  // The split is only worth drawing when the head stage reported it; the
-  // client's own clock cannot see inside a pipeline.
-  let splitChart = "";
-  if (s.head_ms.length > 1) {
-    const drop = a => a.slice(1);
-    splitChart = `<h2 style="margin-top:16px">Из чего складывается токен (ms)</h2>` +
-      lineChart([
-        {values: smoothed(drop(s.head_ms)), color: "var(--acc)", width: 1.6, label: "свои слои"},
-        {values: smoothed(drop(s.peer_ms)), color: "var(--warn)", width: 1.6, label: "остальные стадии"},
-        {values: smoothed(drop(s.wire_ms)), color: "var(--ok)", width: 1.6, label: "транспорт"},
-      ], {xs, yLabel: "ms", xLabel: "время от начала запроса", height: 170}) +
-      `<p class="muted">сглажено; сумма трёх линий — это интервал между токенами</p>`;
-  }
-
-  const sampled = (s.everyNTokens || 1) > 1
-    ? ` <span class="warn">точки прорежены: 1 на ${s.everyNTokens} токенов</span>` : "";
-  const origin = s.source === "head-stage"
-    ? "замерено головой пайплайна"
-    : "замерено клиентом по чанкам стрима — несколько токенов могут прийти одной пачкой";
-
-  return `<h2 style="margin-top:16px">Скорость по ходу генерации</h2>
-    ${rateChart}
-    <p class="muted">${origin}${sampled}</p>
-    ${splitChart}`;
-}
-
-// ------------------------------------------------------------------ export
-// The charts answer the questions this UI thought to ask. Handing over the
-// numbers themselves is what lets somebody ask a different one — overlay two
-// runs, compare a three-node split against a two-node one, plot it elsewhere.
-function downloadJson(filename, payload) {
-  const blob = new Blob([JSON.stringify(payload, null, 2)], {type: "application/json"});
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = filename;
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-  setTimeout(() => URL.revokeObjectURL(url), 1000);
-}
-
-function runStamp(run) {
-  const d = new Date(run.at);
-  const two = n => String(n).padStart(2, "0");
-  return `${d.getFullYear()}${two(d.getMonth()+1)}${two(d.getDate())}-` +
-         `${two(d.getHours())}${two(d.getMinutes())}${two(d.getSeconds())}`;
-}
-
-function exportRun(run) {
-  return {
-    schema: "loom.run.v1",
-    at: new Date(run.at).toISOString(),
-    model: run.model,
-    stages: run.server ? run.server.stages : null,
-    pipeline_id: run.server ? run.server.pipeline_id : null,
-    stream: run.stream,
-    no_think: run.noThink,
-    max_tokens: run.maxTokens,
-    finish_reason: run.reason,
-    prompt_tokens: run.promptTokens,
-    completion_tokens: run.completionTokens,
-    client: {
-      total_ms: run.totalMs,
-      ttft_ms: run.clientTtftMs,
-      decode_tokens_per_s: run.clientDecodeTps,
-      tokens_per_s: run.clientTps,
-    },
-    server: run.server || null,
-    // Parallel arrays, index-aligned. Index 0 is the prefill: gap_ms[0] is the
-    // time to first token, not a decode interval.
-    series: run.series || null,
-  };
-}
-
-function exportLastRun() {
-  if (!lastRun) return;
-  downloadJson(`loom-run-${runStamp(lastRun)}.json`, exportRun(lastRun));
-}
-
-function exportAllRuns() {
-  const runs = loadRuns();
-  if (!runs.length) return;
-  downloadJson(`loom-runs-${runStamp(runs[0])}.json`, {
-    schema: "loom.runs.v1",
-    exported_at: new Date().toISOString(),
-    runs: runs.map(exportRun),
-  });
-}
-
-function renderRunStats(run) {
-  const s = run.server;
-  // The head stage's number, not the client's, for the same reason the
-  // inter-token figures below prefer it: several tokens can arrive in one
-  // network chunk, which shortens the decode window the client can see and
-  // inflates its rate. On a slow pipeline the two agree; on a fast one the
-  // client reads high — and it would then disagree with the chart underneath,
-  // which is plotted from the head's own series.
-  const tps = s ? s.decode_tokens_per_s : run.clientDecodeTps;
-  const ttft = run.clientTtftMs !== null ? run.clientTtftMs : (s ? s.ttft_ms : null);
-  const cards = [
-    card("tokens/s (decode)", num(tps, 2),
-         s ? "без prefill · голова" : "без prefill · клиент"),
-    card("TTFT", ms(ttft), "до первого токена"),
-    card("время ответа", ms(run.totalMs), run.stream ? "клиент, весь стрим" : "клиент, весь запрос"),
-    card("токенов", `${run.completionTokens ?? "—"}`,
-         run.promptTokens !== null ? `prompt ${run.promptTokens}` : "по чанкам стрима"),
-    card("tokens/s (e2e)", num(run.clientTps, 2), "включая prefill"),
-    // Server numbers first: several tokens can share one network chunk, so the
-    // client's own gaps understate the cadence and overstate its spread.
-    card("между токенами",
-         s ? `${num(s.inter_token_ms_p50)} / ${num(s.inter_token_ms_p95)} ms`
-           : (run.gaps.length ? `${num(run.gapP50)} / ${num(run.gapP95)} ms` : "—"),
-         s ? "p50 / p95 · голова" : "p50 / p95 · клиент"),
-  ];
-  let serverBlock = "";
-  if (s) {
-    // The gap between the two clocks is the API hop + the worker tunnel.
-    const overhead = run.totalMs - s.total_ms;
-    const perHop = s.stages > 1 ? s.inter_token_ms_p50 / s.stages : null;
-    // Measured split, not arithmetic: every stage reports its own duration and
-    // the head subtracts them from the round trip it timed itself.
-    const split = s.transport_ms_p50 !== undefined ? `
-      <p style="margin-top:6px">на что уходит токен (p50 / p95):
-        <span class="dim">свои слои</span> ${num(s.head_compute_ms_p50)} / ${num(s.head_compute_ms_p95)} ms ·
-        <span class="dim">остальные стадии</span> ${num(s.peer_compute_ms_p50)} / ${num(s.peer_compute_ms_p95)} ms ·
-        <span class="${s.transport_share > 0.4 ? "bad" : "acc"}">транспорт</span>
-        ${num(s.transport_ms_p50)} / ${num(s.transport_ms_p95)} ms
-        <b>(${Math.round(100 * s.transport_share)}% времени)</b></p>` : "";
-    serverBlock = `<p class="muted" style="margin-top:10px">по данным головы пайплайна:
-      prefill ${ms(s.ttft_ms)} (${num(s.prompt_tokens_per_s)} tok/s) ·
-      decode ${ms(s.decode_ms)} (${num(s.decode_tokens_per_s, 2)} tok/s) ·
-      между токенами p50 ${num(s.inter_token_ms_p50)} / p95 ${num(s.inter_token_ms_p95)} / max ${num(s.inter_token_ms_max)} ms ·
-      стадий ${s.stages}${perHop ? ` (≈ ${num(perHop)} ms на переход)` : ""} ·
-      накладные транспорта ${ms(Math.max(0, overhead))}</p>${split}`;
-  } else {
-    serverBlock = `<p class="muted" style="margin-top:10px">бэкенд не прислал timings —
-      цифры измерены клиентом (vLLM-бэкенд или старый образ воркера)</p>`;
-  }
-  const spark = run.gaps.length > 1
-    ? `<h2 style="margin-top:16px">Приход токенов клиенту (ms между чанками)</h2>${sparkline(run.gaps)}`
-    : "";
-  const download = run.series
-    ? `<button class="action" style="margin-left:8px;padding:2px 8px"
-         onclick="exportLastRun()">скачать JSON</button>` : "";
-  return `<h2 style="margin-top:16px">Статистика запроса${download}</h2>
-    <div style="display:flex;gap:8px;flex-wrap:wrap">${cards.join("")}</div>
-    ${serverBlock}${renderSeriesCharts(run)}${spark}`;
-}
-
-// ------------------------------------------------------------------ charts
-function sparkline(values) {
-  const w = 620, h = 70, pad = 4;
-  const max = Math.max(...values), min = Math.min(...values);
-  const span = (max - min) || 1;
-  const pts = values.map((v, i) => {
-    const x = pad + (i / Math.max(1, values.length - 1)) * (w - 2*pad);
-    const y = h - pad - ((v - min) / span) * (h - 2*pad);
-    return `${x.toFixed(1)},${y.toFixed(1)}`;
-  }).join(" ");
-  return `<svg viewBox="0 0 ${w} ${h}" style="width:100%;max-width:${w}px;height:${h}px;
-      background:var(--panel);border:1px solid var(--line);border-radius:6px">
-      <polyline points="${pts}" fill="none" stroke="var(--acc)" stroke-width="1.5"/>
-    </svg>
-    <p class="muted">мин ${num(min)} · медиана ${num(pct(values.slice().sort((a,b)=>a-b), 0.5))} ·
-       макс ${num(max)} ms · ${values.length} интервалов</p>`;
-}
-
-function barChart(rows, unit, colorVar) {
-  // Horizontal bars: labels stay readable however long the model id is.
-  // A run with nothing measurable (non-streamed, old worker image) gets an
-  // empty bar and a dash — not a zero, which would read as "it was that slow".
-  const values = rows.map(r => r.value).filter(v => v !== null && v !== undefined);
-  const max = Math.max(...values, 0.0001);
-  return `<div style="display:flex;flex-direction:column;gap:3px;margin:6px 0 14px">` +
-    rows.map(r => {
-      const has = r.value !== null && r.value !== undefined;
-      const width = has ? (100 * r.value / max).toFixed(1) : 0;
-      return `<div style="display:flex;align-items:center;gap:8px">
-      <span class="muted" style="width:160px;text-align:right;flex:none">${esc(r.label)}</span>
-      <span style="flex:1;background:var(--panel);border:1px solid var(--line);border-radius:4px;height:16px">
-        <span style="display:block;height:100%;width:${width}%;
-              background:var(${colorVar});border-radius:3px"></span></span>
-      <span style="width:110px;flex:none">${has ? num(r.value, 2) + " " + unit : "<span class=\'dim\'>—</span>"}</span>
-    </div>`;
-    }).join("") + `</div>`;
-}
-
-// ---------------------------------------------------------------- history
-const HIST_KEY = "loom_console_runs";
-function loadRuns() {
-  try { return JSON.parse(localStorage.getItem(HIST_KEY) || "[]"); } catch (e) { return []; }
-}
-let lastRun = null;
-// Points kept per stored run. The full series stays in memory for the run on
-// screen; history keeps enough shape to overlay runs against each other
-// without 20 of them filling the localStorage quota.
-const HIST_SERIES_POINTS = 400;
-
-function thinSeries(series, limit) {
-  if (!series || !series.t_ms || series.t_ms.length <= limit) return series;
-  const step = Math.ceil(series.t_ms.length / limit);
-  const take = a => (a && a.length) ? a.filter((_, i) => i % step === 0) : [];
-  return {
-    ...series,
-    everyNTokens: (series.everyNTokens || 1) * step,
-    t_ms: take(series.t_ms), gap_ms: take(series.gap_ms),
-    head_ms: take(series.head_ms), peer_ms: take(series.peer_ms),
-    wire_ms: take(series.wire_ms),
-  };
-}
-
-function pushRun(run) {
-  // The raw client gap series is per-run detail the history does not use.
-  const {gaps, ...slim} = run;
-  slim.series = thinSeries(run.series, HIST_SERIES_POINTS);
-  const runs = loadRuns();
-  runs.unshift(slim);
-  // A quota error must not cost the user their history: drop the oldest runs
-  // until it fits rather than failing the write.
-  for (let keep = Math.min(20, runs.length); keep >= 1; keep--) {
-    try {
-      localStorage.setItem(HIST_KEY, JSON.stringify(runs.slice(0, keep)));
-      return;
-    } catch (e) { /* quota: try again with fewer runs */ }
-  }
-}
-function clearRuns() { localStorage.removeItem(HIST_KEY); $("#c-hist").innerHTML = renderHistory(); }
-
-function runLabel(r) {
-  const when = new Date(r.at).toLocaleTimeString();
-  return `${when} ${r.model}${r.noThink ? " ·no-think" : ""}${r.stream ? " ·stream" : ""}`;
-}
-
-function renderHistory() {
-  const runs = loadRuns();
-  if (!runs.length) {
-    return `<h2 style="margin-top:20px">История прогонов</h2>
-            <p class="muted">пусто — отправьте запрос, и здесь появится сравнение</p>`;
-  }
-  const pick = (client, serverKey) => runs.map(r => {
-    const own = r[client];
-    if (own !== null && own !== undefined) return {label: runLabel(r), value: own};
-    return {label: runLabel(r), value: r.server ? r.server[serverKey] : null};
-  });
-  // Same clock as the cards and the charts, so a run compared here is the run
-  // that was reported above.
-  const tps = runs.map(r => ({
-    label: runLabel(r),
-    value: r.server ? r.server.decode_tokens_per_s : r.clientDecodeTps,
-  }));
-  const ttft = pick("clientTtftMs", "ttft_ms");
-  const rows = runs.map(r => [
-    new Date(r.at).toLocaleTimeString(),
-    esc(r.model) + (r.noThink ? ` <span class="dim">no-think</span>` : "") +
-      (r.stream ? ` <span class="dim">stream</span>` : ""),
-    `${r.completionTokens ?? "—"}${r.promptTokens !== null && r.promptTokens !== undefined ? ` <span class="dim">+${r.promptTokens} prompt</span>` : ""}`,
-    num(r.server ? r.server.decode_tokens_per_s : r.clientDecodeTps, 2),
-    ms(r.clientTtftMs),
-    ms(r.totalMs),
-    r.server ? `${num(r.server.inter_token_ms_p50)} / ${num(r.server.inter_token_ms_p95)}` : "—",
-    r.server ? r.server.stages : "—",
-    r.reason === "length" ? `<span class="warn">length</span>` : `<span class="dim">${esc(r.reason || "—")}</span>`,
-  ]);
-  return `<h2 style="margin-top:20px">Сравнение прогонов
-      <button class="action" style="margin-left:8px;padding:2px 8px"
-        onclick="exportAllRuns()">скачать все JSON</button>
-      <button class="action danger" style="margin-left:4px;padding:2px 8px" onclick="clearRuns()">очистить</button></h2>
-    <p class="muted">в JSON — ряды по токенам всех прогонов, чтобы накладывать их друг на друга</p>
-    <p class="muted">tokens/s (decode) — больше лучше</p>${barChart(tps, "tok/s", "--ok")}
-    <p class="muted">TTFT — меньше лучше</p>${barChart(ttft, "ms", "--warn")}
-    ` + table(["время","модель","токенов","tok/s","TTFT","всего","между токенами p50/p95","стадий","finish"], rows);
-}
-
-// ------------------------------------------------------------------ refresh
-// ------------------------------------------------------------------ compute
-// Renting the fleet for work that is not a model. Loom cannot look inside a
-// client's container, so it cannot split the work: it spreads independent
-// tasks, or allocates a group that coordinates itself. The form says so,
-// because the difference decides whether a job runs at all.
-let jobMsg = "";
-
-async function submitJob() {
-  const command = $("#j-cmd").value.trim();
-  const body = {
-    image: $("#j-image").value.trim(),
-    command: command ? command.split(/\s+/) : [],
-    kind: $("#j-kind").value,
-    tasks: Number($("#j-tasks").value) || 1,
-    timeout_s: Number($("#j-timeout").value) || 3600,
-    resources: {
-      vram_gb: Number($("#j-vram").value) || 0,
-      ram_gb: Number($("#j-ram").value) || 0,
-      cpus: Number($("#j-cpus").value) || 1,
-    },
-  };
-  jobMsg = "размещаю...";
-  await refresh({reset: true});
-  try {
-    const r = await api("/admin/jobs", {method: "POST", body: JSON.stringify(body)});
-    jobMsg = `${r.job_id}: запущено ${(r.started || []).length}` +
-             ((r.failed || []).length ? `, не удалось ${r.failed.length}` : "");
-  } catch (e) { jobMsg = "не размещено: " + e.message; }
-  await refresh({reset: true});
-}
-
-async function cancelJob(id) {
-  try { await api("/admin/jobs/" + encodeURIComponent(id), {method: "DELETE"}); }
-  catch (e) { jobMsg = e.message; }
-  await refresh({reset: true});
-}
-
-async function showJobLogs(id, index) {
-  const out = $("#j-logs");
-  out.textContent = "...";
-  try {
-    const r = await api(`/admin/jobs/${encodeURIComponent(id)}/logs/${index}?tail=200`);
-    out.textContent = r.logs || "(пусто)";
-  } catch (e) { out.textContent = "логи недоступны: " + e.message; }
-}
-
-function jobStateCls(state) {
-  if (state === "done") return "ok";
-  if (state === "failed") return "bad";
-  if (state === "running") return "ok";
-  return "dim";
-}
-
-async function viewCompute() {
-  const data = await api("/admin/jobs");
-  const nodes = await api("/admin/nodes");
-  const free = Object.entries(data.jobs ? nodes.nodes : {})
-    .map(([id, n]) => `${esc(id)} ${n.vram_declared_gb} GB`).join(" · ");
-
-  const rows = (data.jobs || []).slice().reverse().map(j => {
-    const tasks = j.tasks.map(t =>
-      `<span class="${jobStateCls(t.state)}">#${t.index}</span> ` +
-      `<span class="dim">${esc(t.node_id || "в очереди")}</span>` +
-      (t.exit_code !== null && t.exit_code !== undefined
-        ? ` <span class="dim">код ${t.exit_code}</span>` : "") +
-      (t.node_id ? ` <button onclick="showJobLogs('${j.job_id}',${t.index})">логи</button>` : "")
-    ).join("<br>");
-    return [
-      esc(j.job_id),
-      `${esc(j.image)}<br><span class="dim">${esc((j.command || []).join(" "))}</span>`,
-      `${j.kind}<br><span class="dim">${j.tasks.length} задач</span>`,
-      `${j.resources.vram_gb} GB VRAM<br><span class="dim">${j.resources.ram_gb} GB RAM · ` +
-        `${j.resources.cpus} CPU</span>`,
-      `<span class="${jobStateCls(j.state)}">${j.state}</span>`,
-      tasks,
-      `<button onclick="cancelJob('${j.job_id}')">отменить</button>`,
-    ];
-  });
-
+// ----------------------------------------------------------------- release
+async function viewRelease() {
+  const map = await api("/admin/release");
+  const rel = map.release;
+  const versions = Object.entries(map.versions || {}).sort((a, b) => b[1] - a[1])
+    .map(([v, n]) => [esc(v), n, ((n / (map.nodes_total || 1)) * 100).toFixed(0) + "%"]);
+  const state = rel ? `
+    <p>Release <b>${esc(rel.version)}</b> · ${(rel.size_bytes/1048576).toFixed(1)} MB ·
+       rollout <b>${rel.wave_percent}%</b><br>
+       <span class="dim">${map.nodes_in_wave} nodes in the wave,
+       ${map.nodes_on_target} of ${map.nodes_total} already on it</span></p>
+    <div class="row">
+      <button onclick="setWave(10)">10%</button>
+      <button onclick="setWave(25)">25%</button>
+      <button onclick="setWave(50)">50%</button>
+      <button onclick="setWave(100)">whole fleet</button>
+      <button class="danger" onclick="withdraw()">stop rollout</button>
+    </div>
+    <p class="muted">A node's wave is decided by its name, not by chance, so it stays in
+    the same one across reconnects. Waves are advanced by hand: "registered" and "works"
+    are not the same thing, and an automatic step would spread a broken build
+    confidently.</p>` : `<p class="dim">Nothing published.</p>`;
   return `
-  <h2>ЗАПУСТИТЬ ЗАДАНИЕ</h2>
-  <div class="dim" style="margin-bottom:8px">
-    свободно сейчас: ${free || "нет подключённых нод"}
-  </div>
+  <h2>Agent rollout</h2>
+  ${state}
+  ${message ? `<pre>${esc(message)}</pre>` : ""}
+  <h2>Versions in the fleet</h2>
+  ${table(["version","nodes","share"], versions)}
+  <h2>Publish</h2>
   <div class="row">
-    <label>образ <input id="j-image" style="width:280px"
-      placeholder="ghcr.io/acme/render:1"></label>
-    <label>команда <input id="j-cmd" style="width:280px"
-      placeholder="python render.py --frames 100"></label>
+    <input id="r-version" type="text" placeholder="0.2.0" style="width:110px">
+    <input id="r-sig" type="text" placeholder="signature, hex" style="min-width:320px">
+    <input id="r-file" type="file" accept=".gz,.tgz">
+    <button class="action" onclick="publish()">publish</button>
   </div>
-  <div class="row">
-    <label>как <select id="j-kind">
-      <option value="array">array — независимые задачи</option>
-      <option value="gang">gang — одна задача на нескольких машинах</option>
-    </select></label>
-    <label>задач <input id="j-tasks" type="number" value="1" style="width:70px"></label>
-    <label>VRAM ГБ <input id="j-vram" type="number" value="8" style="width:70px"></label>
-    <label>RAM ГБ <input id="j-ram" type="number" value="4" style="width:70px"></label>
-    <label>CPU <input id="j-cpus" type="number" value="2" style="width:70px"></label>
-    <label>лимит с <input id="j-timeout" type="number" value="3600" style="width:90px"></label>
-    <button onclick="submitJob()">запустить</button>
-  </div>
-  <div class="dim" style="margin:6px 0 14px">
-    <b>array</b> — задачи независимы, Loom раскладывает их по стольким нодам,
-    сколько нужно; отвалившаяся нода стоит одной задачи.
-    <b>gang</b> — одно вычисление на нескольких машинах: Loom выделяет группу и
-    передаёт каждой задаче RANK, WORLD_SIZE и адреса соседей, а координируют
-    они себя сами. Разрезать чужой контейнер Loom не может — программа должна
-    быть написана под несколько машин.
-  </div>
-  ${jobMsg ? `<pre>${esc(jobMsg)}</pre>` : ""}
-  <h2>ЗАДАНИЯ</h2>
-  ${table(["job","образ / команда","вид","ресурсы","состояние","задачи",""], rows)}
-  <h2>ЛОГИ ЗАДАЧИ</h2>
-  <pre id="j-logs" style="max-height:320px;overflow:auto">выберите «логи» у задачи</pre>`;
+  <p class="muted">Signed with a key this orchestrator does not have and must not: taken
+  over, it can name a release we already signed, but not run new code on the fleet.
+  Publishing does not start a rollout.</p>`;
 }
 
-const VIEWS = {"Nodes":viewNodes, "Models":viewModels, "Deploy":viewDeploy,
-               "Compute":viewCompute, "Keys":viewKeys,
-               "Perf-map":viewPerfmap, "SLO / Rebalance":viewSlo, "Console":viewConsole};
-let timer = null;
+async function publish() {
+  const file = $("#r-file").files[0];
+  const version = $("#r-version").value.trim();
+  const signature = $("#r-sig").value.trim();
+  if (!file || !version || !signature) { message = "version, signature and archive"; return render(); }
+  const raw = new Uint8Array(await file.arrayBuffer());
+  let binary = ""; raw.forEach(b => binary += String.fromCharCode(b));
+  try {
+    const r = await api("/admin/release", {method:"POST", body: JSON.stringify(
+      {version, signature, archive: btoa(binary)})});
+    message = `release ${r.version} published, rollout at 0%`;
+  } catch (e) { message = "not accepted: " + e.message; }
+  render();
+}
+
+const setWave = (percent) => act("/admin/release/wave",
+  {method:"POST", body: JSON.stringify({percent})});
+const withdraw = () => act("/admin/release/withdraw", {method:"POST"});
+
+// ------------------------------------------------------------------ shell
+const VIEWS = {"Nodes": viewNodes, "Work": viewWork, "Keys": viewKeys, "Release": viewRelease};
 
 function isEditing() {
-  // Is the user in a field right now? Re-rendering under their hands wipes a
-  // half-typed model name and snaps the dropdown back to its first option.
+  // Re-rendering under the operator's hands wipes a half-typed command.
   const el = document.activeElement;
-  if (!el || !el.closest || !el.closest("#view")) return false;
-  return ["INPUT", "SELECT", "TEXTAREA"].includes(el.tagName);
+  return el && el.closest && el.closest("#view") &&
+         ["INPUT", "SELECT", "TEXTAREA"].includes(el.tagName);
 }
 
-function formSnapshot() {
-  // Values keyed by element id, so they survive the innerHTML swap. Switching
-  // tabs is safe on its own: the ids of another view simply do not match.
-  const state = {};
-  document.querySelectorAll("#view input, #view select, #view textarea").forEach(el => {
-    if (!el.id) return;
-    state[el.id] = el.type === "checkbox" ? el.checked : el.value;
-  });
-  return state;
-}
-
-function restoreForm(state) {
-  document.querySelectorAll("#view input, #view select, #view textarea").forEach(el => {
-    if (!el.id || !(el.id in state)) return;
-    if (el.type === "checkbox") el.checked = state[el.id];
-    else el.value = state[el.id];
-  });
-}
-
-async function refresh(options) {
-  const opts = options || {};
-  clearTimeout(timer);
-  // The auto-refresh must never fight the user for the keyboard.
-  if (opts.auto && isEditing()) {
-    $("#refreshed").textContent = "· пауза (ввод)";
-    timer = setTimeout(() => refresh({auto: true}), 3000);
-    return;
-  }
+async function render() {
+  $("#tabs").innerHTML = Object.keys(VIEWS).map(t =>
+    `<button class="${t === active ? "active" : ""}" onclick="pick('${t}')">${t}</button>`).join("");
   try {
-    $("#err").textContent = "";
-    const carried = opts.reset ? {} : formSnapshot();
     $("#view").innerHTML = await VIEWS[active]();
-    restoreForm(carried);
-    if (active === "Deploy") depTotal();  // the line is derived from the inputs
-    $("#refreshed").textContent = "· " + new Date().toLocaleTimeString();
-  } catch (e) { $("#err").textContent = e.message; }
-  if (active !== "Console") timer = setTimeout(() => refresh({auto: true}), 3000);
+    $("#err").textContent = "";
+  } catch (e) {
+    $("#err").textContent = e.message;
+  }
+  $("#refreshed").textContent = new Date().toLocaleTimeString();
 }
-renderTabs();
-refresh();
+
+function pick(tab) {
+  active = tab; localStorage.setItem("loom_tab", tab); message = ""; render();
+}
+
+function loop() {
+  clearInterval(timer);
+  timer = setInterval(() => { if (!isEditing()) render(); }, 3000);
+}
+
+$("#token").value = localStorage.getItem("loom_token") || "";
+$("#token").addEventListener("change", () => {
+  localStorage.setItem("loom_token", $("#token").value.trim()); render();
+});
+render(); loop();
 </script>
 </body>
 </html>

@@ -1,530 +1,387 @@
-"""Client API (Phase 2): model-aware routing + catalog admin.
+"""The orchestrator's HTTP face.
 
-- /v1/models            — full catalog from the Model Registry
-- /v1/chat/completions  — routed by body["model"] to endpoints of THAT model
-                          only (model-aware EndpointRegistry + Phase-2 head)
-- /admin/models         — catalog CRUD; triggers a Resource Broker pass
-- /admin/status         — nodes, grants, endpoints, unscheduled models
+Three audiences and nothing else:
+
+  clients    /v1/chat/completions — a model answers, and the machine answering
+             it never opened a port
+  operators  /admin/... — nodes, tasks, groups, join keys, agent rollout
+  agents     /agent/release/... — the signed payload a node fetches
+
+Every admin route is gated by one token; the release archive deliberately is
+not, because it is signed and a node has no admin token to present.
 """
 
 from __future__ import annotations
 
+import base64
 import json
-import time
 from pathlib import Path
 
-import httpx
 from fastapi import FastAPI, Header, Request
-from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 
 from loom.logging_config import get_logger
-from loom.orchestrator.controller import MultiModelController
-from loom.orchestrator.placement import PlacementError
-from loom.orchestrator.model_resolver import ModelResolveError, spec_from_hf
-from loom.orchestrator.registry import ModelSpec
-from loom.orchestrator.tunnel import TunnelError
+from loom.orchestrator.agents import AgentError
+from loom.orchestrator.releases import ReleaseError
 
 logger = get_logger(__name__)
 
 
-def _error(status: int, message: str, err_type: str = "invalid_request_error") -> JSONResponse:
-    return JSONResponse(
-        status_code=status, content={"error": {"message": message, "type": err_type}}
-    )
+def _error(status: int, message: str, kind: str = "invalid_request_error") -> JSONResponse:
+    return JSONResponse(status_code=status,
+                        content={"error": {"message": message, "type": kind}})
 
 
-def create_app(controller: MultiModelController) -> FastAPI:
-    app = FastAPI(title="Loom API", version="0.0.2")
-    client = httpx.AsyncClient(timeout=httpx.Timeout(20 * 60, connect=10))
-    admin_token = controller.config.admin_token
+def create_app(*, agents=None, releases=None, keystore=None, config=None,
+               public_address=None) -> FastAPI:
+    app = FastAPI(title="Loom", version="0.2.0")
+    admin_token = getattr(config, "admin_token", "") or ""
 
-    def _admin_forbidden(provided: str | None) -> bool:
-        return bool(admin_token) and provided != admin_token
+    def forbidden(token: str | None) -> bool:
+        return bool(admin_token) and token != admin_token
 
-    @app.get("/healthz")
-    async def healthz():
-        status = controller.status()
-        serving = [m for m, s in status["models"].items() if s["endpoints"]]
-        return {"status": "ok" if serving else "no_capacity", "serving": serving}
+    def need_agents():
+        return _error(503, "this orchestrator is running without the agent gateway")
 
+    # ------------------------------------------------------------- clients
     @app.get("/v1/models")
-    async def models():
-        return {
-            "object": "list",
-            "data": [
-                {
-                    "id": spec.model_id,
-                    "object": "model",
-                    "created": int(time.time()),
-                    "owned_by": "loom",
-                    "loom": {
-                        "priority": spec.priority,
-                        "serving": bool(controller.endpoints.candidates(spec.model_id)),
-                    },
-                }
-                for spec in controller.registry.list()
-            ],
-        }
+    async def list_models():
+        """What is up and answering, by the name a client would ask for."""
+        if agents is None:
+            return {"object": "list", "data": []}
+        served = {g.label for g in agents.groups.values()
+                  if g.label and agents.group_for(g.label) is not None}
+        return {"object": "list",
+                "data": [{"id": name, "object": "model"} for name in sorted(served)]}
 
     @app.post("/v1/chat/completions")
-    async def chat_completions(request: Request):
-        body = await request.json()
-        model_id = body.get("model")
-        if not model_id:
-            ids = controller.registry.ids()
-            if len(ids) == 1:
-                model_id = ids[0]
-            else:
-                return _error(400, "'model' is required")
-        if controller.registry.get(model_id) is None:
-            return _error(404, f"model '{model_id}' not found")
-        endpoint = controller.pick_endpoint(model_id)
-        if endpoint is None:
-            return _error(503, f"no serving capacity for model '{model_id}'", "server_error")
+    async def chat(request: Request):
+        """Route to the group serving this model and let it answer.
 
-        controller.endpoints.mark_request_start(endpoint)
-        started = time.monotonic()
-
-        def finish(*, error: bool) -> None:
-            ttft_ms = (time.monotonic() - started) * 1000
-            controller.endpoints.mark_request_end(endpoint, error=error, ttft_ms=ttft_ms)
-            controller.record_request(model_id, ttft_ms=ttft_ms, error=error)
-
-        streaming = bool(body.get("stream"))
-        payload = json.dumps(body).encode()
+        The orchestrator does not touch the body. It knows which node holds
+        rank 0 and how to reach it over the connection that node opened; what
+        a completion looks like is the stage's business.
+        """
+        if agents is None:
+            return need_agents()
+        raw = await request.body()
         try:
-            if endpoint.base_url.startswith("tunnel://"):
-                # Normal production path: relay over the worker's outbound
-                # data-plane stream (worker exposes no address at all).
-                head, chunks = await controller.tunnel.request(
-                    endpoint.node_id,
-                    model_id=model_id,
-                    path="/v1/chat/completions",
-                    body=payload,
-                    stream=streaming,
-                )
-                finish(error=head.status >= 500)
-                if streaming:
-                    return StreamingResponse(
-                        chunks,
-                        status_code=head.status,
-                        media_type=head.headers.get("Content-Type", "text/event-stream"),
-                    )
-                buf = bytearray()
-                async for chunk in chunks:
-                    buf.extend(chunk)
-                return Response(
-                    content=bytes(buf),
-                    status_code=head.status,
-                    media_type=head.headers.get("Content-Type", "application/json"),
-                )
+            model = (json.loads(raw or b"{}").get("model") or "").strip()
+        except ValueError:
+            return _error(400, "the request body is not valid json")
+        if not model:
+            return _error(400, "'model' is required")
+        group = agents.group_for(model)
+        if group is None:
+            return _error(404, f"nothing is serving {model!r} right now")
+        try:
+            status, headers, body = await agents.request(
+                group.tasks[0], method="POST", path="/v1/chat/completions",
+                body=raw, headers={"Content-Type": "application/json"},
+            )
+        except AgentError as exc:
+            return _error(502, str(exc))
+        return Response(content=body, status_code=status,
+                        media_type=headers.get("Content-Type", "application/json"))
 
-            # Directly dialable backend (local dev / tests).
-            url = f"{endpoint.base_url}/v1/chat/completions"
-            if streaming:
-                upstream_req = client.build_request("POST", url, json=body)
-                upstream_resp = await client.send(upstream_req, stream=True)
-                finish(error=upstream_resp.status_code >= 500)
-
-                async def relay():
-                    try:
-                        async for chunk in upstream_resp.aiter_bytes():
-                            yield chunk
-                    finally:
-                        await upstream_resp.aclose()
-
-                return StreamingResponse(
-                    relay(),
-                    status_code=upstream_resp.status_code,
-                    media_type=upstream_resp.headers.get("content-type", "text/event-stream"),
-                )
-            resp = await client.post(url, json=body)
-            finish(error=resp.status_code >= 500)
-            return JSONResponse(status_code=resp.status_code, content=resp.json())
-        except TunnelError as exc:
-            finish(error=True)
-            logger.warning("tunnel to %s failed: %s", endpoint.node_id, exc)
-            return _error(502, f"worker unreachable: {exc}", "server_error")
-        except httpx.HTTPError as exc:
-            finish(error=True)
-            logger.warning("upstream %s failed: %s", endpoint.base_url, exc)
-            return _error(502, f"upstream error: {exc}", "server_error")
-
-    # ------------------------------------------------------------------ admin
-    @app.get("/admin/ui")
+    # --------------------------------------------------------------- nodes
+    @app.get("/admin", response_class=HTMLResponse)
     async def admin_ui():
-        """Manual-testing dashboard (dev tool). Data calls carry the admin token."""
-        page = Path(__file__).with_name("admin_ui.html").read_text()
-        return HTMLResponse(page)
+        """Operator dashboard. Its data calls carry the admin token."""
+        return HTMLResponse(Path(__file__).with_name("admin_ui.html").read_text())
 
     @app.get("/admin/connect")
     async def admin_connect(x_loom_admin_token: str | None = Header(default=None)):
-        """Everything needed to attach a GPU box: address + ready-made command."""
-        if _admin_forbidden(x_loom_admin_token):
+        """Everything needed to attach a machine: the address and one command."""
+        if forbidden(x_loom_admin_token):
             return _error(403, "invalid admin token")
-        public = getattr(controller, "public_address", None)
-        address = getattr(public, "address", controller.config.public_address)
         return {
-            "dial_address": address,
-            "source": getattr(public, "source", "config"),
-            "reachable_externally": getattr(public, "reachable_externally", None),
-            # "ok" | "info" | "warn" — a private LAN address is fine (info),
-            # only loopback / a failed check is a real problem (warn).
-            "severity": getattr(public, "severity", "info"),
-            "self_check": getattr(public, "self_check", None),
-            "note": getattr(public, "note", None),
-            "warning": getattr(public, "warning", None),
-            "worker_image": "gihpee/loomworker",
+            "dial_address": getattr(public_address, "address", ""),
+            "source": getattr(public_address, "source", "config"),
+            "reachable_externally": getattr(public_address, "reachable_externally", None),
+            "severity": getattr(public_address, "severity", "info"),
+            "self_check": getattr(public_address, "self_check", None),
+            "note": getattr(public_address, "note", None),
+            "warning": getattr(public_address, "warning", None),
+            "agent_image": "gihpee/loomagent",
         }
 
-    @app.post("/admin/models/from_hf")
-    async def admin_add_model_from_hf(
-        request: Request, x_loom_admin_token: str | None = Header(default=None)
-    ):
-        """Deploy a model by HuggingFace name — architecture is auto-detected."""
-        if _admin_forbidden(x_loom_admin_token):
+    @app.get("/admin/agents")
+    async def admin_agents(x_loom_admin_token: str | None = Header(default=None)):
+        if forbidden(x_loom_admin_token):
             return _error(403, "invalid admin token")
-        raw = await request.json()
-        repo = (raw.get("repo") or raw.get("weights_uri") or "").strip()
-        if not repo:
-            return _error(400, "'repo' is required, e.g. 'Qwen/Qwen3-32B'")
-        try:
-            spec, config = await spec_from_hf(
-                repo,
-                model_id=raw.get("model_id") or None,
-                backend_type=raw.get("backend_type") or "shard",
-                priority=float(raw.get("priority", 1) or 1),
-                demand_qps=float(raw.get("demand_qps", 1) or 1),
-                price_willing=float(raw.get("price_willing", 1) or 1),
-                target_pipelines=int(raw.get("target_pipelines", 1) or 1),
-                slo_p95_ttft_ms=(
-                    float(raw["slo_p95_ttft_ms"]) if raw.get("slo_p95_ttft_ms") else None
-                ),
-            )
-        except ModelResolveError as exc:
-            return _error(400, str(exc))
-        except Exception as exc:  # network/JSON problems
-            logger.exception("resolving %s failed", repo)
-            return _error(502, f"could not resolve {repo}: {exc}", "server_error")
+        if agents is None:
+            return need_agents()
+        return {"nodes": agents.node_list()}
 
-        await controller.add_model(spec)
-        info = spec.model_info
-        broker = controller.broker
-        per_card = {
-            f"{gb}GB": broker.layers_fitting(gb * 1024**3, info) for gb in (24, 48, 80)
-        }
-        return {
-            "added": spec.model_id,
-            "detected": {
-                "num_layers": info.num_layers,
-                "hidden_dim": info.hidden_dim,
-                "num_kv_heads": info.num_kv_heads,
-                "dtype_bytes": info.param_bytes_per_element,
-                "architectures": config.get("architectures"),
-            },
-            "sizing": {
-                "weights_gb": round(
-                    (
-                        info.num_layers * info.decoder_layer_io_bytes(roofline=False)
-                        + (1 if info.tie_embedding else 2) * info.embedding_io_bytes
-                    )
-                    / 1024**3,
-                    2,
-                ),
-                "layers_per_card": per_card,
-                "param_mem_ratio": controller.config.param_mem_ratio,
-            },
-        }
-
-    @app.post("/admin/keys")
-    async def admin_issue_key(
-        request: Request, x_loom_admin_token: str | None = Header(default=None)
-    ):
-        """Issue a join key. This is the ONLY thing a GPU owner needs."""
-        if _admin_forbidden(x_loom_admin_token):
-            return _error(403, "invalid admin token")
-        keystore = getattr(controller, "keystore", None)
-        if keystore is None:
-            return _error(503, "keystore not configured", "server_error")
-        try:
-            raw = await request.json()
-        except Exception:
-            raw = {}
-        key = keystore.issue(
-            label=str(raw.get("label", "")), max_nodes=int(raw.get("max_nodes", 0) or 0)
-        )
-        encoded = key.encode()
-        return {
-            "key": encoded,
-            "key_id": key.key_id,
-            "address": key.address,
-            "label": key.label,
-            "max_nodes": key.max_nodes,
-            # --network host is not decoration: on a bridge network the
-            # container's p2p port is not the host's and every outgoing packet
-            # is translated again, so no peer can ever open a direct link to
-            # this worker and all its activations are relayed.
-            "run_command": (
-                f"docker run -d --gpus all --network host "
-                f"gihpee/loomworker --key {encoded}"
-            ),
-        }
-
+    # ---------------------------------------------------------------- keys
     @app.get("/admin/keys")
-    async def admin_list_keys(x_loom_admin_token: str | None = Header(default=None)):
-        if _admin_forbidden(x_loom_admin_token):
+    async def admin_keys(x_loom_admin_token: str | None = Header(default=None)):
+        if forbidden(x_loom_admin_token):
             return _error(403, "invalid admin token")
-        keystore = getattr(controller, "keystore", None)
         if keystore is None:
             return {"keys": []}
         return {"keys": [k.public() for k in keystore.list()]}
 
-    @app.delete("/admin/keys/{key_id}")
-    async def admin_revoke_key(
-        key_id: str, x_loom_admin_token: str | None = Header(default=None)
-    ):
-        if _admin_forbidden(x_loom_admin_token):
+    @app.post("/admin/keys")
+    async def admin_issue_key(request: Request,
+                              x_loom_admin_token: str | None = Header(default=None)):
+        if forbidden(x_loom_admin_token):
             return _error(403, "invalid admin token")
-        keystore = getattr(controller, "keystore", None)
+        if keystore is None:
+            return _error(503, "this orchestrator issues no keys")
+        raw = await request.json()
+        key = keystore.issue(label=(raw.get("label") or "").strip(),
+                             max_nodes=int(raw.get("max_nodes") or 0))
+        return {**key.public(), "key": key.encode(),
+                "address": getattr(public_address, "address", ""),
+                "agent_image": "gihpee/loomagent"}
+
+    @app.delete("/admin/keys/{key_id}")
+    async def admin_revoke_key(key_id: str,
+                               x_loom_admin_token: str | None = Header(default=None)):
+        if forbidden(x_loom_admin_token):
+            return _error(403, "invalid admin token")
         if keystore is None or not keystore.revoke(key_id):
-            return _error(404, f"key '{key_id}' not found")
+            return _error(404, f"no key {key_id!r}")
         return {"revoked": key_id}
 
-    @app.get("/admin/nodes")
-    async def admin_nodes(x_loom_admin_token: str | None = Header(default=None)):
-        if _admin_forbidden(x_loom_admin_token):
+    # --------------------------------------------------------------- tasks
+    @app.get("/admin/tasks")
+    async def admin_tasks(x_loom_admin_token: str | None = Header(default=None)):
+        if forbidden(x_loom_admin_token):
             return _error(403, "invalid admin token")
-        return controller.nodes_view()
+        if agents is None:
+            return need_agents()
+        ordered = sorted(agents.tasks.values(), key=lambda t: t.submitted_at, reverse=True)
+        return {"tasks": [t.as_dict() for t in ordered]}
 
-    # ------------------------------------------------------------- compute
-    @app.post("/admin/jobs")
-    async def admin_submit_job(
-        payload: dict, x_loom_admin_token: str | None = Header(default=None)
-    ):
-        """Place a job on the fleet and start it.
+    @app.post("/admin/tasks")
+    async def admin_submit_task(request: Request,
+                                x_loom_admin_token: str | None = Header(default=None)):
+        """Place one task and start it.
 
-        `tasks` decides how several providers combine. Loom cannot look inside
-        a container, so it cannot split the work: it either spreads
-        independent tasks (kind "array") or allocates a group that coordinates
-        itself (kind "gang").
+        Returns as soon as it is on its way. Provisioning an environment can
+        take half an hour, so this must not wait for the task to start — follow
+        it by its state instead. Input files come base64-encoded in `inputs`.
         """
-        if _admin_forbidden(x_loom_admin_token):
+        if forbidden(x_loom_admin_token):
             return _error(403, "invalid admin token")
-        from loom.orchestrator.jobs import JobError
-
+        if agents is None:
+            return need_agents()
+        raw = await request.json()
+        command = raw.get("command") or []
+        if isinstance(command, str):
+            command = command.split()
         try:
-            job = controller.submit_job(payload or {})
-        except JobError as exc:
+            inputs = {name: base64.b64decode(data)
+                      for name, data in (raw.get("inputs") or {}).items()}
+        except (ValueError, TypeError) as exc:
+            return _error(400, f"'inputs' must be base64 per file: {exc}")
+        try:
+            record = agents.submit(
+                command=list(command),
+                environment=raw.get("environment") or None,
+                resources=raw.get("resources") or None,
+                env=raw.get("env") or None,
+                timeout_s=int(raw.get("timeout_s") or 3600),
+                inputs=inputs,
+                node_id=(raw.get("node_id") or "").strip(),
+            )
+        except AgentError as exc:
+            # The reason is the useful part: "no node has 2 free GPUs" is
+            # actionable, "unavailable" is not.
             return _error(409, str(exc))
-        started = await controller.start_job(job.job_id)
-        return {**job.as_dict(), **started}
+        return record.as_dict()
 
-    @app.get("/admin/jobs")
-    async def admin_jobs(x_loom_admin_token: str | None = Header(default=None)):
-        if _admin_forbidden(x_loom_admin_token):
+    @app.get("/admin/tasks/{task_id}")
+    async def admin_task(task_id: str,
+                         x_loom_admin_token: str | None = Header(default=None)):
+        if forbidden(x_loom_admin_token):
             return _error(403, "invalid admin token")
-        return controller.jobs_view()
+        if agents is None:
+            return need_agents()
+        record = agents.tasks.get(task_id)
+        return record.as_dict() if record else _error(404, f"no task {task_id!r}")
 
-    @app.get("/admin/jobs/{job_id}")
-    async def admin_job(job_id: str, x_loom_admin_token: str | None = Header(default=None)):
-        if _admin_forbidden(x_loom_admin_token):
+    @app.get("/admin/tasks/{task_id}/logs")
+    async def admin_task_logs(task_id: str, tail: int = 200,
+                              x_loom_admin_token: str | None = Header(default=None)):
+        if forbidden(x_loom_admin_token):
             return _error(403, "invalid admin token")
+        if agents is None:
+            return need_agents()
         try:
-            return await controller.job_status(job_id)
-        except ValueError as exc:
-            return _error(404, str(exc))
+            return {"task_id": task_id, "text": await agents.logs(task_id, tail_lines=tail)}
+        except AgentError as exc:
+            return _error(409, str(exc))
 
-    @app.get("/admin/jobs/{job_id}/logs/{index}")
-    async def admin_job_logs(
-        job_id: str, index: int, tail: int = 200,
-        x_loom_admin_token: str | None = Header(default=None),
-    ):
-        if _admin_forbidden(x_loom_admin_token):
+    @app.get("/admin/tasks/{task_id}/results/{name:path}")
+    async def admin_task_result(task_id: str, name: str,
+                                x_loom_admin_token: str | None = Header(default=None)):
+        if forbidden(x_loom_admin_token):
             return _error(403, "invalid admin token")
+        if agents is None:
+            return need_agents()
         try:
-            return await controller.job_logs(job_id, index, tail)
-        except ValueError as exc:
-            return _error(404, str(exc))
+            payload = await agents.collect(task_id, name)
+        except AgentError as exc:
+            return _error(409, str(exc))
+        return Response(content=payload, media_type="application/octet-stream",
+                        headers={"Content-Disposition":
+                                 f'attachment; filename="{Path(name).name}"'})
 
-    @app.delete("/admin/jobs/{job_id}")
-    async def admin_cancel_job(
-        job_id: str, x_loom_admin_token: str | None = Header(default=None)
-    ):
-        if _admin_forbidden(x_loom_admin_token):
+    @app.post("/admin/tasks/{task_id}/stop")
+    async def admin_stop_task(task_id: str,
+                              x_loom_admin_token: str | None = Header(default=None)):
+        if forbidden(x_loom_admin_token):
             return _error(403, "invalid admin token")
+        if agents is None:
+            return need_agents()
         try:
-            return await controller.cancel_job(job_id)
-        except ValueError as exc:
-            return _error(404, str(exc))
+            return agents.stop(task_id, reason="stopped from the admin page").as_dict()
+        except AgentError as exc:
+            return _error(409, str(exc))
 
-    # ------------------------------------------------------------ training
-    @app.post("/admin/train/{model_id}/{action}")
-    async def admin_train(
-        model_id: str,
-        action: str,
-        payload: dict | None = None,
-        x_loom_admin_token: str | None = Header(default=None),
-    ):
-        """Start, stop or ask after a training run on a deployed pipeline.
+    @app.delete("/admin/tasks/{task_id}")
+    async def admin_release_task(task_id: str,
+                                 x_loom_admin_token: str | None = Header(default=None)):
+        if forbidden(x_loom_admin_token):
+            return _error(403, "invalid admin token")
+        if agents is None:
+            return need_agents()
+        try:
+            agents.release(task_id)
+        except AgentError as exc:
+            return _error(409, str(exc))
+        return {"released": task_id}
 
-        Deploy first, with backend `train_shard`: a training pipeline is laid
-        out exactly the way a serving one is, so placement, quotas and the
-        stage transport are the ones that already work.
+    # -------------------------------------------------------------- groups
+    @app.get("/admin/groups")
+    async def admin_groups(x_loom_admin_token: str | None = Header(default=None)):
+        if forbidden(x_loom_admin_token):
+            return _error(403, "invalid admin token")
+        if agents is None:
+            return need_agents()
+        ordered = sorted(agents.groups.values(), key=lambda g: g.submitted_at, reverse=True)
+        return {"groups": [g.as_dict() for g in ordered]}
+
+    @app.post("/admin/groups")
+    async def admin_submit_group(request: Request,
+                                 x_loom_admin_token: str | None = Header(default=None)):
+        """Place a job across several nodes — a model pipeline, usually.
+
+        All-or-nothing: a pipeline missing a stage does not run slower, it does
+        not run, so a group that cannot be placed whole is not placed at all.
         """
-        if _admin_forbidden(x_loom_admin_token):
+        if forbidden(x_loom_admin_token):
             return _error(403, "invalid admin token")
-        if action not in ("start", "stop", "status", "save"):
-            return _error(400, f"unknown training action {action!r}")
-        try:
-            return await controller.train_control(model_id, action, payload or {})
-        except ValueError as exc:
-            return _error(404, str(exc))
-        except Exception as exc:  # noqa: BLE001 - reported, not hidden
-            return _error(502, f"the head stage did not answer: {exc}")
-
-    @app.get("/admin/train")
-    async def admin_train_runs(x_loom_admin_token: str | None = Header(default=None)):
-        if _admin_forbidden(x_loom_admin_token):
-            return _error(403, "invalid admin token")
-        return controller.training_view()
-
-    @app.get("/admin/models_view")
-    async def admin_models_view(x_loom_admin_token: str | None = Header(default=None)):
-        if _admin_forbidden(x_loom_admin_token):
-            return _error(403, "invalid admin token")
-        return controller.models_view()
-
-    @app.get("/admin/perfmap/{model_id}")
-    async def admin_perfmap(
-        model_id: str, x_loom_admin_token: str | None = Header(default=None)
-    ):
-        if _admin_forbidden(x_loom_admin_token):
-            return _error(403, "invalid admin token")
-        view = controller.perfmap_view(model_id)
-        if view is None:
-            return _error(404, f"model '{model_id}' not found")
-        return view
-
-    @app.post("/admin/rebalance")
-    async def admin_rebalance(x_loom_admin_token: str | None = Header(default=None)):
-        """Force a Resource Broker pass now (same trigger the timer uses)."""
-        if _admin_forbidden(x_loom_admin_token):
-            return _error(403, "invalid admin token")
-        await controller.rebalance(reason="manual")
-        return {
-            "ok": True,
-            "allocations": controller.last_plan.allocations if controller.last_plan else {},
-            "unscheduled": controller.last_plan.unscheduled if controller.last_plan else [],
-        }
-
-    @app.get("/admin/status")
-    async def admin_status(x_loom_admin_token: str | None = Header(default=None)):
-        if _admin_forbidden(x_loom_admin_token):
-            return _error(403, "invalid admin token")
-        return controller.status()
-
-    @app.post("/admin/models")
-    async def admin_add_model(
-        request: Request, x_loom_admin_token: str | None = Header(default=None)
-    ):
-        if _admin_forbidden(x_loom_admin_token):
-            return _error(403, "invalid admin token")
+        if agents is None:
+            return need_agents()
         raw = await request.json()
         try:
-            spec = ModelSpec.from_dict(raw)
-        except (KeyError, TypeError, ValueError) as exc:
-            return _error(400, f"bad model spec: {exc}")
-        await controller.add_model(spec)
-        return {"added": spec.model_id, "score": spec.score()}
-
-    @app.get("/admin/placement")
-    async def admin_placement(x_loom_admin_token: str | None = Header(default=None)):
-        """What is deployed, and what the deploy form needs to offer choices."""
-        if _admin_forbidden(x_loom_admin_token):
-            return _error(403, "invalid admin token")
-        return controller.placement_view()
-
-    @app.post("/admin/deploy")
-    async def admin_deploy(
-        request: Request, x_loom_admin_token: str | None = Header(default=None)
-    ):
-        """Put a model on chosen nodes with chosen layer counts.
-
-        Body: {"model_id": "...", "stages": [{"node_id": "n1", "layers": 20},
-        ...]} for an exact placement, or {"model_id": "...", "auto": true} to
-        let the broker choose. The order of `stages` is the pipeline order:
-        the first one is the head stage.
-
-        Optional `backend_type` overrides the catalog entry's for this
-        deployment — the same checkpoint served whole by `vllm` or split by
-        `shard`, chosen per run rather than per catalog file.
-
-        Each stage may also carry its own `"backend"`, which wins over both.
-        That is what lets one pipeline mix engines: an Apple node on
-        `mlx_shard` beside a CUDA node on `vllm_shard`.
-        """
-        if _admin_forbidden(x_loom_admin_token):
-            return _error(403, "invalid admin token")
-        raw = await request.json()
-        model_id = (raw.get("model_id") or "").strip()
-        if not model_id:
-            return _error(400, "'model_id' is required")
-        stages = raw.get("stages")
-        if raw.get("auto"):
-            stages = None
-        elif stages is None:
-            return _error(400, "give 'stages' for a manual placement, or auto=true")
-        try:
-            placement = await controller.deploy(
-                model_id,
-                stages=stages,
-                backend_type=(raw.get("backend_type") or "").strip() or None,
-                force=bool(raw.get("force")),
+            record = agents.submit_group(
+                size=int(raw.get("size") or 1),
+                command=list(raw.get("command") or []),
+                environment=raw.get("environment") or None,
+                resources=raw.get("resources") or None,
+                env=raw.get("env") or None,
+                timeout_s=int(raw.get("timeout_s") or 3600),
+                serve_port=int(raw.get("serve_port") or 0),
+                node_ids=list(raw.get("node_ids") or []) or None,
+                per_rank=raw.get("per_rank") or None,
+                label=(raw.get("label") or "").strip(),
             )
-        except PlacementError as exc:
+        except AgentError as exc:
+            return _error(409, str(exc))
+        return record.as_dict()
+
+    @app.post("/admin/groups/{group_id}/stop")
+    async def admin_stop_group(group_id: str,
+                               x_loom_admin_token: str | None = Header(default=None)):
+        if forbidden(x_loom_admin_token):
+            return _error(403, "invalid admin token")
+        if agents is None:
+            return need_agents()
+        try:
+            return agents.stop_group(group_id,
+                                     reason="stopped from the admin page").as_dict()
+        except AgentError as exc:
+            return _error(409, str(exc))
+
+    # ------------------------------------------------------------ releases
+    @app.get("/agent/release/{version}.tar.gz")
+    async def agent_release_archive(version: str):
+        """The payload itself. Deliberately unauthenticated.
+
+        A node has a join key, not an admin token, and the payload is signed —
+        so handing the bytes to anyone who asks costs nothing, while an
+        unsigned payload is worthless to an attacker anyway.
+        """
+        if releases is None:
+            return _error(404, "this orchestrator publishes no agent releases")
+        payload = releases.archive_bytes(version)
+        if payload is None:
+            return _error(404, f"no agent release {version!r}")
+        return Response(content=payload, media_type="application/gzip")
+
+    @app.get("/admin/release")
+    async def admin_release(x_loom_admin_token: str | None = Header(default=None)):
+        """The version map: who is on what, before a wave is advanced."""
+        if forbidden(x_loom_admin_token):
+            return _error(403, "invalid admin token")
+        if releases is None:
+            return _error(503, "this orchestrator publishes no agent releases")
+        return releases.version_map(agents.node_list() if agents else [])
+
+    @app.post("/admin/release")
+    async def admin_publish_release(request: Request,
+                                    x_loom_admin_token: str | None = Header(default=None)):
+        """Take a signed build. Publishing does not roll it out.
+
+        The signature is made elsewhere, with a key this orchestrator does not
+        have and must not: taking it over should let an attacker name a release
+        we already signed, and nothing more.
+        """
+        if forbidden(x_loom_admin_token):
+            return _error(403, "invalid admin token")
+        if releases is None:
+            return _error(503, "this orchestrator publishes no agent releases")
+        raw = await request.json()
+        try:
+            release = releases.publish(
+                version=(raw.get("version") or "").strip(),
+                signature=bytes.fromhex((raw.get("signature") or "").strip()),
+                archive=base64.b64decode(raw.get("archive") or ""),
+            )
+        except (ReleaseError, ValueError) as exc:
             return _error(400, str(exc))
-        return {"deployed": model_id, "placement": placement.as_dict()}
+        return release.as_dict()
 
-    @app.delete("/admin/deploy/{model_id}")
-    async def admin_undeploy(
-        model_id: str, x_loom_admin_token: str | None = Header(default=None)
-    ):
-        """Stop a model and free its VRAM; it stays in the catalog."""
-        if _admin_forbidden(x_loom_admin_token):
+    @app.post("/admin/release/wave")
+    async def admin_release_wave(request: Request,
+                                 x_loom_admin_token: str | None = Header(default=None)):
+        """Advance the rollout. Small first: a bad build reaching the whole
+        fleet at once can take with it the ability to ship the fix."""
+        if forbidden(x_loom_admin_token):
             return _error(403, "invalid admin token")
-        if not await controller.undeploy(model_id):
-            return _error(404, f"model '{model_id}' is not deployed")
-        return {"undeployed": model_id}
-
-    @app.post("/admin/quota")
-    async def admin_set_quota(
-        request: Request, x_loom_admin_token: str | None = Header(default=None)
-    ):
-        """Ops tool: override a shard's VRAM quota on a worker (watchdog demo)."""
-        if _admin_forbidden(x_loom_admin_token):
-            return _error(403, "invalid admin token")
+        if releases is None:
+            return _error(503, "this orchestrator publishes no agent releases")
         raw = await request.json()
         try:
-            ack = await controller.set_quota(
-                raw["model_id"], raw["node_id"], int(raw["vram_quota_bytes"])
-            )
-        except KeyError as exc:
-            return _error(404, str(exc))
-        return {"ok": ack.ok, "error": ack.error}
+            return releases.set_wave(int(raw.get("percent", 0))).as_dict()
+        except (ReleaseError, TypeError, ValueError) as exc:
+            return _error(400, str(exc))
 
-    @app.delete("/admin/models/{model_id}")
-    async def admin_remove_model(
-        model_id: str, x_loom_admin_token: str | None = Header(default=None)
-    ):
-        if _admin_forbidden(x_loom_admin_token):
+    @app.post("/admin/release/withdraw")
+    async def admin_release_withdraw(x_loom_admin_token: str | None = Header(default=None)):
+        """Stop the spread. Nodes already updated stay updated — taking a
+        version back means publishing an older one, which agents refuse."""
+        if forbidden(x_loom_admin_token):
             return _error(403, "invalid admin token")
-        removed = await controller.remove_model(model_id)
-        if not removed:
-            return _error(404, f"model '{model_id}' not found")
-        return {"removed": model_id}
-
-    @app.on_event("shutdown")
-    async def shutdown():
-        await client.aclose()
+        if releases is None:
+            return _error(503, "this orchestrator publishes no agent releases")
+        releases.withdraw()
+        return {"withdrawn": True}
 
     return app

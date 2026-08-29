@@ -1,0 +1,2 @@
+[console_scripts]
+loom-stage = loom_stage.server:main

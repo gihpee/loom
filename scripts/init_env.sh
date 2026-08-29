@@ -26,7 +26,7 @@ cat <<MSG
 
   admin token : ${admin_token}
   API + UI    : http://localhost:$(grep '^LOOM_HTTP_PORT=' .env | cut -d= -f2)/admin/ui
-  workers dial: port $(grep '^LOOM_GRPC_PORT=' .env | cut -d= -f2)
+  nodes dial: port $(grep '^LOOM_GRPC_PORT=' .env | cut -d= -f2)
 
 Ports busy? Edit LOOM_HTTP_PORT / LOOM_GRPC_PORT in .env, then:
   docker compose -f docker-compose.prod.yml up -d --build

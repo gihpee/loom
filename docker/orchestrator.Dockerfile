@@ -5,7 +5,6 @@ WORKDIR /app
 
 COPY pyproject.toml README.md ./
 COPY src ./src
-COPY configs ./configs
 
 # .[p2p] adds the rendezvous node (docs/P2P_TRANSPORT.md).
 RUN pip install --no-cache-dir ".[p2p]"

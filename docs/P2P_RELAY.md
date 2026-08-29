@@ -95,7 +95,7 @@ LOOM_P2P_RELAY_PUBLIC_HOST=201.34.135.177
 И поднять:
 
 ```bash
-docker compose -f docker-compose.prod.yml up -d --build relay
+docker compose up -d --build relay
 ```
 
 В логе:
@@ -330,13 +330,13 @@ TCP. QUIC-адрес в одиночку оставил бы воркер без
 проверка, поднимающая голый узел с одним только релеем:
 
 ```bash
-python3 -m loom_worker.p2p.doctor /ip4/<хост>/tcp/47200/p2p/12D3KooW...
+python3 -m loom_agent.p2p.doctor /ip4/<хост>/tcp/47200/p2p/12D3KooW...
 ```
 
 В контейнере воркера:
 
 ```bash
-docker exec -it <контейнер> python3 -m loom_worker.p2p.doctor $LOOM_P2P_RELAY
+docker exec -it <контейнер> python3 -m loom_agent.p2p.doctor $LOOM_P2P_RELAY
 ```
 
 Ответ один из трёх:
@@ -349,7 +349,7 @@ docker exec -it <контейнер> python3 -m loom_worker.p2p.doctor $LOOM_P2P
 Что смотреть в обычных логах:
 
 ```bash
-docker compose -f docker-compose.prod.yml logs orchestrator | grep -i relay
+docker compose logs orchestrator | grep -i relay
 ```
 
 `workers will be given 1 relay(s): …` — адрес роздан. `LOOM_P2P_RELAY is not

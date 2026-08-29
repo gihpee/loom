@@ -1,0 +1,33 @@
+[project]
+name = "loom-agent"
+version = "0.1.0"
+description = "Loom node agent: connects to the orchestrator, runs tasks in per-task directories"
+requires-python = ">=3.10"
+dependencies = [
+    "grpcio>=1.60",
+    "protobuf>=5.29",
+    # Memory accounting for the task watchdog. Small, and the only way to see
+    # what a task's whole process tree actually holds.
+    "psutil>=5.9",
+    # Verifying the signature on an agent payload. Not optional: the launcher
+    # refuses to install anything it cannot check, so without this the node
+    # simply never updates.
+    "cryptography>=42",
+]
+
+[project.optional-dependencies]
+# Direct node-to-node links. Optional: without it the orchestrator relays.
+p2p = ["lattica==1.0.21"]
+# NVML hardware detection and memory-quota enforcement on NVIDIA hosts.
+cuda = ["nvidia-ml-py>=12.0"]
+
+[project.scripts]
+loom-launcher = "loom_launcher.main:main"
+loom-agent = "loom_agent.main:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["loom_launcher*", "loom_agent*"]

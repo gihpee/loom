@@ -1,0 +1,292 @@
+// Loom agent gateway: everything a node and the orchestrator say to each other.
+//
+// A separate service from ControlGateway on purpose. The old one is shaped
+// around model shards, which the agent does not have; this one is shaped around
+// TASKS, of which inference is eventually one. Both are served at once so a
+// fleet can be migrated a node at a time rather than all at midnight.
+//
+// One stream carries all of it — commands, file input, results, telemetry —
+// because the node opened it and nothing can dial back in. See
+// docs/WORKER_RUNTIME.md.
+
+syntax = "proto3";
+
+package loom.agent.v1;
+
+service AgentGateway {
+  rpc Attach(stream AgentMessage) returns (stream ServerMessage);
+}
+
+// ----------------------------------------------------------------- the node
+
+// Auto-detected on the node, never declared by its owner.
+message Hardware {
+  int32 num_gpus = 1;
+  double tflops_fp16 = 2;
+  string gpu_name = 3;
+  double memory_gb = 4;
+  double memory_bandwidth_gbps = 5;
+  string device = 6;              // "cuda" | "mlx" | "cpu"
+  uint64 vram_free_bytes = 7;
+  uint64 vram_total_bytes = 8;
+  double host_ram_gb = 9;
+  string detection_source = 10;
+}
+
+// How peers can reach this node directly. Absent when it has no p2p stack, in
+// which case the orchestrator keeps relaying for it.
+message PeerIdentity {
+  string peer_id = 1;
+  repeated string listen_addrs = 2;
+  bool symmetric_nat = 3;
+}
+
+message Register {
+  string node_id = 1;
+  string join_key = 2;
+  Hardware hardware = 3;
+  string region = 4;
+  string agent_version = 5;
+  PeerIdentity peer = 6;
+  // What this node can actually do right now. A node that cannot isolate a
+  // task says so here rather than accepting work and failing every time.
+  Readiness readiness = 7;
+}
+
+message Readiness {
+  bool accepts_tasks = 1;
+  // Why not, in words meant for the node's owner.
+  string refusal = 2;
+  // Environment kinds this agent can provision: "none", "python", ...
+  repeated string environment_kinds = 3;
+}
+
+message RegisterAck {
+  bool ok = 1;
+  string error = 2;
+  string node_id = 3;
+  repeated string rendezvous = 4;
+  repeated string relays = 5;
+  // What this node should be running. The agent converges on it rather than
+  // being pushed to it, so nodes that were offline catch up on their own and
+  // a node not yet in the current wave is simply told its current version.
+  // See docs/WORKER_UPDATE.md.
+  AgentRelease release = 6;
+}
+
+// A signed agent payload. The signature is over the canonical manifest
+// (version + digest), NOT over the archive alone: signing only the bytes would
+// let a valid old payload be served under a new version number.
+//
+// The signing key is not the orchestrator's. An orchestrator that has been
+// taken over can name any release we ever signed — bad, but not the same as
+// running arbitrary code on every machine in the fleet.
+message AgentRelease {
+  string version = 1;
+  string url = 2;             // where the archive can be fetched
+  string sha256 = 3;          // of the archive, lowercase hex
+  bytes signature = 4;        // ed25519 over the canonical manifest
+}
+
+// ---------------------------------------------------------------- the tasks
+
+message Resources {
+  uint32 gpus = 1;
+  uint64 ram_bytes = 2;
+  double cpus = 3;
+  uint64 disk_bytes = 4;
+}
+
+// What has to exist in the task's directory before its command runs.
+message Environment {
+  string kind = 1;                // none | python | binary | oci
+  repeated string requirements = 2;
+  string source = 3;
+}
+
+// One file the task will be given. Declared up front so the agent knows how
+// much input to expect and does not start the task on half of it.
+message InputFile {
+  string name = 1;                // relative; anything else is refused
+  uint64 size_bytes = 2;
+  string digest = 3;              // sha256, lowercase hex
+}
+
+// Tasks that are one job spread over several nodes: the stages of a pipeline,
+// the ranks of a training run. Every member is told about all of them, because
+// routing a message to rank N is a question a node must be able to answer
+// without a round trip to the orchestrator on every token.
+message GroupMember {
+  uint32 rank = 1;
+  string node_id = 2;
+  string peer_id = 3;         // libp2p id, empty when the node has no p2p stack
+}
+
+message TaskGroup {
+  string group_id = 1;
+  uint32 rank = 2;            // this task's own position
+  repeated GroupMember members = 3;
+}
+
+// A message from one member of a group to another. Carried on whichever path
+// is shorter — straight to the peer when there is a direct link, through the
+// orchestrator when there is not — and the task never knows which.
+message TaskMessage {
+  string group_id = 1;
+  uint32 from_rank = 2;
+  uint32 to_rank = 3;
+  bytes payload = 4;
+  string content_type = 5;
+}
+
+// An HTTP request for whatever a task is serving, tunnelled in over the
+// connection the node opened. No inbound port is ever needed.
+message TaskRequest {
+  string command_id = 1;
+  string task_id = 2;
+  string method = 3;
+  string path = 4;
+  bytes body = 5;
+  map<string, string> headers = 6;
+}
+
+message TaskResponse {
+  string command_id = 1;
+  uint32 status = 2;
+  bytes body = 3;
+  map<string, string> headers = 4;
+  string error = 5;
+}
+
+message RunTask {
+  string command_id = 1;
+  string task_id = 2;
+  repeated string command = 3;
+  map<string, string> env = 4;
+  Resources resources = 5;
+  Environment environment = 6;
+  uint32 timeout_s = 7;
+  repeated InputFile inputs = 8;
+  // Set when this task is one member of a job spread over several nodes.
+  TaskGroup group = 9;
+  // Loopback port the task should serve on, so the agent can reach it. Zero
+  // means the task serves nothing.
+  uint32 serve_port = 10;
+}
+
+message StopTask {
+  string command_id = 1;
+  string task_id = 2;
+  string reason = 3;
+}
+
+// Forget the task and take its disk back.
+message ReleaseTask {
+  string command_id = 1;
+  string task_id = 2;
+}
+
+message FetchResult {
+  string command_id = 1;
+  string task_id = 2;
+  string name = 3;
+}
+
+message FetchLogs {
+  string command_id = 1;
+  string task_id = 2;
+  uint32 tail_lines = 3;
+}
+
+// Input travelling orchestrator -> agent, in pieces.
+message InputChunk {
+  string task_id = 1;
+  string name = 2;
+  bytes data = 3;
+  bool last = 4;
+}
+
+// Result travelling agent -> orchestrator, in pieces.
+message ResultChunk {
+  string task_id = 1;
+  string name = 2;
+  bytes data = 3;
+  bool last = 4;
+  string error = 5;
+}
+
+message ResultFile {
+  string name = 1;
+  uint64 size_bytes = 2;
+  string digest = 3;
+}
+
+message TaskState {
+  string task_id = 1;
+  // pending | provisioning | running | done | failed | cancelled | gone
+  string state = 2;
+  int32 exit_code = 3;
+  string error = 4;
+  repeated uint32 devices = 5;
+  double seconds = 6;
+  repeated ResultFile results = 7;
+}
+
+message TaskLogs {
+  string command_id = 1;
+  string task_id = 2;
+  string text = 3;
+}
+
+// ------------------------------------------------------------- housekeeping
+
+message Ack {
+  string command_id = 1;
+  bool ok = 2;
+  string error = 3;
+}
+
+message Probe {
+  string command_id = 1;
+}
+
+message Telemetry {
+  string node_id = 1;
+  uint64 vram_free_bytes = 2;
+  int64 reported_at_unix_ms = 3;
+  uint32 gpus_total = 4;
+  uint32 gpus_free = 5;
+  uint32 tasks_running = 6;
+  uint64 env_cache_bytes = 7;
+  repeated TaskState tasks = 8;
+}
+
+// ---------------------------------------------------------------- envelopes
+
+message ServerMessage {
+  oneof msg {
+    RegisterAck register_ack = 1;
+    RunTask run_task = 2;
+    StopTask stop_task = 3;
+    ReleaseTask release_task = 4;
+    FetchResult fetch_result = 5;
+    FetchLogs fetch_logs = 6;
+    InputChunk input_chunk = 7;
+    Probe probe = 8;
+    TaskMessage task_message = 9;
+    TaskRequest task_request = 10;
+  }
+}
+
+message AgentMessage {
+  oneof msg {
+    Register register = 1;
+    Ack ack = 2;
+    TaskState task_state = 3;
+    ResultChunk result_chunk = 4;
+    Telemetry telemetry = 5;
+    TaskLogs logs = 6;
+    TaskMessage task_message = 7;
+    TaskResponse task_response = 8;
+  }
+}

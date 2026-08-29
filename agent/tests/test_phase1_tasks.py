@@ -1,0 +1,288 @@
+"""Phase 1: a task gets a directory, limits, its own cards, and is cleaned up.
+
+Everything here runs real processes. A task runner that is only tested against
+fakes is a task runner nobody has watched kill anything.
+"""
+
+from __future__ import annotations
+
+import os
+import signal
+import sys
+import time
+
+import pytest
+
+from loom_agent.tasks.limits import Isolation, resolve_isolation
+from loom_agent.tasks.env import EnvironmentCache
+from loom_agent.tasks.registry import TaskRegistry
+from loom_agent.tasks.spec import TaskRefused, TaskSpec
+
+
+@pytest.fixture
+def isolation(monkeypatch):
+    """Tests do not run as root, so they take the arrangement the operator
+    would have to opt into explicitly on a real node."""
+    monkeypatch.setenv("LOOM_ALLOW_UNPRIVILEGED_TASKS", "1")
+    return resolve_isolation()
+
+
+@pytest.fixture
+def registry(tmp_path, isolation):
+    # Long retention so the reaper does not race the tests that release a task
+    # by hand. Reclaiming on its own is exercised separately below.
+    reg = TaskRegistry(root=tmp_path / "tasks", isolation=isolation,
+                       environments=EnvironmentCache(tmp_path / "envs"),
+                       total_gpus=4, retention_s=60.0)
+    yield reg
+    reg.stop_all()
+
+
+def spec(task_id: str, command, **kwargs) -> TaskSpec:
+    raw = {"task_id": task_id, "command": command}
+    raw.update(kwargs)
+    return TaskSpec.from_dict(raw)
+
+
+# ------------------------------------------------------------------ the basics
+def test_a_task_runs_and_reports_how_it_ended(registry):
+    task = registry.submit(spec("t1", [sys.executable, "-c", "print('hello')"]))
+    assert task.wait(timeout=30)
+    assert task.state == "done"
+    assert task.exit_code == 0
+    assert "hello" in task.logs()
+
+
+def test_a_failing_task_says_so(registry):
+    task = registry.submit(spec("t2", [sys.executable, "-c", "raise SystemExit(3)"]))
+    assert task.wait(timeout=30)
+    assert task.state == "failed"
+    assert task.exit_code == 3
+    assert "3" in task.error
+
+
+def test_a_task_runs_in_its_own_directory(registry):
+    task = registry.submit(spec("t3", [sys.executable, "-c", "import os; print(os.getcwd())"]))
+    assert task.wait(timeout=30)
+    assert str(task.directory.work) in task.logs()
+
+
+# ------------------------------------------------------------------- the limits
+def test_the_timeout_takes_the_whole_process_tree(registry):
+    """A task that started children must not leave them on the owner's machine.
+
+    The parent is killed either way; the question is whether the child it
+    spawned is still running afterwards, holding memory nobody is accounting
+    for.
+    """
+    program = (
+        "import subprocess, sys, time;"
+        "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)']);"
+        "print(child.pid, flush=True);"
+        "time.sleep(60)"
+    )
+    task = registry.submit(spec("t4", [sys.executable, "-c", program], timeout_s=2))
+    assert task.wait(timeout=40)
+    assert task.state == "cancelled"
+    assert "limit" in task.error
+    child_pid = int(task.logs().strip().splitlines()[0])
+    deadline = time.time() + 15
+    while time.time() < deadline:
+        if not _alive(child_pid):
+            return
+        time.sleep(0.2)
+    pytest.fail(f"the child {child_pid} outlived its task and is still running")
+
+
+def test_a_task_cannot_read_this_nodes_credentials(registry, monkeypatch):
+    """The agent's environment holds the join key. The task's must not."""
+    monkeypatch.setenv("LOOM_JOIN_KEY", "loom_secret-do-not-leak")
+    monkeypatch.setenv("LOOM_SOMETHING_ELSE", "also-private")
+    task = registry.submit(spec(
+        "t5", [sys.executable, "-c", "import os; print(sorted(os.environ))"]
+    ))
+    assert task.wait(timeout=30)
+    printed = task.logs()
+    assert "LOOM_JOIN_KEY" not in printed
+    assert "LOOM_SOMETHING_ELSE" not in printed
+    assert "LOOM_TASK_ID" in printed
+
+
+def test_a_task_is_told_where_to_put_its_result(registry):
+    task = registry.submit(spec(
+        "t6", [sys.executable, "-c", "import os; print(os.environ['LOOM_TASK_OUT'])"]
+    ))
+    assert task.wait(timeout=30)
+    assert str(task.directory.out) in task.logs()
+
+
+def test_a_task_over_its_disk_quota_is_stopped(registry):
+    program = (
+        "open('big', 'wb').write(b'x' * (6 * 1024 * 1024));"
+        "import time; time.sleep(30)"
+    )
+    task = registry.submit(spec(
+        "t7", [sys.executable, "-c", program],
+        resources={"disk_bytes": 1024 * 1024}, timeout_s=30,
+    ))
+    assert task.wait(timeout=40)
+    assert task.state == "cancelled"
+    assert "disk quota" in task.error
+
+
+# --------------------------------------------------------------------- the cards
+def test_two_tasks_never_land_on_the_same_card(registry):
+    """The bug this accounting exists to prevent.
+
+    The old compute path gave every task devices 0..N-1, so a second task sat
+    on card 0 next to the first while cards 1..3 idled.
+    """
+    first = registry.submit(spec("g1", [sys.executable, "-c", "import time; time.sleep(5)"],
+                                 resources={"gpus": 2}))
+    second = registry.submit(spec("g2", [sys.executable, "-c", "import time; time.sleep(5)"],
+                                  resources={"gpus": 2}))
+    assert set(first.devices).isdisjoint(second.devices)
+    assert sorted(first.devices + second.devices) == [0, 1, 2, 3]
+    assert registry.free_devices() == []
+
+
+def test_a_task_is_told_which_cards_are_its_own(registry):
+    task = registry.submit(spec(
+        "g3", [sys.executable, "-c", "import os; print(os.environ.get('CUDA_VISIBLE_DEVICES'))"],
+        resources={"gpus": 2},
+    ))
+    assert task.wait(timeout=30)
+    assert task.logs().strip() == ",".join(str(d) for d in task.devices)
+
+
+def test_asking_for_more_cards_than_are_free_is_refused_with_the_count(registry):
+    registry.submit(spec("g4", [sys.executable, "-c", "import time; time.sleep(5)"],
+                         resources={"gpus": 3}))
+    with pytest.raises(TaskRefused) as exc:
+        registry.submit(spec("g5", ["true"], resources={"gpus": 2}))
+    assert "1 of its 4" in str(exc.value)
+
+
+def test_cards_come_back_when_the_task_ends(registry):
+    task = registry.submit(spec("g6", [sys.executable, "-c", "pass"], resources={"gpus": 4}))
+    assert task.wait(timeout=30)
+    deadline = time.time() + 10
+    while time.time() < deadline:
+        if len(registry.free_devices()) == 4:
+            return
+        time.sleep(0.1)
+    pytest.fail("the cards were still held after the task finished")
+
+
+def test_a_refused_task_does_not_keep_the_cards_it_never_got(registry):
+    with pytest.raises(TaskRefused):
+        registry.submit(spec("g7", ["true"], resources={"gpus": 9}))
+    assert len(registry.free_devices()) == 4
+
+
+# ------------------------------------------------------------------- the cleanup
+def test_releasing_a_task_takes_its_disk_back(registry):
+    task = registry.submit(spec("c1", [sys.executable, "-c", "open('f','w').write('x'*1000)"]))
+    assert task.wait(timeout=30)
+    root = task.directory.root
+    assert root.exists()
+    registry.release("c1")
+    assert not root.exists()
+    assert registry.get("c1") is None
+
+
+def test_releasing_a_running_task_stops_it_first(registry):
+    task = registry.submit(spec("c2", [sys.executable, "-c", "import time; time.sleep(60)"]))
+    registry.release("c2")
+    assert task.finished
+    assert not task.directory.root.exists()
+
+
+def test_a_forgotten_task_has_its_disk_reclaimed(tmp_path, isolation):
+    """Nobody collected the result. The owner still gets their disk back."""
+    reg = TaskRegistry(root=tmp_path / "tasks", isolation=isolation,
+                       environments=EnvironmentCache(tmp_path / "envs2"),
+                       total_gpus=0, retention_s=0.0)
+    task = reg.submit(spec("r1", [sys.executable, "-c", "open('f','w').write('x')"]))
+    assert task.wait(timeout=30)
+    deadline = time.time() + 15
+    while time.time() < deadline:
+        if not task.directory.root.exists() and reg.get("r1") is None:
+            return
+        time.sleep(0.1)
+    pytest.fail("the directory of an uncollected task was never reclaimed")
+
+
+def test_a_leftover_directory_is_not_handed_to_the_next_tenant(registry, tmp_path):
+    """A crash can leave one task's files behind. They are not the next one's."""
+    stale = tmp_path / "tasks" / "c3"
+    (stale / "work").mkdir(parents=True)
+    (stale / "work" / "secret").write_text("the previous tenant's data")
+    task = registry.submit(spec("c3", [sys.executable, "-c",
+                                       "import os; print(os.listdir('.'))"]))
+    assert task.wait(timeout=30)
+    assert "secret" not in task.logs()
+
+
+# -------------------------------------------------------------------- refusals
+def test_an_environment_kind_we_cannot_build_is_refused_not_ignored(registry):
+    """Honest refusal beats a task that starts without what it asked for."""
+    with pytest.raises(TaskRefused) as exc:
+        registry.submit(spec("e1", ["true"], environment={"kind": "wasm"}))
+    assert "wasm" in str(exc.value)
+
+
+def test_an_unknown_environment_kind_is_refused(registry):
+    with pytest.raises(TaskRefused):
+        registry.submit(spec("e2", ["true"], environment={"kind": "wasm"}))
+
+
+def test_a_task_without_a_command_is_refused(registry):
+    with pytest.raises(TaskRefused):
+        TaskSpec.from_dict({"task_id": "e3"})
+
+
+def test_a_node_that_cannot_isolate_refuses_everything(tmp_path):
+    """Running a stranger's code as the agent's own user is not a default."""
+    blocked = Isolation(uid=None, gid=None, user="", unprivileged_fallback=False)
+    reg = TaskRegistry(root=tmp_path / "t", isolation=blocked,
+                       environments=EnvironmentCache(tmp_path / "e"), total_gpus=0)
+    with pytest.raises(TaskRefused) as exc:
+        reg.submit(spec("x", ["true"]))
+    assert "separate user" in str(exc.value)
+
+
+def test_the_same_task_is_not_taken_twice(registry):
+    registry.submit(spec("d1", [sys.executable, "-c", "import time; time.sleep(5)"]))
+    with pytest.raises(TaskRefused):
+        registry.submit(spec("d1", ["true"]))
+
+
+def _alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def test_a_node_whose_volume_is_missing_refuses_but_stays_up(tmp_path, isolation):
+    """A crash loop tells the owner nothing and the orchestrator less.
+
+    The node should register, report itself, and name the problem.
+    """
+    blocked = tmp_path / "not-writable"
+    blocked.mkdir()
+    blocked.chmod(0o500)
+    try:
+        reg = TaskRegistry(root=blocked / "tasks", isolation=isolation,
+                           environments=EnvironmentCache(tmp_path / "envs3"), total_gpus=0)
+        assert reg.unusable
+        assert "--root" in reg.unusable
+        with pytest.raises(TaskRefused) as exc:
+            reg.submit(spec("v1", ["true"]))
+        assert "volume" in str(exc.value) or "Mount" in str(exc.value)
+    finally:
+        blocked.chmod(0o700)
