@@ -521,6 +521,45 @@ class AgentHub:
                 continue
         return record
 
+    def announce_release(self) -> int:
+        """Сказать подключённым узлам, что версия сменилась.
+
+        Объявление в ответе на регистрацию доходит только до тех, кто
+        переподключился — то есть до упавших. Исправный узел держит поток
+        месяцами, и без этой рассылки выкатка на нём не начиналась бы никогда.
+
+        Само по себе это не push: узел получает то же самое объявление и решает
+        сам, как и при регистрации.
+        """
+        if self.releases is None or not self.release_base_url:
+            return 0
+        told = 0
+        for node_id, session in list(self.sessions.items()):
+            offer = self._release_message(node_id)
+            if offer is None:
+                continue
+            session.send(agent_pb2.ServerMessage(release=offer))
+            told += 1
+        if told:
+            logger.info("told %d node(s) about release %s", told,
+                        self.releases.current.version if self.releases.current else "?")
+        return told
+
+    def _release_message(self, node_id: str):
+        """Каким релизом этот узел должен быть, если он в текущей волне."""
+        store = self.releases
+        if store is None or not self.release_base_url:
+            return None
+        release = store.offer_to(node_id)
+        if release is None:
+            return None
+        return agent_pb2.AgentRelease(
+            version=release.version,
+            url=f"{self.release_base_url}/agent/release/{release.version}.tar.gz",
+            sha256=release.sha256,
+            signature=release.signature,
+        )
+
     def route(self, message: agent_pb2.TaskMessage) -> None:
         """Carry a message between two members that have no direct link.
 
@@ -783,18 +822,7 @@ class AgentGatewayServicer(agent_pb2_grpc.AgentGatewayServicer):
         Absent means "stay where you are", which is what most nodes hear for
         most of a rollout and is the correct default at every other moment.
         """
-        store = self.hub.releases
-        if store is None or not self.hub.release_base_url:
-            return None
-        release = store.offer_to(node_id)
-        if release is None:
-            return None
-        return agent_pb2.AgentRelease(
-            version=release.version,
-            url=f"{self.hub.release_base_url}/agent/release/{release.version}.tar.gz",
-            sha256=release.sha256,
-            signature=release.signature,
-        )
+        return self.hub._release_message(node_id)
 
     def _rendezvous_addrs(self) -> List[str]:
         node = self.hub.rendezvous

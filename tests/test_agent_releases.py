@@ -113,3 +113,87 @@ def test_the_map_works_before_anything_is_published(store):
     view = store.version_map([{"node_id": "a", "agent_version": "0.1.0"}])
     assert view["release"] is None
     assert view["nodes_on_target"] == 0
+
+
+# --------------------------------------------------------------- подписание
+def test_архив_нагрузки_воспроизводим(tmp_path):
+    """Два прогона подряд должны дать один и тот же файл и одну подпись.
+
+    Иначе повторный запуск ради потерянной подписи выдаёт подпись, которая не
+    подходит к уже скачанному архиву — ловушка, которая не выглядит ловушкой:
+    команда та же, ключ тот же, версия та же.
+    """
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent
+    script = root / "scripts" / "sign_release.py"
+    first = tmp_path / "a.tar.gz"
+    second = tmp_path / "b.tar.gz"
+    for out in (first, second):
+        result = subprocess.run(
+            [sys.executable, "-c",
+             f"import sys; sys.path.insert(0, {str(script.parent)!r});"
+             f"import sign_release; sign_release.build_archive('0.0.1', __import__('pathlib').Path({str(out)!r}))"],
+            capture_output=True, text=True, cwd=root)
+        assert result.returncode == 0, result.stderr
+    assert first.read_bytes() == second.read_bytes(), \
+        "два прогона дали разные байты — подпись не переживёт пересборку"
+
+
+def test_манифест_лежит_рядом_с_архивом(tmp_path):
+    """Подпись, отделённая от своего файла, бесполезна, а вывод команды
+    теряется при первом же переключении окна."""
+    import json as _json
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent
+    key = tmp_path / "release.key"
+    result = subprocess.run(
+        [sys.executable, str(root / "scripts" / "sign_release.py"),
+         "keygen", "--out", str(key)],
+        capture_output=True, text=True, cwd=root)
+    # Код 3 = «публичный ключ в дереве не тронут»; пара при этом создана, и
+    # это ровно то, что нужно тесту: подписывать своим, парк не трогать.
+    if result.returncode not in (0, 3):
+        pytest.skip(f"нет cryptography: {result.stderr[:80]}")
+    out = tmp_path / "loom-agent-9.9.9.tar.gz"
+    result = subprocess.run(
+        [sys.executable, str(root / "scripts" / "sign_release.py"), "sign",
+         "--key", str(key), "--version", "9.9.9", "--out", str(out)],
+        capture_output=True, text=True, cwd=root)
+    assert result.returncode == 0, result.stderr
+    manifest = out.with_name("loom-agent-9.9.9.json")
+    assert manifest.is_file(), "манифест не лёг рядом с архивом"
+    body = _json.loads(manifest.read_text())
+    assert body["version"] == "9.9.9"
+    assert len(body["signature"]) == 128, "подпись ed25519 — 64 байта в hex"
+    assert len(body["sha256"]) == 64
+
+
+def test_keygen_не_подменяет_ключ_парка_молча(tmp_path):
+    """Ключ в дереве — якорь доверия уже розданных образов.
+
+    Подменить его значит лишить обновлений каждый узел с таким образом, а
+    вернуть — только руками на каждой машине. Именно так этот тест однажды и
+    сломал стенд, вызвав keygen мимоходом.
+    """
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent
+    anchor = root / "agent" / "loom_launcher" / "release_key.pub"
+    if not anchor.is_file():
+        pytest.skip("в этом дереве ключа парка нет")
+    before = anchor.read_text()
+    result = subprocess.run(
+        [sys.executable, str(root / "scripts" / "sign_release.py"),
+         "keygen", "--out", str(tmp_path / "other.key")],
+        capture_output=True, text=True, cwd=root)
+    assert anchor.read_text() == before, "keygen подменил ключ парка"
+    assert result.returncode == 3
+    assert "--install" in result.stderr

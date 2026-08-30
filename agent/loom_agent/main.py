@@ -110,7 +110,8 @@ class Agent:
             drain=self.tasks.drain,
             stop=self.stop,
         )
-        self.handlers = CommandHandlers(tasks=self.commands, telemetry=self._telemetry)
+        self.handlers = CommandHandlers(tasks=self.commands, telemetry=self._telemetry,
+                                        on_release=lambda r: self.updater.on_release(r))
 
     def _on_registered(self, ack: agent_pb2.RegisterAck) -> None:
         """The ack carries the one address this node needs to reach every other.

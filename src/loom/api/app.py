@@ -539,9 +539,13 @@ def create_app(*, agents=None, releases=None, keystore=None, config=None,
             return _error(503, "this orchestrator publishes no agent releases")
         raw = await request.json()
         try:
-            return releases.set_wave(int(raw.get("percent", 0))).as_dict()
+            release = releases.set_wave(int(raw.get("percent", 0)))
         except (ReleaseError, TypeError, ValueError) as exc:
             return _error(400, str(exc))
+        # Иначе выкатка дошла бы только до тех, кто переподключился: исправный
+        # узел держит поток месяцами и о смене ступени не узнал бы никогда.
+        told = agents.announce_release() if agents is not None else 0
+        return {**release.as_dict(), "nodes_told": told}
 
     @app.post("/admin/release/withdraw")
     async def admin_release_withdraw(x_loom_admin_token: str | None = Header(default=None)):

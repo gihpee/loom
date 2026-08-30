@@ -202,7 +202,7 @@ async function runTask() {
   try {
     const r = await api("/admin/tasks", {method:"POST", body: JSON.stringify(body)});
     message = `task ${r.task_id} placed on ${r.node_id}`;
-  } catch (e) { message = "not accepted: " + e.message; }
+  } catch (e) { message = "не принято: " + e.message; }
   render();
 }
 
@@ -270,56 +270,88 @@ async function viewRelease() {
   const versions = Object.entries(map.versions || {}).sort((a, b) => b[1] - a[1])
     .map(([v, n]) => [esc(v), n, ((n / (map.nodes_total || 1)) * 100).toFixed(0) + "%"]);
   const state = rel ? `
-    <p>Release <b>${esc(rel.version)}</b> · ${(rel.size_bytes/1048576).toFixed(1)} MB ·
-       rollout <b>${rel.wave_percent}%</b><br>
-       <span class="dim">${map.nodes_in_wave} nodes in the wave,
-       ${map.nodes_on_target} of ${map.nodes_total} already on it</span></p>
+    <p>Релиз <b>${esc(rel.version)}</b> · ${(rel.size_bytes/1048576).toFixed(1)} MB ·
+       выкатка <b>${rel.wave_percent}%</b><br>
+       <span class="dim">в волне ${map.nodes_in_wave} узлов,
+       уже на ней ${map.nodes_on_target} из ${map.nodes_total}</span></p>
     <div class="row">
       <button onclick="setWave(10)">10%</button>
       <button onclick="setWave(25)">25%</button>
       <button onclick="setWave(50)">50%</button>
-      <button onclick="setWave(100)">whole fleet</button>
-      <button class="danger" onclick="withdraw()">stop rollout</button>
+      <button onclick="setWave(100)">весь парк</button>
+      <button class="danger" onclick="withdraw()">остановить выкатку</button>
     </div>
-    <p class="muted">A node's wave is decided by its name, not by chance, so it stays in
-    the same one across reconnects. Waves are advanced by hand: "registered" and "works"
-    are not the same thing, and an automatic step would spread a broken build
-    confidently.</p>` : `<p class="dim">Nothing published.</p>`;
+    <p class="hint">Волна выбирается по имени узла, а не жребием: узел остаётся в той
+    же волне при каждом переподключении. Ступень переводится руками —
+    «зарегистрировался» и «работает» не одно и то же, и автопереход разносил бы
+    сломанную сборку уверенно.</p>` : `<p class="dim">Ничего не опубликовано.</p>`;
   return `
-  <h2>Agent rollout</h2>
+  <h2>Выкатка агента</h2>
   ${state}
   ${message ? `<pre>${esc(message)}</pre>` : ""}
-  <h2>Versions in the fleet</h2>
-  ${table(["version","nodes","share"], versions)}
-  <h2>Publish</h2>
+  <h2>Версии в парке</h2>
+  ${table(["версия","узлов","доля"], versions)}
+  <h2>Опубликовать</h2>
   <div class="row">
-    <input id="r-version" type="text" placeholder="0.2.0" style="width:110px">
-    <input id="r-sig" type="text" placeholder="signature, hex" style="min-width:320px">
-    <input id="r-file" type="file" accept=".gz,.tgz">
-    <button class="action" onclick="publish()">publish</button>
+    ${field("манифест .json от sign_release",
+            `<input id="r-manifest" type="file" accept=".json" onchange="readManifest()">`)}
+    ${field("архив .tar.gz", `<input id="r-file" type="file" accept=".gz,.tgz">`)}
+    ${field("\u00a0", `<button class="action" onclick="publish()">опубликовать</button>`)}
   </div>
-  <p class="muted">Signed with a key this orchestrator does not have and must not: taken
-  over, it can name a release we already signed, but not run new code on the fleet.
-  Publishing does not start a rollout.</p>`;
+  <div class="row">
+    ${field("версия", `<input id="r-version" type="text" placeholder="0.2.0" style="width:110px">`)}
+    ${field("подпись (заполнится из манифеста)",
+            `<input id="r-sig" type="text" placeholder="128 hex-символов" style="width:420px">`)}
+  </div>
+  <p class="hint">Оба файла делает одна команда:
+  <code>python scripts/sign_release.py sign --key agent-release.key --version 0.2.0</code>.
+  Архив и подпись — из ОДНОГО прогона; манифест лежит рядом с архивом
+  именно поэтому.</p>
+  <p class="hint">Подписано ключом, которого у оркестратора нет и не должно быть:
+  захваченный, он сможет назвать любой из уже подписанных релизов, но не запустить
+  новый код на парке. Публикация не начинает выкатку.</p>`;
+}
+
+async function readManifest() {
+  // Версия и подпись — из файла рядом с архивом, а не из терминала: вывод
+  // команды теряется при первом же переключении окна, а подпись, отделённая
+  // от своего архива, бесполезна.
+  const file = $("#r-manifest").files[0];
+  if (!file) return;
+  try {
+    const m = JSON.parse(await file.text());
+    $("#r-version").value = m.version || "";
+    $("#r-sig").value = m.signature || "";
+    message = `манифест прочитан: ${m.version}, sha256 ${(m.sha256 || "").slice(0, 12)}…`;
+  } catch (e) { message = "манифест не читается: " + e.message; }
+  render();
 }
 
 async function publish() {
   const file = $("#r-file").files[0];
   const version = $("#r-version").value.trim();
   const signature = $("#r-sig").value.trim();
-  if (!file || !version || !signature) { message = "version, signature and archive"; return render(); }
+  if (!file || !version || !signature) { message = "нужны версия, подпись и архив"; return render(); }
   const raw = new Uint8Array(await file.arrayBuffer());
   let binary = ""; raw.forEach(b => binary += String.fromCharCode(b));
   try {
     const r = await api("/admin/release", {method:"POST", body: JSON.stringify(
       {version, signature, archive: btoa(binary)})});
-    message = `release ${r.version} published, rollout at 0%`;
-  } catch (e) { message = "not accepted: " + e.message; }
+    message = `релиз ${r.version} опубликован, выкатка на 0%`;
+  } catch (e) { message = "не принято: " + e.message; }
   render();
 }
 
-const setWave = (percent) => act("/admin/release/wave",
-  {method:"POST", body: JSON.stringify({percent})});
+async function setWave(percent) {
+  try {
+    const r = await api("/admin/release/wave",
+                        {method:"POST", body: JSON.stringify({percent})});
+    message = `выкатка на ${r.wave_percent}%` + (
+      r.nodes_told ? `, ${r.nodes_told} узл(ов) уведомлены` :
+      ", в этой волне нет подключённых узлов");
+  } catch (e) { message = e.message; }
+  render();
+}
 const withdraw = () => act("/admin/release/withdraw", {method:"POST"});
 
 
