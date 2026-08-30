@@ -286,24 +286,46 @@ class TaskCommands:
 
     def _answer_request(self, command: agent_pb2.TaskRequest) -> None:
         task = self.registry.get(command.task_id)
-        if task is None or not task.spec.serve_port:
-            self.send(agent_pb2.AgentMessage(task_response=agent_pb2.TaskResponse(
-                command_id=command.command_id, status=503,
-                error=f"task {command.task_id!r} is not serving on this node")))
+        if task is None or not task.serve_port:
+            self._respond(command.command_id, status=503, last=True,
+                          error=f"task {command.task_id!r} is not serving on this node")
             return
+        pieces = channel_mod.request_stream(
+            task.serve_port, method=command.method, path=command.path,
+            body=command.body, headers=dict(command.headers),
+        )
         try:
-            status, headers, body = channel_mod.request(
-                task.serve_port, method=command.method, path=command.path,
-                body=command.body, headers=dict(command.headers),
-            )
-        except Exception as exc:
-            self.send(agent_pb2.AgentMessage(task_response=agent_pb2.TaskResponse(
-                command_id=command.command_id, status=502, error=str(exc))))
+            status, headers = next(pieces)
+        except StopIteration:
+            self._respond(command.command_id, status=502, last=True,
+                          error="the task closed the connection without answering")
             return
+        except Exception as exc:
+            self._respond(command.command_id, status=502, last=True, error=str(exc))
+            return
+        clean = {k: v for k, v in headers.items() if k.lower() != "transfer-encoding"}
+        try:
+            previous = None
+            for chunk in pieces:
+                # Одна часть придерживается: последнюю надо пометить, а узнать,
+                # что она последняя, можно только не увидев следующей.
+                if previous is not None:
+                    self._respond(command.command_id, status=status, headers=clean,
+                                  body=previous)
+                    clean = {}
+                previous = chunk
+            self._respond(command.command_id, status=status, headers=clean,
+                          body=previous or b"", last=True)
+        except Exception as exc:
+            self._respond(command.command_id, status=status, last=True, error=str(exc))
+
+    def _respond(self, command_id: str, *, status: int, body: bytes = b"",
+                 headers: Optional[Dict[str, str]] = None, error: str = "",
+                 last: bool = False) -> None:
         self.send(agent_pb2.AgentMessage(task_response=agent_pb2.TaskResponse(
-            command_id=command.command_id, status=status, body=body,
-            headers={k: v for k, v in headers.items() if k.lower() != "transfer-encoding"},
-        )))
+            command_id=command_id, status=status, body=body,
+            headers=headers or {}, error=error, last=last)))
+
 
     # ----------------------------------------------------------------- small
     def _queue_for(self, task_id: str) -> "queue.Queue":

@@ -149,3 +149,34 @@ def request(port: int, *, method: str, path: str, body: bytes,
             return answer.status, dict(answer.headers), answer.read()
     except urllib.error.HTTPError as exc:
         return exc.code, dict(exc.headers or {}), exc.read()
+
+
+def request_stream(port: int, *, method: str, path: str, body: bytes,
+                   headers: dict, timeout_s: float = 600.0):
+    """То же, но частями: (status, headers), затем куски тела.
+
+    Генерация длинного ответа занимает минуты. Дожидаться её целиком, чтобы
+    показать первое слово, — значит выглядеть зависшим ровно столько же, и
+    отличить «думает» от «умерло» станет нельзя.
+    """
+    outgoing = {k: v for k, v in (headers or {}).items()
+                if k.lower() not in ("host", "content-length", "connection")}
+    call = urllib.request.Request(
+        f"http://127.0.0.1:{port}{path}", data=body or None,
+        method=method or "GET", headers=outgoing,
+    )
+    try:
+        answer = urllib.request.urlopen(call, timeout=timeout_s)
+    except urllib.error.HTTPError as exc:
+        yield exc.code, dict(exc.headers or {})
+        yield exc.read()
+        return
+    with answer:
+        yield answer.status, dict(answer.headers)
+        while True:
+            # Небольшими кусками и без readline: SSE приходит событиями, и
+            # ожидание полной строки задерживало бы каждое из них.
+            chunk = answer.read1(16384) if hasattr(answer, "read1") else answer.read(16384)
+            if not chunk:
+                return
+            yield chunk

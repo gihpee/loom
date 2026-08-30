@@ -36,6 +36,16 @@
   .muted { color:var(--dim); font-size:12px; }
   #err { color:var(--bad); margin-left:auto; }
   .row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin:8px 0; }
+  .field { display:flex; flex-direction:column; gap:3px; }
+  .field > span { color:var(--dim); font-size:11px; text-transform:uppercase;
+                  letter-spacing:.06em; }
+  .field input, .field select { min-width:0; }
+  .stage { border:1px solid var(--line); border-radius:6px; padding:8px 10px;
+           margin:6px 0; background:var(--panel); }
+  .stage .head { display:flex; gap:10px; align-items:baseline; flex-wrap:wrap; }
+  .bar { height:3px; background:var(--line); border-radius:2px; margin-top:6px; }
+  .bar > i { display:block; height:100%; background:var(--acc); border-radius:2px; }
+  .hint { color:var(--dim); font-size:12px; margin:4px 0 12px; }
   input[type=file] { color:var(--dim); font:inherit; }
 </style>
 </head>
@@ -312,73 +322,130 @@ const setWave = (percent) => act("/admin/release/wave",
 const withdraw = () => act("/admin/release/withdraw", {method:"POST"});
 
 
+function peerCell(n) {
+  // «Конвейер тормозит» и «всё едет через оркестратор» снаружи выглядят
+  // одинаково. Различает их только это.
+  if (!n.peer_id) return `<span class="dim">без p2p</span>`;
+  const total = (n.direct || 0) + (n.relayed || 0);
+  const how = n.symmetric_nat ? `<span class="warn">symmetric NAT</span>`
+            : n.reachable ? `<span class="ok">дозвонимый</span>`
+            : `<span class="warn">только через реле</span>`;
+  return how + (total
+    ? `<br><span class="dim">${Math.round((n.direct_share || 0) * 100)}% прямо · ` +
+      `${total} сообщ.${n.link_rtt_ms ? ` · ${n.link_rtt_ms} ms` : ""}</span>`
+    : `<br><span class="dim">обмена ещё не было</span>`);
+}
+
 // ------------------------------------------------------------------ models
 let deployMsg = "";
 let chatOut = "";
+let chatBusy = false;
+let health = {};        // group_id -> что ответили стадии
+
+function field(label, html) {
+  return `<label class="field"><span>${label}</span>${html}</label>`;
+}
+
+// Что стадия делает прямо сейчас. "running" — это про процесс, а не про
+// готовность: веса грузятся минутами, и всё это время задача выглядит
+// одинаково.
+function stagePhase(s) {
+  if (s.state === "pending") return ["ждёт очереди", 5];
+  if (s.state === "provisioning") return ["ставит окружение и качает веса", 25];
+  if (s.state === "failed") return ["упала", 100];
+  if (s.state === "cancelled") return ["снята", 100];
+  if (s.state !== "running") return [s.state, 0];
+  if (!s.stage) return ["поднимается", 55];
+  return s.ready ? ["готова", 100] : ["грузит веса", 75];
+}
 
 async function viewModels() {
   const groups = (await api("/admin/groups")).groups || [];
-  const tasks = (await api("/admin/tasks")).tasks || [];
   const nodes = (await api("/admin/agents")).nodes || [];
-  const byId = Object.fromEntries(tasks.map(t => [t.task_id, t]));
-  const serving = (await api("/v1/models")).data || [];
+  const serving = new Set(((await api("/v1/models")).data || []).map(m => m.id));
+  const deployed = groups.filter(g => g.label);
 
-  const rows = groups.filter(g => g.label).map(g => {
-    const stages = g.ranks.map(r => {
-      const t = byId[r.task_id] || {};
-      return `<span class="dim">${r.rank}:</span> ${esc(r.node_id)} ` +
-             `<span class="${stateCls(t.state)}">${esc(t.state || "?")}</span>` +
-             (t.error ? `<br><span class="dim" style="margin-left:1.5em">${esc(t.error)}</span>` : "");
-    }).join("<br>");
-    const up = serving.some(m => m.id === g.label);
-    return [
-      `<b class="acc">${esc(g.label)}</b><br><span class="dim">${esc(g.group_id)}</span>`,
-      g.size,
-      stages,
-      up ? `<span class="ok">отвечает</span>` : `<span class="warn">поднимается</span>`,
-      `<button onclick="stopGroup('${g.group_id}')">снять</button>`,
-    ];
-  });
+  for (const g of deployed) {
+    if (!serving.has(g.label) || !health[g.group_id]) {
+      health[g.group_id] = await api(`/admin/groups/${g.group_id}/health`).catch(() => null);
+    }
+  }
+
+  const cards = deployed.map(g => {
+    const h = health[g.group_id];
+    const stages = (h?.stages || g.ranks.map(r => ({...r, state: "?"}))).map(s => {
+      const [phase, pct] = stagePhase(s);
+      const layers = s.stage?.layers;
+      return `<div class="stage">
+        <div class="head">
+          <b>ранг ${s.rank}</b>
+          <span class="dim">${esc(s.node_id)}</span>
+          ${layers ? `<span class="dim">слои [${layers[0]}, ${layers[1]})</span>` : ""}
+          <span class="${s.ready ? "ok" : s.state === "failed" ? "bad" : "warn"}">${esc(phase)}</span>
+          ${s.seconds ? `<span class="dim">${s.seconds}s</span>` : ""}
+        </div>
+        ${s.error ? `<div class="dim">${esc(s.error)}</div>` : ""}
+        <div class="bar"><i style="width:${pct}%"></i></div>
+      </div>`;
+    }).join("");
+    const up = serving.has(g.label);
+    return `<div style="margin-bottom:18px">
+      <div class="head" style="display:flex;gap:12px;align-items:baseline">
+        <b class="acc" style="font-size:15px">${esc(g.label)}</b>
+        <span class="${up ? "ok" : "warn"}">${up ? "отвечает" : "поднимается"}</span>
+        <span class="dim">${g.size} ${g.size === 1 ? "стадия" : "стадии"}</span>
+        <button onclick="stopGroup('${g.group_id}')">снять</button>
+        ${up ? `<button onclick="useModel('${esc(g.label)}')">спросить</button>` : ""}
+      </div>
+      ${stages}
+    </div>`;
+  }).join("") || `<p class="dim">пока ничего не развёрнуто</p>`;
 
   const options = nodes.filter(n => n.accepts_tasks).map(n =>
-    `<option value="${esc(n.node_id)}">${esc(n.node_id)} · ` +
-    `${gb(n.vram_free_bytes)} GB · ${n.gpus_free}/${n.gpus_total} карт</option>`).join("");
+    `<option value="${esc(n.node_id)}">${esc(n.node_id)} · ${gb(n.vram_free_bytes)} GB своб.</option>`
+  ).join("");
 
   return `
   <h2>Развернуть модель</h2>
   <div class="row">
-    <input id="m-repo" type="text" placeholder="Qwen/Qwen3-8B" style="min-width:240px">
-    <input id="m-label" type="text" placeholder="имя для клиентов (по умолчанию — хвост repo)" style="min-width:220px">
-    <select id="m-dtype"><option>bfloat16</option><option>float16</option><option>float32</option></select>
-    <select id="m-device"><option>cuda</option><option>cpu</option></select>
-    <button onclick="describeModel()">сколько слоёв</button>
+    ${field("модель на huggingface", `<input id="m-repo" type="text" placeholder="Qwen/Qwen3-8B" style="width:240px">`)}
+    ${field("имя для клиентов", `<input id="m-label" type="text" placeholder="по умолчанию — хвост" style="width:190px">`)}
+    ${field("точность", `<select id="m-dtype"><option>bfloat16</option><option>float16</option><option>float32</option></select>`)}
+    ${field("устройство", `<select id="m-device"><option>cuda</option><option>cpu</option></select>`)}
+    ${field("\u00a0", `<button onclick="describeModel()">сколько слоёв</button>`)}
   </div>
   <div class="row">
-    <span class="dim">узлы (ничего не выбрано — возьмёт самые свободные):</span>
-    <select id="m-nodes" multiple size="4" style="min-width:320px">${options}</select>
-    <input id="m-stages" type="text" value="2" title="стадий, если узлы не выбраны" style="width:60px">
-    <label class="dim"><input type="checkbox" id="m-byvram" checked> резать по VRAM</label>
-    <button class="action" onclick="deploy()">развернуть</button>
+    ${field("узлы — пусто = самые свободные",
+            `<select id="m-nodes" multiple size="3" style="min-width:300px">${options}</select>`)}
+    ${field("стадий", `<input id="m-stages" type="text" value="2" style="width:60px">`)}
+    ${field("разрез", `<label class="dim" style="padding:6px 0">
+        <input type="checkbox" id="m-byvram" checked> по свободной VRAM</label>`)}
+    ${field("\u00a0", `<button class="action" onclick="deploy()">развернуть</button>`)}
   </div>
-  <p class="muted">Веса качает сама стадия и только свой кусок. Первый запуск на
-  узле долгий: ставится окружение и качаются веса; второй — из кэша.</p>
+  <p class="hint">Веса качает сама стадия и только свой кусок. Первый запуск на узле —
+  минуты: ставится окружение и качаются веса. Второй — из кэша.</p>
   ${deployMsg ? `<pre>${esc(deployMsg)}</pre>` : ""}
   <h2>Развёрнуто</h2>
-  ${table(["модель","стадий","где и как","состояние",""], rows)}
+  ${cards}
   <h2>Проверить</h2>
   <div class="row">
-    <input id="c-model" type="text" placeholder="имя модели" style="width:180px">
-    <input id="c-text" type="text" placeholder="привет" style="min-width:320px">
-    <input id="c-max" type="text" value="64" title="max_tokens" style="width:70px">
-    <button class="action" onclick="ask()">спросить</button>
+    ${field("модель", `<input id="c-model" type="text" style="width:170px">`)}
+    ${field("вопрос", `<input id="c-text" type="text" placeholder="привет" style="width:340px">`)}
+    ${field("макс. токенов", `<input id="c-max" type="text" value="128" style="width:90px">`)}
+    ${field("\u00a0", `<button class="action" onclick="ask()">${chatBusy ? "…" : "спросить"}</button>`)}
   </div>
-  <pre id="c-out">${esc(chatOut || "ответ появится здесь")}</pre>`;
+  <pre id="c-out">${esc(chatOut || "ответ появится здесь, по мере генерации")}</pre>`;
+}
+
+function useModel(label) {
+  active = "Models";
+  render().then(() => { const f = $("#c-model"); if (f) { f.value = label; f.focus(); } });
 }
 
 async function describeModel() {
-  const repo = $("#m-repo").value.trim();
   try {
-    const m = await api("/admin/models/describe", {method:"POST", body: JSON.stringify({repo})});
+    const m = await api("/admin/models/describe",
+                        {method:"POST", body: JSON.stringify({repo: $("#m-repo").value.trim()})});
     deployMsg = `${m.repo}: ${m.num_layers} слоёв, ${m.architecture || "архитектура не указана"}`;
   } catch (e) { deployMsg = e.message; }
   render();
@@ -395,11 +462,12 @@ async function deploy() {
   };
   if (selected.length) body.node_ids = selected;
   else body.stages = parseInt($("#m-stages").value, 10) || 1;
+  deployMsg = "отправляем…"; render();
   try {
     const r = await api("/admin/deploy", {method:"POST", body: JSON.stringify(body)});
     deployMsg = `${r.label}: ${r.model.num_layers} слоёв разрезаны так —\n` +
-      r.split.map(s => `  ранг ${s.rank}: слои [${s.start_layer}, ${s.end_layer}) на ${s.node_id}`).join("\n") +
-      `\n\nПоднимается. Первый запуск на узле — минуты: ставится окружение и качаются веса.`;
+      r.split.map(s => `  ранг ${s.rank}: слои [${s.start_layer}, ${s.end_layer}) на ${s.node_id}`).join("\n");
+    health = {};
   } catch (e) { deployMsg = "не принято: " + e.message; }
   render();
 }
@@ -408,23 +476,54 @@ async function ask() {
   const model = $("#c-model").value.trim();
   const text = $("#c-text").value.trim();
   if (!model || !text) { chatOut = "нужны модель и вопрос"; return render(); }
-  chatOut = "ждём…"; render();
+  chatBusy = true; chatOut = ""; render();
   const started = Date.now();
+  let tokens = 0, first = null;
   try {
     const r = await fetch("/v1/chat/completions", {
       method: "POST", headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({model, messages: [{role: "user", content: text}],
-                            max_tokens: parseInt($("#c-max").value, 10) || 64}),
+      body: JSON.stringify({model, stream: true,
+                            messages: [{role: "user", content: text}],
+                            max_tokens: parseInt($("#c-max").value, 10) || 128}),
     });
-    const body = await r.json();
-    const seconds = ((Date.now() - started) / 1000).toFixed(1);
-    chatOut = r.ok
-      ? (body.choices?.[0]?.message?.content ?? JSON.stringify(body, null, 2)) +
-        `\n\n[${seconds}s` + (body.usage ? `, ${body.usage.completion_tokens} токенов, ` +
-        `${(body.usage.completion_tokens / Number(seconds)).toFixed(1)} ток/с]` : "]")
-      : `ошибка: ${body.error?.message ?? r.status}`;
-  } catch (e) { chatOut = "не дошло: " + e.message; }
-  render();
+    if (!r.ok) {
+      const body = await r.json().catch(() => ({}));
+      throw new Error(body.error?.message ?? r.status);
+    }
+    const reader = r.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    for (;;) {
+      const {done, value} = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, {stream: true});
+      // SSE: события разделены пустой строкой, и последнее может быть неполным.
+      const events = buffer.split("\n\n");
+      buffer = events.pop();
+      for (const event of events) {
+        const line = event.split("\n").find(l => l.startsWith("data: "));
+        if (!line) continue;
+        const payload = line.slice(6).trim();
+        if (payload === "[DONE]") continue;
+        let parsed; try { parsed = JSON.parse(payload); } catch { continue; }
+        if (parsed.error) { chatOut += `\n[ошибка: ${parsed.error.message}]`; continue; }
+        const piece = parsed.choices?.[0]?.delta?.content ?? "";
+        if (piece) {
+          if (first === null) first = (Date.now() - started) / 1000;
+          tokens += 1;
+          chatOut += piece;
+          const box = $("#c-out"); if (box) box.textContent = chatOut;
+        }
+      }
+    }
+    const seconds = (Date.now() - started) / 1000;
+    chatOut += `\n\n[${seconds.toFixed(1)}s всего` +
+      (first !== null ? `, первый токен через ${first.toFixed(1)}s` : "") +
+      (tokens ? `, ${tokens} кусков, ${(tokens / seconds).toFixed(1)} в секунду]` : "]");
+  } catch (e) {
+    chatOut += (chatOut ? "\n\n" : "") + "не дошло: " + e.message;
+  }
+  chatBusy = false; render();
 }
 
 // ------------------------------------------------------------------ shell
@@ -456,7 +555,9 @@ function pick(tab) {
 
 function loop() {
   clearInterval(timer);
-  timer = setInterval(() => { if (!isEditing()) render(); }, 3000);
+  // Пока идёт генерация — не перерисовываем: это лишние запросы и дёрганый
+  // текст под руками у того, кто его читает.
+  timer = setInterval(() => { if (!isEditing() && !chatBusy) render(); }, 3000);
 }
 
 $("#token").value = localStorage.getItem("loom_token") || "";

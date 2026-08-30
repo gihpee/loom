@@ -203,3 +203,83 @@ def test_splitting_the_model_does_not_change_the_answer(tmp_path, monkeypatch, t
             agent.stop()
             thread.join(timeout=15)
         orchestrator.stop()
+
+
+@pytest.mark.slow
+def test_ответ_приходит_по_частям_а_не_целиком(tmp_path, monkeypatch, tiny_model):
+    """Генерация занимает минуты, и ждать её целиком ради первого слова —
+    значит выглядеть зависшим ровно столько же.
+
+    Проверяется именно инкрементальность: одна часть на весь ответ означала бы,
+    что где-то по пути его собрали и придержали.
+    """
+    monkeypatch.setenv("LOOM_ALLOW_UNPRIVILEGED_TASKS", "1")
+    monkeypatch.setenv("LOOM_P2P", "0")
+    orchestrator = Orchestrator().start()
+    running = start_nodes(orchestrator, tmp_path, 1)
+    try:
+        group = orchestrator.hub.submit_group(
+            size=1, command=stage_command(tiny_model, 0, 6),
+            env={"PYTHONPATH": PAYLOAD}, serve_port=1, timeout_s=600,
+            node_ids=["node-0"], label="tiny")
+        wait_ready(orchestrator, group)
+
+        async def collect():
+            head, pieces = None, []
+            body = json.dumps({"model": "tiny", "stream": True, "max_tokens": 6,
+                               "messages": [{"role": "user", "content": "привет"}]}).encode()
+            async for piece in orchestrator.hub.request_stream(
+                    group.tasks[0], method="POST", path="/v1/chat/completions",
+                    body=body, headers={"Content-Type": "application/json"},
+                    timeout_s=180):
+                if isinstance(piece, tuple):
+                    head = piece
+                else:
+                    pieces.append(piece)
+            return head, pieces
+
+        (status, headers), pieces = orchestrator.call(collect(), timeout=240)
+        assert status == 200
+        assert "text/event-stream" in headers.get("Content-Type", "")
+        assert len(pieces) > 1, "весь ответ пришёл одним куском — это не стрим"
+
+        text = b"".join(pieces).decode()
+        events = [line for line in text.splitlines() if line.startswith("data: ")]
+        assert len(events) > 1
+        assert events[-1].strip() == "data: [DONE]"
+    finally:
+        for agent, thread in running:
+            agent.stop()
+            thread.join(timeout=15)
+        orchestrator.stop()
+
+
+@pytest.mark.slow
+def test_состояние_стадий_видно_пока_модель_поднимается(tmp_path, monkeypatch, tiny_model):
+    """«running» — это про процесс, а не про готовность отвечать."""
+    from fastapi.testclient import TestClient
+
+    from loom.api.app import create_app
+    from test_agent_gateway import _Settings
+
+    monkeypatch.setenv("LOOM_ALLOW_UNPRIVILEGED_TASKS", "1")
+    monkeypatch.setenv("LOOM_P2P", "0")
+    orchestrator = Orchestrator().start()
+    running = start_nodes(orchestrator, tmp_path, 1)
+    try:
+        group = orchestrator.hub.submit_group(
+            size=1, command=stage_command(tiny_model, 0, 6),
+            env={"PYTHONPATH": PAYLOAD}, serve_port=1, timeout_s=600,
+            node_ids=["node-0"], label="tiny")
+        wait_ready(orchestrator, group)
+        client = TestClient(create_app(agents=orchestrator.hub, config=_Settings()))
+        view = client.get(f"/admin/groups/{group.group_id}/health").json()
+        assert view["ready"] is True
+        stage = view["stages"][0]
+        assert stage["rank"] == 0
+        assert stage["stage"]["layers"] == [0, 6], "стадия не сказала, какие слои держит"
+    finally:
+        for agent, thread in running:
+            agent.stop()
+            thread.join(timeout=15)
+        orchestrator.stop()

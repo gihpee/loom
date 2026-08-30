@@ -210,7 +210,9 @@ class AgentHub:
         # a timeout.
         self._pending_logs: Dict[str, asyncio.Future] = {}
         self._collecting: Dict[str, Tuple[bytearray, asyncio.Future]] = {}
-        self._serving: Dict[str, asyncio.Future] = {}
+        # Очередь, а не future: ответ может прийти частями, и собрать его
+        # целиком — частный случай, а не наоборот.
+        self._serving: Dict[str, asyncio.Queue] = {}
 
     # ---------------------------------------------------------------- nodes
     def node_list(self) -> List[dict]:
@@ -542,36 +544,58 @@ class AgentHub:
     async def request(self, task_id: str, *, method: str = "GET", path: str = "/",
                       body: bytes = b"", headers: Optional[Dict[str, str]] = None,
                       timeout_s: float = 600.0) -> Tuple[int, Dict[str, str], bytes]:
-        """Ask a task's own HTTP server something, through the node's stream.
+        """Спросить у задачи её HTTP и дождаться ответа целиком."""
+        status, head, whole = 502, {}, bytearray()
+        async for piece in self.request_stream(
+                task_id, method=method, path=path, body=body,
+                headers=headers, timeout_s=timeout_s):
+            if isinstance(piece, tuple):
+                status, head = piece
+            else:
+                whole.extend(piece)
+        return status, head, bytes(whole)
 
-        This is how a model on somebody's home machine answers a request from
-        the internet without that machine opening a single port.
+    async def request_stream(self, task_id: str, *, method: str = "GET", path: str = "/",
+                             body: bytes = b"", headers: Optional[Dict[str, str]] = None,
+                             timeout_s: float = 600.0):
+        """То же, но по частям: сначала (status, headers), потом куски тела.
+
+        Так модель на чьей-то домашней машине отвечает интернету, и первое
+        слово видно сразу — а не через минуту, неотличимую от зависания.
         """
         record, session = self._locate(task_id)
         command_id = f"req-{uuid.uuid4().hex[:10]}"
-        waiter: asyncio.Future = asyncio.get_running_loop().create_future()
-        self._serving[command_id] = waiter
+        pieces: asyncio.Queue = asyncio.Queue()
+        self._serving[command_id] = pieces
         session.send(agent_pb2.ServerMessage(task_request=agent_pb2.TaskRequest(
             command_id=command_id, task_id=task_id, method=method, path=path,
             body=body or b"", headers=dict(headers or {}),
         )))
+        started = True
         try:
-            return await asyncio.wait_for(waiter, timeout_s)
-        except asyncio.TimeoutError:
-            raise AgentError(
-                f"{record.node_id} did not answer for {task_id} in {timeout_s:.0f}s"
-            ) from None
+            while True:
+                try:
+                    answer = await asyncio.wait_for(pieces.get(), timeout_s)
+                except asyncio.TimeoutError:
+                    raise AgentError(
+                        f"{record.node_id} не ответил за {timeout_s:.0f}s"
+                    ) from None
+                if answer.error:
+                    raise AgentError(answer.error)
+                if started:
+                    yield answer.status, dict(answer.headers)
+                    started = False
+                if answer.body:
+                    yield answer.body
+                if answer.last:
+                    return
         finally:
             self._serving.pop(command_id, None)
 
     def on_task_response(self, answer: agent_pb2.TaskResponse) -> None:
-        waiter = self._serving.get(answer.command_id)
-        if waiter is None or waiter.done():
-            return
-        if answer.error:
-            waiter.set_exception(AgentError(answer.error))
-            return
-        waiter.set_result((answer.status, dict(answer.headers), answer.body))
+        pieces = self._serving.get(answer.command_id)
+        if pieces is not None:
+            pieces.put_nowait(answer)
 
     def _locate(self, task_id: str) -> Tuple[TaskRecord, AgentSession]:
         record = self.tasks.get(task_id)

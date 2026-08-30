@@ -19,7 +19,7 @@ import os
 from pathlib import Path
 
 from fastapi import FastAPI, Header, Request
-from fastapi.responses import HTMLResponse, JSONResponse, Response
+from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 
 from loom.logging_config import get_logger
 from loom.orchestrator.agents import AgentError
@@ -58,33 +58,58 @@ def create_app(*, agents=None, releases=None, keystore=None, config=None,
 
     @app.post("/v1/chat/completions")
     async def chat(request: Request):
-        """Route to the group serving this model and let it answer.
+        """Отдать запрос группе, которая обслуживает эту модель.
 
-        The orchestrator does not touch the body. It knows which node holds
-        rank 0 and how to reach it over the connection that node opened; what
-        a completion looks like is the stage's business.
+        Оркестратор не смотрит в тело. Он знает, на каком узле ранг 0 и как до
+        него дотянуться по соединению, которое узел открыл сам; что такое
+        completion — дело стадии.
         """
         if agents is None:
             return need_agents()
         raw = await request.body()
         try:
-            model = (json.loads(raw or b"{}").get("model") or "").strip()
+            body = json.loads(raw or b"{}")
         except ValueError:
-            return _error(400, "the request body is not valid json")
+            return _error(400, "тело запроса не JSON")
+        model = (body.get("model") or "").strip()
         if not model:
-            return _error(400, "'model' is required")
+            return _error(400, "нужно поле 'model'")
         group = agents.group_for(model)
         if group is None:
-            return _error(404, f"nothing is serving {model!r} right now")
-        try:
-            status, headers, body = await agents.request(
-                group.tasks[0], method="POST", path="/v1/chat/completions",
-                body=raw, headers={"Content-Type": "application/json"},
-            )
-        except AgentError as exc:
-            return _error(502, str(exc))
-        return Response(content=body, status_code=status,
-                        media_type=headers.get("Content-Type", "application/json"))
+            return _error(404, f"{model!r} сейчас никто не обслуживает")
+
+        head = group.tasks[0]
+        if not body.get("stream"):
+            try:
+                status, headers, answer = await agents.request(
+                    head, method="POST", path="/v1/chat/completions",
+                    body=raw, headers={"Content-Type": "application/json"})
+            except AgentError as exc:
+                return _error(502, str(exc))
+            return Response(content=answer, status_code=status,
+                            media_type=headers.get("Content-Type", "application/json"))
+
+        async def pieces():
+            """Токены наружу по мере появления.
+
+            Ошибка после первого куска уже не может стать HTTP-статусом —
+            заголовки ушли. Поэтому она уходит событием в тот же поток: клиент,
+            который её проигнорирует, увидит оборванный ответ, а тот, кто
+            читает, узнает причину.
+            """
+            try:
+                async for piece in agents.request_stream(
+                        head, method="POST", path="/v1/chat/completions",
+                        body=raw, headers={"Content-Type": "application/json"}):
+                    if not isinstance(piece, tuple):
+                        yield piece
+            except AgentError as exc:
+                yield f"data: {json.dumps({'error': {'message': str(exc)}})}\n\n".encode()
+                yield b"data: [DONE]\n\n"
+
+        return StreamingResponse(pieces(), media_type="text/event-stream",
+                                 headers={"Cache-Control": "no-cache",
+                                          "X-Accel-Buffering": "no"})
 
     # --------------------------------------------------------------- nodes
     @app.get("/admin", response_class=HTMLResponse)
@@ -297,6 +322,50 @@ def create_app(*, agents=None, releases=None, keystore=None, config=None,
         except AgentError as exc:
             return _error(409, str(exc))
         return record.as_dict()
+
+    @app.get("/admin/groups/{group_id}/health")
+    async def admin_group_health(group_id: str,
+                                 x_loom_admin_token: str | None = Header(default=None)):
+        """Что каждая стадия делает прямо сейчас.
+
+        «running» означает, что процесс запустился, а не что модель готова
+        отвечать: веса грузятся минутами, и всё это время состояние задачи
+        выглядит одинаково. Разницу знает только сама стадия, поэтому её и
+        спрашивают.
+        """
+        if forbidden(x_loom_admin_token):
+            return _error(403, "invalid admin token")
+        if agents is None:
+            return need_agents()
+        record = agents.groups.get(group_id)
+        if record is None:
+            return _error(404, f"нет группы {group_id!r}")
+        stages = []
+        for rank in sorted(record.tasks):
+            task_id = record.tasks[rank]
+            task = agents.tasks.get(task_id)
+            stage = {"rank": rank, "task_id": task_id,
+                     "node_id": record.nodes.get(rank, ""),
+                     "state": task.state if task else "gone",
+                     "error": task.error if task else "",
+                     "seconds": round(task.seconds, 1) if task else 0.0,
+                     "stage": None}
+            if task and task.state == "running":
+                try:
+                    status, _headers, answer = await agents.request(
+                        task_id, path="/health", timeout_s=15)
+                    stage["stage"] = json.loads(answer) if answer else None
+                    stage["ready"] = status == 200
+                except (AgentError, ValueError):
+                    # Стадия ещё не слушает — обычное состояние на старте, а не
+                    # повод показать группу сломанной.
+                    stage["ready"] = False
+            else:
+                stage["ready"] = False
+            stages.append(stage)
+        return {"group_id": group_id, "label": record.label,
+                "ready": all(s["ready"] for s in stages) if stages else False,
+                "stages": stages}
 
     @app.post("/admin/groups/{group_id}/stop")
     async def admin_stop_group(group_id: str,

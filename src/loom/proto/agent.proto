@@ -150,12 +150,16 @@ message TaskRequest {
   map<string, string> headers = 6;
 }
 
+// Ответ задачи, возможно по частям. Генерация длинного ответа занимает
+// минуты, и ждать её целиком, чтобы показать первое слово, — значит выглядеть
+// зависшим ровно столько же.
 message TaskResponse {
   string command_id = 1;
   uint32 status = 2;
   bytes body = 3;
   map<string, string> headers = 4;
   string error = 5;
+  bool last = 6;              // последняя часть; для обычного ответа сразу true
 }
 
 message RunTask {
