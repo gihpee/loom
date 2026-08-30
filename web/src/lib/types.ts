@@ -17,6 +17,9 @@ export interface Task {
   state: string; error: string; exit_code: number;
   devices: number[]; seconds: number; submitted_at: number;
   results: ResultFile[]; group_id: string; rank: number;
+  // Задача была на узле, когда оркестратор о ней забыл: её приняли
+  // обратно по докладу узла, и команды у неё нет — узел её не хранит.
+  adopted?: boolean;
 }
 
 export interface Group {

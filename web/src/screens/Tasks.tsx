@@ -169,7 +169,9 @@ export function Tasks() {
                   </td>
                   <td style={{ maxWidth: 320 }}>
                     <span className="mono" style={{ color: "var(--text-dim)" }}>
-                      {t.command.join(" ").slice(0, 60)}
+                      {t.command.length
+                        ? t.command.join(" ").slice(0, 60)
+                        : t.adopted ? "принята с узла" : ""}
                     </span>
                   </td>
                   <td>
@@ -263,7 +265,15 @@ export function Tasks() {
 
           <section>
             <h2>Команда</h2>
-            <pre className="block">{current.command.join(" ")}</pre>
+            {current.command.length ? (
+              <pre className="block">{current.command.join(" ")}</pre>
+            ) : (
+              <div className="sub">
+                Задача шла на узле, когда оркестратор о ней не помнил, и принята
+                обратно по докладу узла. Команду узел не хранит — её можно
+                только остановить.
+              </div>
+            )}
           </section>
 
           {current.results.length > 0 && (

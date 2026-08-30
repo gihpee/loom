@@ -23,6 +23,7 @@ from loom.orchestrator.keys import KeyStore
 from loom.orchestrator.public_addr import resolve_public_address
 from loom.orchestrator.releases import ReleaseStore
 from loom.orchestrator.rendezvous import RendezvousNode, host_of
+from loom.orchestrator.state import StateStore
 
 logger = get_logger(__name__)
 
@@ -81,7 +82,12 @@ async def run() -> None:
         rendezvous=rendezvous,
         releases=releases,
         release_base_url=f"http://{dial_host}:{config.http_port}" if dial_host else "",
+        store=StateStore(config.state_path),
     )
+    # До того, как узлы начнут дозваниваться: иначе первый доклад придёт в
+    # пустой хаб, его задачи окажутся незнакомыми, и мы заведём их заново —
+    # уже без имени модели и без группы, которые лежат в файле.
+    hub.restore()
 
     grpc_server = await serve_grpc(hub=hub, port=config.grpc_port)
     app = create_app(agents=hub, releases=releases, keystore=keystore,
@@ -89,9 +95,16 @@ async def run() -> None:
     http = uvicorn.Server(uvicorn.Config(app, host="0.0.0.0", port=config.http_port,
                                          log_level="info", loop="asyncio"))
     logger.info("HTTP on :%d  (dashboard at /admin)", config.http_port)
+    flusher = asyncio.create_task(hub.flush_loop())
     try:
         await http.serve()
     finally:
+        flusher.cancel()
+        try:
+            await flusher
+        except asyncio.CancelledError:
+            pass
+        hub.flush()
         await grpc_server.stop(5)
         rendezvous.stop()
 

@@ -21,6 +21,7 @@ from typing import Dict, List, Optional, Tuple
 
 from loom.logging_config import get_logger
 from loom.orchestrator.resources import Resources, choose_node
+from loom.orchestrator.state import StateStore
 from loom.proto_gen import agent_pb2, agent_pb2_grpc
 
 logger = get_logger(__name__)
@@ -31,6 +32,15 @@ CHUNK_BYTES = 1024 * 1024
 # How long an API call waits for a node to answer before giving up on it. A
 # node that has gone quiet must not hold a request open forever.
 NODE_REPLY_TIMEOUT_S = 120.0
+# Как часто изменившееся состояние уходит на диск. Не при каждом изменении:
+# телеметрия идёт каждые несколько секунд с каждого узла, и запись на каждый
+# доклад — это запись в пустоту, потому что меняется в ней одно лишь «сколько
+# секунд работает задача».
+FLUSH_INTERVAL_S = 2.0
+# Сколько ждать, прежде чем счесть задачу пропавшей с узла. Узел докладывает
+# только то, что держит; между отправкой задачи и первым докладом о ней есть
+# промежуток, и в нём задача ещё не пропала, а просто не доехала.
+ADOPTION_GRACE_S = 90.0
 
 
 class AgentError(RuntimeError):
@@ -46,6 +56,11 @@ class ResultFile:
 
     def as_dict(self) -> dict:
         return {"name": self.name, "size_bytes": self.size_bytes, "digest": self.digest}
+
+    @classmethod
+    def from_stored(cls, raw: dict) -> "ResultFile":
+        return cls(name=raw.get("name", ""), size_bytes=int(raw.get("size_bytes", 0)),
+                   digest=raw.get("digest", ""))
 
 
 @dataclass
@@ -63,6 +78,10 @@ class TaskRecord:
     resources: Optional[Resources] = None
     group_id: str = ""
     rank: int = 0
+    # Задача, о которой узел доложил, а мы её не заводили: пережила наш
+    # перезапуск, а снимок состояния до неё не дошёл. Команду её никто не
+    # знает — узел докладывает не то, что запускал, а как оно себя чувствует.
+    adopted: bool = False
 
     @property
     def finished(self) -> bool:
@@ -82,7 +101,47 @@ class TaskRecord:
             "results": [r.as_dict() for r in self.results],
             "group_id": self.group_id,
             "rank": self.rank,
+            "adopted": self.adopted,
         }
+
+    def stored(self) -> dict:
+        """Снимок для диска.
+
+        Не `as_dict`: тот округляет и досчитывает для показа, а прочитать
+        обратно надо ровно то, что было, — иначе после перезапуска задача
+        держит чуть-чуть не те ресурсы, чем держала до него.
+        """
+        return {
+            "task_id": self.task_id, "node_id": self.node_id,
+            "command": list(self.command), "state": self.state, "error": self.error,
+            "exit_code": self.exit_code, "devices": list(self.devices),
+            "seconds": self.seconds, "submitted_at": self.submitted_at,
+            "results": [r.as_dict() for r in self.results],
+            "group_id": self.group_id, "rank": self.rank, "adopted": self.adopted,
+            "resources": None if self.resources is None else {
+                "vram_bytes": self.resources.vram_bytes,
+                "ram_bytes": self.resources.ram_bytes,
+                "cpus": self.resources.cpus,
+                "gpus": self.resources.gpus,
+                "disk_bytes": self.resources.disk_bytes,
+            },
+        }
+
+    @classmethod
+    def from_stored(cls, raw: dict) -> "TaskRecord":
+        held = raw.get("resources")
+        return cls(
+            task_id=raw["task_id"], node_id=raw.get("node_id", ""),
+            command=list(raw.get("command") or []), state=raw.get("state", "pending"),
+            error=raw.get("error", ""), exit_code=int(raw.get("exit_code", 0)),
+            devices=list(raw.get("devices") or []),
+            seconds=float(raw.get("seconds", 0.0)),
+            submitted_at=float(raw.get("submitted_at", time.time())),
+            results=[ResultFile.from_stored(r) for r in (raw.get("results") or [])],
+            resources=Resources(**held) if isinstance(held, dict) else None,
+            group_id=raw.get("group_id", ""), rank=int(raw.get("rank", 0)),
+            adopted=bool(raw.get("adopted", False)),
+        )
 
 
 @dataclass
@@ -111,6 +170,23 @@ class GroupRecord:
                       for r in sorted(self.tasks)],
             "submitted_at": self.submitted_at,
         }
+
+    def stored(self) -> dict:
+        return {
+            "group_id": self.group_id, "label": self.label,
+            "tasks": {str(r): t for r, t in self.tasks.items()},
+            "nodes": {str(r): n for r, n in self.nodes.items()},
+            "submitted_at": self.submitted_at,
+        }
+
+    @classmethod
+    def from_stored(cls, raw: dict) -> "GroupRecord":
+        return cls(
+            group_id=raw["group_id"], label=raw.get("label", ""),
+            tasks={int(r): t for r, t in (raw.get("tasks") or {}).items()},
+            nodes={int(r): n for r, n in (raw.get("nodes") or {}).items()},
+            submitted_at=float(raw.get("submitted_at", time.time())),
+        )
 
 
 @dataclass
@@ -199,7 +275,7 @@ class AgentHub:
     """Everything the orchestrator knows about agents and their tasks."""
 
     def __init__(self, *, keystore=None, rendezvous=None, releases=None,
-                 release_base_url: str = "") -> None:
+                 release_base_url: str = "", store: Optional[StateStore] = None) -> None:
         self.keystore = keystore
         # Only for the one address handed out at registration. The hub knows
         # nothing else about p2p and should not.
@@ -210,12 +286,20 @@ class AgentHub:
         # naming one a node cannot fetch would make every registration start a
         # download that fails.
         self.release_base_url = release_base_url.rstrip("/")
+        # Куда сохраняется то, что должно пережить перезапуск. None — значит
+        # никуда: так работают тесты и так работал весь хаб раньше.
+        self.store = store
+        self._dirty = False
         self.sessions: Dict[str, AgentSession] = {}
         self.tasks: Dict[str, TaskRecord] = {}
         self.groups: Dict[str, GroupRecord] = {}
         # Группы, чьи стадии уже доложили о готовности. Загруженная стадия не
         # разгружается, так что проверять повторно незачем.
         self._ready_groups: set = set()
+        # Задачи, которые мы только что отпустили. Узел узнаёт об этом не
+        # мгновенно и успевает доложить о них ещё раз — а незнакомая задача в
+        # докладе принимается обратно, и отпущенная воскресала бы.
+        self._released: Dict[str, float] = {}
         # Replies a caller is waiting for, by command id. A node that never
         # answers leaves a future nobody resolves, which is why every wait has
         # a timeout.
@@ -224,6 +308,64 @@ class AgentHub:
         # Очередь, а не future: ответ может прийти частями, и собрать его
         # целиком — частный случай, а не наоборот.
         self._serving: Dict[str, asyncio.Queue] = {}
+
+    # ------------------------------------------------------------ хранение
+    def _touch(self) -> None:
+        """Пометить, что снимок на диске устарел. Пишет `flush`."""
+        self._dirty = True
+
+    def restore(self) -> int:
+        """Поднять задачи и группы прошлого запуска. Возвращает число задач.
+
+        Сессий здесь ещё нет: узлы дозвонятся сами и своей телеметрией скажут,
+        что из этого живо (`on_telemetry`). До тех пор задачи числятся в том
+        состоянии, в котором их застал прошлый процесс, — что и есть правда:
+        оркестратор ничего не останавливал, а узел ничего не заметил.
+        """
+        if self.store is None:
+            return 0
+        raw = self.store.load()
+        for entry in raw.get("groups") or []:
+            try:
+                record = GroupRecord.from_stored(entry)
+            except (KeyError, TypeError, ValueError):
+                continue
+            self.groups[record.group_id] = record
+        for entry in raw.get("tasks") or []:
+            try:
+                record = TaskRecord.from_stored(entry)
+            except (KeyError, TypeError, ValueError):
+                continue
+            self.tasks[record.task_id] = record
+        if self.tasks or self.groups:
+            logger.info("восстановлено задач: %d, групп: %d",
+                        len(self.tasks), len(self.groups))
+        return len(self.tasks)
+
+    def flush(self) -> None:
+        """Записать снимок, если с прошлого раза что-то изменилось."""
+        if self.store is None or not self._dirty:
+            return
+        self._dirty = False
+        self.store.save({
+            "tasks": [t.stored() for t in self.tasks.values()],
+            "groups": [g.stored() for g in self.groups.values()],
+        })
+
+    async def flush_loop(self) -> None:
+        """Писать снимок в фоне, пока живёт процесс.
+
+        Отдельной задачей, а не из обработчиков: те выполняются в потоке gRPC
+        и в горячем пути запроса, где обращение к диску — это задержка ровно в
+        том месте, где её меньше всего ждут.
+        """
+        try:
+            while True:
+                await asyncio.sleep(FLUSH_INTERVAL_S)
+                self.flush()
+        except asyncio.CancelledError:
+            self.flush()
+            raise
 
     # ---------------------------------------------------------------- nodes
     def node_list(self) -> List[dict]:
@@ -320,6 +462,7 @@ class AgentHub:
         record = TaskRecord(task_id=task_id, node_id=node_id, command=list(command),
                             state="pending", resources=wanted)
         self.tasks[task_id] = record
+        self._touch()
 
         session.send(agent_pb2.ServerMessage(run_task=agent_pb2.RunTask(
             command_id=f"run-{task_id}",
@@ -358,6 +501,8 @@ class AgentHub:
         session.send(agent_pb2.ServerMessage(release_task=agent_pb2.ReleaseTask(
             command_id=f"rel-{task_id}", task_id=task_id)))
         self.tasks.pop(task_id, None)
+        self._released[task_id] = time.time()
+        self._touch()
 
     async def logs(self, task_id: str, *, tail_lines: int = 200) -> str:
         record, session = self._locate(task_id)
@@ -477,6 +622,7 @@ class AgentHub:
                             data=data[offset:offset + CHUNK_BYTES])))
                 session.send(agent_pb2.ServerMessage(input_chunk=agent_pb2.InputChunk(
                     task_id=task_id, name=name, last=True)))
+        self._touch()
         logger.info("group %s placed across %s", group_id, ", ".join(chosen))
         return record
 
@@ -695,10 +841,17 @@ class AgentHub:
         return record, session
 
     # ------------------------------------------------- what agents tell us
-    def on_task_state(self, state: agent_pb2.TaskState) -> None:
+    def on_task_state(self, state: agent_pb2.TaskState, *, node_id: str = "") -> None:
         record = self.tasks.get(state.task_id)
         if record is None:
-            return
+            if not node_id:
+                # Одиночный доклад без узла: сказать о нём нечего, кроме
+                # task_id, а задача без узла неостановима и потому бесполезна.
+                return
+            if state.task_id in self._released:
+                return
+            record = self._adopt(state.task_id, node_id)
+        was = (record.state, len(record.results))
         record.state = state.state
         record.error = state.error or record.error
         record.exit_code = state.exit_code
@@ -709,6 +862,24 @@ class AgentHub:
                 ResultFile(name=f.name, size_bytes=f.size_bytes, digest=f.digest)
                 for f in state.results
             ]
+        if was != (record.state, len(record.results)):
+            self._touch()
+
+    def _adopt(self, task_id: str, node_id: str) -> TaskRecord:
+        """Завести запись для задачи, о которой доложил узел, а мы её не знаем.
+
+        Так выглядит потерянное состояние с той стороны: узел считает, карты
+        заняты, а оркестратор об этой задаче не слышал — и не мог бы её снять,
+        потому что снятие адресуется по task_id. Заводим запись: команду мы уже
+        не узнаем, но остановить и увидеть — сможем.
+        """
+        logger.info("узел %s держит незнакомую задачу %s; принимаем её",
+                    node_id, task_id)
+        record = TaskRecord(task_id=task_id, node_id=node_id, command=[],
+                            state="pending", adopted=True)
+        self.tasks[task_id] = record
+        self._touch()
+        return record
 
     def on_result_chunk(self, chunk: agent_pb2.ResultChunk) -> None:
         key = f"{chunk.task_id}/{chunk.name}"
@@ -755,7 +926,33 @@ class AgentHub:
         if node.hardware is not None and report.vram_free_bytes:
             node.hardware.vram_free_bytes = report.vram_free_bytes
         for state in report.tasks:
-            self.on_task_state(state)
+            self.on_task_state(state, node_id=node.node_id)
+        self._reconcile(node.node_id, {s.task_id for s in report.tasks})
+
+    def _reconcile(self, node_id: str, held: set) -> None:
+        """Свести наш список задач узла с тем, что узел действительно держит.
+
+        Доклад узла — это полная опись, а не список изменений: чего в нём нет,
+        того на узле нет. Задача, пропавшая оттуда, кончилась так, что сказать
+        об этом было уже некому — узел перезапустили, машину выключили.
+        Оставить её числиться работающей значит держать под неё карты, которых
+        она не занимает, и не пускать на узел новую работу.
+
+        Со скидкой на дорогу: между отправкой задачи и первым докладом о ней
+        проходит время, и в нём задача не пропала, а ещё не доехала.
+        """
+        deadline = time.time() - ADOPTION_GRACE_S
+        self._released = {t: at for t, at in self._released.items() if at > deadline}
+        for record in self.tasks.values():
+            if record.node_id != node_id or record.finished:
+                continue
+            if record.task_id in held or record.submitted_at > deadline:
+                continue
+            logger.info("узел %s больше не держит %s; считаем её пропавшей",
+                        node_id, record.task_id)
+            record.state = "gone"
+            record.error = record.error or "узел больше не держит эту задачу"
+            self._touch()
 
 
 # ------------------------------------------------------------------ servicer

@@ -45,6 +45,12 @@ class OrchestratorConfig:
         return os.path.join(self.data_dir, "keys.json")
 
     @property
+    def state_path(self) -> str:
+        """Задачи и группы прошлого запуска. Рядом с ключами и по той же
+        причине: узлы переживают перезапуск оркестратора, а память — нет."""
+        return os.path.join(self.data_dir, "state.json")
+
+    @property
     def releases_dir(self) -> str:
         return os.path.join(self.data_dir, "releases")
 
