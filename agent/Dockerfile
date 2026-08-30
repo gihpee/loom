@@ -32,6 +32,24 @@ COPY pyproject.toml ./
 COPY loom_launcher ./loom_launcher
 COPY loom_agent ./loom_agent
 
+# Образ без ключа собирается, работает и НИКОГДА не примет обновление. Для
+# розданных узлов это необратимо: вернуть их можно только руками на каждой
+# машине. Поэтому сборка останавливается здесь, а не оставляет предупреждение,
+# которое уедет вверх на десяток строк.
+ARG LOOM_ALLOW_NO_RELEASE_KEY=0
+RUN if [ ! -s loom_launcher/release_key.pub ] && [ "$LOOM_ALLOW_NO_RELEASE_KEY" != "1" ]; then \
+      echo "" >&2; \
+      echo "В сборке нет loom_launcher/release_key.pub." >&2; \
+      echo "Узлы с таким образом отвергнут любое обновление по сети." >&2; \
+      echo "" >&2; \
+      echo "  python scripts/sign_release.py keygen --out agent-release.key" >&2; \
+      echo "  # или, если пара уже есть:" >&2; \
+      echo "  python scripts/sign_release.py pubkey --key agent-release.key --install" >&2; \
+      echo "" >&2; \
+      echo "Собрать всё равно: --build-arg LOOM_ALLOW_NO_RELEASE_KEY=1" >&2; \
+      exit 1; \
+    fi
+
 # Both extras, deliberately:
 #   [p2p]  the direct path between nodes. Without it every message between two
 #          machines goes through the orchestrator — correct, and twice the

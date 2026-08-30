@@ -190,6 +190,11 @@ def _unpack(archive: Path, version: str) -> Payload:
         if not (staging / "loom_agent" / "main.py").is_file():
             raise Untrusted("the release archive holds no agent")
         final = agents_dir() / version
+        if (final / "loom_agent" / "main.py").is_file():
+            # Второй агент на этой же машине уже распаковал ту же версию.
+            # Его результат ничем не хуже: подпись проверена и там, и здесь.
+            shutil.rmtree(staging, ignore_errors=True)
+            return Payload(version=version, path=final)
         shutil.rmtree(final, ignore_errors=True)
         os.rename(staging, final)
     except Exception:

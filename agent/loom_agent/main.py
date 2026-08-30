@@ -176,6 +176,7 @@ class Agent:
             # Идёт ли трафик к соседям напрямую. Без этого «конвейер тормозит»
             # и «каждая активация едет длинным путём» выглядят одинаково.
             peer=self.peers.status(),
+            update=self.updater.status(),
         )
         for task in self.tasks.list():
             status = task.status()

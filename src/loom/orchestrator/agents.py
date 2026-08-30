@@ -132,6 +132,9 @@ class AgentNode:
     direct: int = 0
     relayed: int = 0
     link_rtt_ms: float = 0.0
+    update_state: str = ""
+    update_version: str = ""
+    update_error: str = ""
     connected_at: float = field(default_factory=time.time)
     last_seen: float = field(default_factory=time.time)
 
@@ -160,6 +163,9 @@ class AgentNode:
             "relayed": self.relayed,
             "direct_share": round(self.direct_share, 3),
             "link_rtt_ms": round(self.link_rtt_ms, 1),
+            "update_state": self.update_state,
+            "update_version": self.update_version,
+            "update_error": self.update_error,
             "connected_at": self.connected_at,
             "seconds_since_seen": round(time.time() - self.last_seen, 1),
         }
@@ -703,6 +709,9 @@ class AgentHub:
         node.relayed = peer.relayed
         node.direct_share = peer.direct_share
         node.link_rtt_ms = peer.link_rtt_ms
+        node.update_state = report.update.state
+        node.update_version = report.update.version
+        node.update_error = report.update.error
         if node.hardware is not None and report.vram_free_bytes:
             node.hardware.vram_free_bytes = report.vram_free_bytes
         for state in report.tasks:

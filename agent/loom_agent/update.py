@@ -81,19 +81,31 @@ class Updater:
         self._stop = stop
         self._working = threading.Lock()
         self.last_refusal = ""
+        # Что рассказать оркестратору: молчащий узел и узел, которому нечем
+        # скачать релиз, снаружи выглядят одинаково.
+        self.state = "idle"
+        self.offered = ""
         # Ноль, пока выход не запланирован ради обновления.
         self.exit_code = 0
+
+    def status(self):
+        from loom_agent.proto import agent_pb2
+
+        return agent_pb2.UpdateStatus(
+            state=self.state, version=self.offered, error=self.last_refusal)
 
     def on_release(self, release: agent_pb2.AgentRelease) -> None:
         """What the orchestrator says this node should run."""
         if not release.version or release.version == self.current_version:
             return
         if not release.url:
-            logger.warning("release %s was named with no way to fetch it",
-                           release.version)
+            self.state = "refused"
+            self.last_refusal = f"релиз {release.version} назван без адреса, откуда его брать"
+            logger.warning("%s", self.last_refusal)
             return
+        self.offered = release.version
         if not self._working.acquire(blocking=False):
-            return  # already fetching one
+            return  # уже качаем
         threading.Thread(target=self._carry_out, args=(release,),
                          name="update", daemon=True).start()
 
@@ -104,13 +116,17 @@ class Updater:
                 # Started outside the launcher — in a test, or by hand. There
                 # is nothing that could install an update, so saying so is more
                 # useful than downloading one nobody will read.
-                self.last_refusal = "this agent was not started by the launcher"
+                self.state = "refused"
+                self.last_refusal = "агент запущен без пускового слоя — ставить обновление некому"
                 logger.info("ignoring release %s: %s", release.version,
                             self.last_refusal)
                 return
             logger.info("fetching agent %s from %s", release.version, release.url)
+            self.state = "fetching"
+            self.last_refusal = ""
             if not self._download(release, target):
                 return
+            self.state = "downloaded"
             logger.info("agent %s is downloaded; draining before restart",
                         release.version)
             if not self._drain(DRAIN_TIMEOUT_S):
@@ -126,7 +142,10 @@ class Updater:
         try:
             target.mkdir(parents=True, exist_ok=True)
             archive = target / f"{release.version}.tar.gz"
-            partial = archive.with_suffix(".part")
+            # Свой файл на процесс: том может быть общим со вторым агентом на
+            # этой же машине, и в общий .part оба писали бы одновременно —
+            # кто переименовал первым, у второго файл исчезал.
+            partial = target / f".{release.version}.{os.getpid()}.part"
             with urllib.request.urlopen(release.url, timeout=DOWNLOAD_TIMEOUT_S) as source, \
                     open(partial, "wb") as sink:
                 shutil.copyfileobj(source, sink, 1024 * 1024)
@@ -142,6 +161,7 @@ class Updater:
         except Exception as exc:
             # A node that cannot fetch an update is a node running an old
             # version, which is a much smaller problem than a node that stops.
-            self.last_refusal = f"could not fetch release {release.version}: {exc}"
+            self.state = "refused"
+            self.last_refusal = f"не удалось скачать {release.version}: {exc}"
             logger.warning("%s", self.last_refusal)
             return False

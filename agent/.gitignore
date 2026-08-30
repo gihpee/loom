@@ -2,5 +2,3 @@
 __pycache__/
 *.egg-info/
 dist/
-# generated per deployment; never the same for two operators
-loom_launcher/release_key.pub

@@ -283,6 +283,16 @@ message Telemetry {
   uint64 env_cache_bytes = 7;
   repeated TaskState tasks = 8;
   PeerStatus peer = 9;
+  // Что узел делает с обновлением. Без этого «ступень переведена, а версия не
+  // меняется» видно только в логе на самой машине — то есть там, куда оператор
+  // как раз и не хочет ходить.
+  UpdateStatus update = 10;
+}
+
+message UpdateStatus {
+  string state = 1;    // idle | fetching | downloaded | refused
+  string version = 2;  // версия, о которой узел знает
+  string error = 3;    // почему не вышло, словами
 }
 
 // ---------------------------------------------------------------- envelopes

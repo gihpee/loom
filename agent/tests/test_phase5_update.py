@@ -306,8 +306,8 @@ def test_an_agent_started_by_hand_does_not_pretend_to_update(monkeypatch):
     deadline = time.time() + 5
     while time.time() < deadline and not updater.last_refusal:
         time.sleep(0.05)
-    assert "launcher" in updater.last_refusal
-    assert stopped == [], "it stopped the agent for an update it never fetched"
+    assert updater.status().state == "refused"
+    assert stopped == [], "оно остановило агента ради обновления, которого не скачало"
 
 
 def test_the_version_we_already_run_is_not_fetched_again(monkeypatch):
@@ -349,8 +349,9 @@ def test_a_download_that_fails_leaves_the_node_on_the_version_it_has(tmp_path, m
     deadline = time.time() + 20
     while time.time() < deadline and not updater.last_refusal:
         time.sleep(0.1)
-    assert "could not fetch" in updater.last_refusal
-    assert stopped == [], "it restarted for an update that never arrived"
+    assert updater.status().state == "refused"
+    assert "скачать" in updater.last_refusal
+    assert stopped == [], "оно перезапустилось ради обновления, которое не приехало"
     assert not list((tmp_path / "incoming").glob("*.json"))
 
 
@@ -385,3 +386,101 @@ def test_агент_сообщает_что_ушёл_ради_обновлени
         "две половины разошлись в том, что означает этот код"
     updater = Updater(current_version="0.1.0", drain=lambda _t: True, stop=lambda: None)
     assert updater.exit_code == 0, "до обновления выход обычный"
+
+
+def test_узел_рассказывает_почему_не_обновился(monkeypatch):
+    """«Ступень переведена, а версия не меняется» не должно требовать похода в
+    лог на самой машине — это ровно то место, куда оператор идти не хочет."""
+    import time as _time
+
+    from loom_agent.proto import agent_pb2
+    from loom_agent.update import Updater
+
+    monkeypatch.delenv("LOOM_AGENT_INCOMING", raising=False)
+    updater = Updater(current_version="0.1.0", drain=lambda _t: True, stop=lambda: None)
+    assert updater.status().state == "idle"
+
+    updater.on_release(agent_pb2.AgentRelease(version="0.2.0", url="http://x/a.tar.gz"))
+    deadline = _time.time() + 5
+    while _time.time() < deadline and updater.status().state == "idle":
+        _time.sleep(0.05)
+
+    status = updater.status()
+    assert status.state == "refused"
+    assert status.version == "0.2.0", "узел должен назвать версию, о которой знает"
+    assert "пускового слоя" in status.error
+
+
+def test_релиз_без_адреса_тоже_объясняется():
+    from loom_agent.proto import agent_pb2
+    from loom_agent.update import Updater
+
+    updater = Updater(current_version="0.1.0", drain=lambda _t: True, stop=lambda: None)
+    updater.on_release(agent_pb2.AgentRelease(version="0.2.0"))
+    assert updater.status().state == "refused"
+    assert "адреса" in updater.status().error
+
+
+def test_два_агента_на_общем_томе_качают_релиз_каждый_в_свой_файл(tmp_path, monkeypatch):
+    """Симптом со стенда: у второго агента
+    "[Errno 2] No such file or directory: .../0.2.0.tar.part".
+
+    Оба писали в один и тот же временный файл на общем томе; кто переименовал
+    первым, у второго исходник исчезал.
+    """
+    import threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    from loom_agent.proto import agent_pb2
+    from loom_agent.update import Updater
+
+    body = b"payload bytes" * 1000
+
+    class Serve(BaseHTTPRequestHandler):
+        def log_message(self, *_a):
+            pass
+
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    server = HTTPServer(("127.0.0.1", 0), Serve)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    release = agent_pb2.AgentRelease(
+        version="0.2.0", sha256="ab" * 32, signature=b"\x01" * 64,
+        url=f"http://127.0.0.1:{server.server_port}/a.tar.gz")
+
+    shared = tmp_path / "incoming"
+    updaters = [Updater(current_version="0.1.0", drain=lambda _t: True, stop=lambda: None)
+                for _ in range(2)]
+    # Два процесса-агента = два разных pid; здесь их подменяем, потому что
+    # процесс один, а проверяем именно развод по имени.
+    pids = iter([4242, 4243])
+    monkeypatch.setattr("loom_agent.update.os.getpid", lambda: next(pids))
+
+    try:
+        assert all(u._download(release, shared) for u in updaters), \
+            "загрузка не прошла у обоих"
+    finally:
+        server.shutdown()
+
+    assert (shared / "0.2.0.tar.gz").read_bytes() == body
+    assert not list(shared.glob("*.part")), "временные файлы остались лежать"
+
+
+def test_версию_уже_поставленную_соседом_не_ломают(root, release_key):
+    """Общий том: второй пусковой слой не должен сносить то, что распаковал
+    первый — подпись проверена в обоих."""
+    first = payload_mod.install(offer(root, release_key, version="0.2.0"),
+                                installed_version="0.1.0")
+    assert first is not None
+    marker = first.path / "loom_agent" / "already-there"
+    marker.write_text("сосед")
+
+    second = payload_mod.install(offer(root, release_key, version="0.2.0"),
+                                 installed_version="0.1.0")
+    assert second is not None
+    assert second.path == first.path
+    assert marker.exists(), "распаковку соседа снесли и сделали заново"

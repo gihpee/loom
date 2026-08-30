@@ -302,7 +302,7 @@ def test_a_node_in_the_wave_is_told_what_to_run(tmp_path, monkeypatch):
         deadline = time.time() + 15
         while time.time() < deadline and not agent.updater.last_refusal:
             time.sleep(0.1)
-        assert "launcher" in agent.updater.last_refusal
+        assert agent.updater.status().state == "refused"
         # And the node stayed up rather than restarting for an update it cannot
         # apply.
         assert orchestrator.hub.sessions

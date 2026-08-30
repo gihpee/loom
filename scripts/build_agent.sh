@@ -15,13 +15,6 @@ cd "$(dirname "$0")/.."
 IMAGE="${LOOM_AGENT_IMAGE:-gihpee/loomagent}"
 TAG="${LOOM_AGENT_TAG:-latest}"
 
-if [ ! -f agent/loom_launcher/release_key.pub ]; then
-  echo "warning: agent/loom_launcher/release_key.pub is missing." >&2
-  echo "         This image will refuse every network update — safe, and also" >&2
-  echo "         permanent for nodes that run it. Generate one first:" >&2
-  echo "           uv run --with cryptography python scripts/sign_release.py keygen" >&2
-fi
-
 if [ "${1:-}" = "--push" ]; then
   docker buildx build --platform linux/amd64,linux/arm64 \
     -t "$IMAGE:$TAG" -f agent/Dockerfile --push agent

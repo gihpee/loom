@@ -1,55 +1,82 @@
-import { useState } from "react";
-import { token } from "./api";
-import { Keys } from "./tabs/Keys";
-import { Models } from "./tabs/Models";
-import { Nodes } from "./tabs/Nodes";
-import { Release } from "./tabs/Release";
-import { Tasks } from "./tabs/Tasks";
+import { useEffect, useState } from "react";
+import { token } from "./lib/api";
+import type { Node, Task } from "./lib/types";
+import { Badge, Toasts, usePoll } from "./components";
+import { Keys } from "./screens/Keys";
+import { Models } from "./screens/Models";
+import { Nodes } from "./screens/Nodes";
+import { Overview } from "./screens/Overview";
+import { Release } from "./screens/Release";
+import { Tasks } from "./screens/Tasks";
 
-const TABS = {
-  Nodes: <Nodes />,
-  Models: <Models />,
-  Tasks: <Tasks />,
-  Keys: <Keys />,
-  Release: <Release />,
-} as const;
+const SCREENS = ["Overview", "Nodes", "Models", "Tasks", "Keys", "Release"] as const;
+type Screen = (typeof SCREENS)[number];
 
-type TabName = keyof typeof TABS;
+const TITLE: Record<Screen, string> = {
+  Overview: "Обзор", Nodes: "Узлы", Models: "Модели",
+  Tasks: "Задачи", Keys: "Ключи", Release: "Обновление",
+};
 
-export function App() {
-  const [tab, setTab] = useState<TabName>(
-    (localStorage.getItem("loom_tab") as TabName) in TABS
-      ? (localStorage.getItem("loom_tab") as TabName)
-      : "Nodes",
-  );
+function Shell() {
+  const [screen, setScreen] = useState<Screen>(() => {
+    const saved = localStorage.getItem("loom_screen") as Screen;
+    return SCREENS.includes(saved) ? saved : "Overview";
+  });
   const [secret, setSecret] = useState(token.get());
+  const nodes = usePoll<{ nodes: Node[] }>("/admin/agents", 8000);
+  const tasks = usePoll<{ tasks: Task[] }>("/admin/tasks", 8000);
 
-  const pick = (name: TabName) => {
-    setTab(name);
-    localStorage.setItem("loom_tab", name);
+  const go = (name: string) => {
+    const target = name as Screen;
+    if (!SCREENS.includes(target)) return;
+    setScreen(target);
+    localStorage.setItem("loom_screen", target);
   };
 
+  // Цифры рядом с пунктами меню: видно, где что-то происходит, не заходя туда.
+  const online = nodes.data?.nodes.length ?? 0;
+  const active = (tasks.data?.tasks ?? []).filter(
+    (t) => !["done", "failed", "cancelled", "gone"].includes(t.state)).length;
+  const counts: Partial<Record<Screen, number>> = { Nodes: online, Tasks: active };
+
+  useEffect(() => { document.title = `${TITLE[screen]} · Loom`; }, [screen]);
+
+  const view = {
+    Overview: <Overview go={go} />, Nodes: <Nodes />, Models: <Models />,
+    Tasks: <Tasks />, Keys: <Keys />, Release: <Release />,
+  }[screen];
+
   return (
-    <>
-      <header>
-        <h1>loom</h1>
+    <div className="shell">
+      <aside className="side">
+        <div className="brand">
+          <b>loom</b>
+          <span>{online ? `${online} online` : "offline"}</span>
+        </div>
         <nav>
-          {(Object.keys(TABS) as TabName[]).map((name) => (
-            <button key={name} className={name === tab ? "active" : ""}
-                    onClick={() => pick(name)}>
-              {name}
+          {SCREENS.map((name) => (
+            <button key={name} data-active={name === screen} onClick={() => go(name)}>
+              {TITLE[name]}
+              {counts[name] !== undefined && counts[name]! > 0 && (
+                <span className="count">{counts[name]}</span>
+              )}
             </button>
           ))}
         </nav>
-        <label className="token">
-          <span>admin token</span>
-          <input type="password" value={secret}
-                 onChange={(e) => { setSecret(e.target.value); token.set(e.target.value); }} />
-        </label>
-      </header>
-      {/* Каждая вкладка размонтируется при уходе: свои опросы и своё состояние
-          формы, ничего не течёт между ними. */}
-      <main>{TABS[tab]}</main>
-    </>
+        <div className="foot">
+          <div className="field">
+            <label>Админ-токен</label>
+            <input type="password" value={secret} placeholder="не задан"
+                   onChange={(e) => { setSecret(e.target.value); token.set(e.target.value); }} />
+          </div>
+          {nodes.error
+            ? <Badge tone="bad">API недоступен</Badge>
+            : <Badge tone="ok">API отвечает</Badge>}
+        </div>
+      </aside>
+      <main className="main">{view}</main>
+    </div>
   );
 }
+
+export const App = () => <Toasts><Shell /></Toasts>;
