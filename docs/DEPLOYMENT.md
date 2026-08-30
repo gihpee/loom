@@ -1,7 +1,8 @@
 # Развёртывание
 
 Что поднять, в каком порядке, и что проверить прежде чем звать владельцев
-машин. Архитектура — [ARCHITECTURE.md](ARCHITECTURE.md).
+машин. Архитектура — [ARCHITECTURE.md](ARCHITECTURE.md); подробно про узлы —
+[AGENT_MANUAL.md](AGENT_MANUAL.md).
 
 ---
 

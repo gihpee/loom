@@ -27,7 +27,7 @@ from loom_agent import __version__
 from loom_agent.config import Config, parse_args
 from loom_agent.control.client import ControlClient
 from loom_agent.control.handlers import CommandHandlers
-from loom_agent.hwinfo import detect_hardware
+from loom_agent.hwinfo import detect_hardware, free_vram_bytes
 from loom_agent.identity import BadJoinKey, default_node_id, parse_join_key
 from loom_agent.p2p.layer import PeerLayer
 from loom_agent.tasks.env import EnvironmentCache
@@ -170,6 +170,9 @@ class Agent:
             gpus_free=snapshot["gpus_free"],
             tasks_running=snapshot["running"],
             env_cache_bytes=snapshot["environments"]["bytes"],
+            # Идёт ли трафик к соседям напрямую. Без этого «конвейер тормозит»
+            # и «каждая активация едет длинным путём» выглядят одинаково.
+            peer=self.peers.status(),
         )
         for task in self.tasks.list():
             status = task.status()
@@ -182,8 +185,20 @@ class Agent:
 
     def _heartbeat_loop(self) -> None:
         while not self._stop.wait(self.config.heartbeat_interval_s):
+            self._refresh_vram()
             if self.client.registered:
                 self.client.send(self._telemetry())
+
+    def _refresh_vram(self) -> None:
+        """Пересчитать свободную VRAM: снимок при старте устареет за минуту.
+
+        Ноль от измерителя означает «не смогли», а не «памяти нет», поэтому
+        прежнее значение остаётся: подставить ноль — значит вывести рабочий
+        узел из планирования из-за одного неудачного опроса.
+        """
+        free = free_vram_bytes()
+        if free:
+            self.hardware.vram_free_bytes = free
 
     def _report_readiness(self) -> None:
         """Say once, at startup, whether this node can actually take work.

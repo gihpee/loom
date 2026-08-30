@@ -126,6 +126,12 @@ class AgentNode:
     tasks_running: int = 0
     env_cache_bytes: int = 0
     peer_id: str = ""
+    symmetric_nat: bool = False
+    reachable: bool = False
+    direct_share: float = 0.0
+    direct: int = 0
+    relayed: int = 0
+    link_rtt_ms: float = 0.0
     connected_at: float = field(default_factory=time.time)
     last_seen: float = field(default_factory=time.time)
 
@@ -146,6 +152,13 @@ class AgentNode:
             "environment_kinds": list(self.environment_kinds),
             "tasks_running": self.tasks_running,
             "env_cache_bytes": self.env_cache_bytes,
+            "peer_id": self.peer_id,
+            "symmetric_nat": self.symmetric_nat,
+            "reachable": self.reachable,
+            "direct": self.direct,
+            "relayed": self.relayed,
+            "direct_share": round(self.direct_share, 3),
+            "link_rtt_ms": round(self.link_rtt_ms, 1),
             "connected_at": self.connected_at,
             "seconds_since_seen": round(time.time() - self.last_seen, 1),
         }
@@ -375,6 +388,7 @@ class AgentHub:
         node_ids: Optional[List[str]] = None,
         per_rank: Optional[List[dict]] = None,
         label: str = "",
+        inputs: Optional[Dict[str, bytes]] = None,
     ) -> GroupRecord:
         """Place a whole job, or none of it.
 
@@ -409,6 +423,14 @@ class AgentHub:
             ))
         self.groups[group_id] = record
 
+        # The same files to every member: a pipeline's stages run one program,
+        # and shipping it with the task is how a node that has never served
+        # this model gets it without a package registry in the middle.
+        declared = [
+            agent_pb2.InputFile(name=name, size_bytes=len(data),
+                                digest=hashlib.sha256(data).hexdigest())
+            for name, data in (inputs or {}).items()
+        ]
         for rank, node_id in enumerate(chosen):
             task_id = record.tasks[rank]
             self.tasks[task_id] = TaskRecord(
@@ -431,7 +453,17 @@ class AgentHub:
                 ),
                 environment=agent_pb2.Environment(**(environment or {"kind": "none"})),
                 group=agent_pb2.TaskGroup(group_id=group_id, rank=rank, members=members),
+                inputs=declared,
             )))
+            for name, data in (inputs or {}).items():
+                session = self.sessions[node_id]
+                for offset in range(0, len(data), CHUNK_BYTES):
+                    session.send(agent_pb2.ServerMessage(
+                        input_chunk=agent_pb2.InputChunk(
+                            task_id=task_id, name=name,
+                            data=data[offset:offset + CHUNK_BYTES])))
+                session.send(agent_pb2.ServerMessage(input_chunk=agent_pb2.InputChunk(
+                    task_id=task_id, name=name, last=True)))
         logger.info("group %s placed across %s", group_id, ", ".join(chosen))
         return record
 
@@ -597,6 +629,16 @@ class AgentHub:
         node.gpus_free = report.gpus_free
         node.tasks_running = report.tasks_running
         node.env_cache_bytes = report.env_cache_bytes
+        peer = report.peer
+        node.peer_id = peer.peer_id or node.peer_id
+        node.symmetric_nat = peer.symmetric_nat
+        # Адрес без /p2p-circuit значит, что до узла можно дозвониться прямо;
+        # circuit — это тот же путь через реле под другим именем.
+        node.reachable = any("/p2p-circuit" not in a for a in peer.visible_addrs)
+        node.direct = peer.direct
+        node.relayed = peer.relayed
+        node.direct_share = peer.direct_share
+        node.link_rtt_ms = peer.link_rtt_ms
         if node.hardware is not None and report.vram_free_bytes:
             node.hardware.vram_free_bytes = report.vram_free_bytes
         for state in report.tasks:

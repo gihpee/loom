@@ -25,7 +25,7 @@ from loom_agent.p2p.peer import (
     behind_container_nat,
     lattica_available,
 )
-from loom_agent.proto import worker_control_pb2
+from loom_agent.proto import agent_pb2
 
 logger = logging.getLogger("loom_agent.p2p")
 
@@ -182,7 +182,7 @@ class PeerLayer:
         threading.Thread(target=sample, name="loom-p2p-sampler", daemon=True).start()
 
     # ----------------------------------------------------------------- report
-    def status(self) -> worker_control_pb2.PeerStatus:
+    def status(self) -> agent_pb2.PeerStatus:
         """What this node reports about its p2p state on every heartbeat.
 
         Reachability is re-read rather than taken from the identity captured at
@@ -197,9 +197,8 @@ class PeerLayer:
         """
         stats = self.links.snapshot()
         identity = self.identity
-        return worker_control_pb2.PeerStatus(
+        return agent_pb2.PeerStatus(
             peer_id=identity.peer_id if identity else "",
-            listen_addrs=identity.listen_addrs if identity else [],
             symmetric_nat=bool(identity.symmetric_nat) if identity else False,
             direct=stats["direct"],
             relayed=stats["relay"],

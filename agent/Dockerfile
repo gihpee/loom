@@ -32,7 +32,14 @@ COPY pyproject.toml ./
 COPY loom_launcher ./loom_launcher
 COPY loom_agent ./loom_agent
 
-RUN pip install --no-cache-dir .
+# Both extras, deliberately:
+#   [p2p]  the direct path between nodes. Without it every message between two
+#          machines goes through the orchestrator — correct, and twice the
+#          wide-area crossings. An image without it has no fast path at all.
+#   [cuda] NVML, which is how the agent learns what cards it has and enforces
+#          a task's memory quota. Harmless on a machine with no NVIDIA card:
+#          detection just falls through to the next source.
+RUN pip install --no-cache-dir ".[p2p,cuda]"
 
 # Task directories, environment cache and agent payloads all live here. Mount a
 # volume: without one, every restart re-provisions everything from scratch.

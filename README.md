@@ -9,6 +9,7 @@
 инференса едут по этому же соединению. Ни одного входящего порта, ни проброса
 на роутере, ни адреса, который надо где-то прописать.
 
+- Узел: собрать, подключить, обновлять — [docs/AGENT_MANUAL.md](docs/AGENT_MANUAL.md)
 - Архитектура узла: [docs/WORKER_RUNTIME.md](docs/WORKER_RUNTIME.md)
 - Обновление парка: [docs/WORKER_UPDATE.md](docs/WORKER_UPDATE.md)
 - Прямой канал между узлами: [docs/P2P_TRANSPORT.md](docs/P2P_TRANSPORT.md)

@@ -286,3 +286,41 @@ def test_a_node_whose_volume_is_missing_refuses_but_stays_up(tmp_path, isolation
         assert "volume" in str(exc.value) or "Mount" in str(exc.value)
     finally:
         blocked.chmod(0o700)
+
+
+def test_вывод_короткой_задачи_не_теряется(registry):
+    """Лог полон к моменту, когда задача объявлена завершённой.
+
+    На практике поток чтения уже сидит в read() к моменту выхода процесса, так
+    что данные не терялись и до того, как завершение стало его дожидаться. Тест
+    закрепляет гарантию, а не воспроизводит поломку: полагаться на то, что
+    планировщик всегда успеет, — не то же самое, что дождаться.
+    """
+    for attempt in range(100):
+        task = registry.submit(spec(f"fast-{attempt}",
+                                    [sys.executable, "-c", "print('маркер')"]))
+        assert task.wait(timeout=30)
+        assert "маркер" in task.logs(), f"лог пуст на попытке {attempt}"
+        registry.release(f"fast-{attempt}")
+
+
+def test_многострочный_вывод_доезжает_целиком(registry):
+    task = registry.submit(spec("many", [
+        sys.executable, "-c", "[print('строка', i) for i in range(500)]"]))
+    assert task.wait(timeout=30)
+    lines = [l for l in task.logs().splitlines() if l.strip()]
+    assert len(lines) == 500, f"доехало {len(lines)} строк из 500"
+
+
+def test_аргумент_с_пробелами_доезжает_одним_куском(registry):
+    """Команда — список, а не строка, и разрезать её должен тот, кто её вводит.
+
+    Со стенда: `python -c "print(1)"`, разрезанное по пробелам, доехало тремя
+    словами, третье из которых — строковый литерал в кавычках. Python честно
+    его вычислил, ничего не напечатал и вышел с нулём: задача `done`, лог пуст.
+    """
+    task = registry.submit(spec("quoted", [
+        sys.executable, "-c", "print('одна строка с пробелами')"]))
+    assert task.wait(timeout=30)
+    assert task.state == "done", task.logs()
+    assert "одна строка с пробелами" in task.logs()

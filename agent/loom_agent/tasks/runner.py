@@ -68,6 +68,7 @@ class Task:
         self._log = bytearray()
         self._lock = threading.RLock()
         self._watchdog: Optional[MemoryWatchdog] = None
+        self._drained: Optional[threading.Thread] = None
         self._done = threading.Event()
 
     # ------------------------------------------------------------- lifecycle
@@ -99,8 +100,10 @@ class Task:
             on_exceeded=lambda why: self.stop(reason=why),
         )
         self._watchdog.start()
-        threading.Thread(target=self._drain, name=f"task-{self.spec.task_id}-log",
-                         daemon=True).start()
+        self._drained = threading.Thread(target=self._drain,
+                                         name=f"task-{self.spec.task_id}-log",
+                                         daemon=True)
+        self._drained.start()
         threading.Thread(target=self._watch, name=f"task-{self.spec.task_id}",
                          daemon=True).start()
 
@@ -224,6 +227,15 @@ class Task:
                 break
             time.sleep(0.5)
         proc.wait()
+        # Дочитать вывод ДО того, как задача объявлена завершённой. На практике
+        # поток чтения уже сидит в read() к моменту выхода процесса, так что и
+        # без этого лог обычно цел — но «обычно» здесь держится на планировщике
+        # ОС, а не на чём-то, что мы гарантируем.
+        #
+        # Таймаут на случай, если трубу держит переживший задачу потомок:
+        # ждать его вечно хуже, чем потерять хвост лога.
+        if self._drained is not None:
+            self._drained.join(timeout=10)
         self._finish(proc.poll())
 
     def _finish(self, code: Optional[int]) -> None:

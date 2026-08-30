@@ -55,6 +55,7 @@ const $ = (s) => document.querySelector(s);
 let active = localStorage.getItem("loom_tab") || "Nodes";
 let timer = null;
 let message = "";
+let deployBusy = false;
 let taskLogs = "select «logs» on a task";
 
 function headers() {
@@ -101,13 +102,14 @@ async function viewNodes() {
       ? `<span class="ok">takes work</span><br><span class="dim">${esc((n.environment_kinds||[]).join(", "))}</span>`
       : `<span class="bad">refuses</span><br><span class="dim">${esc(n.refusal)}</span>`,
     `${n.tasks_running} running<br><span class="dim">env cache ${gb(n.env_cache_bytes)} GB</span>`,
+    peerCell(n),
     `<span class="dim">${n.seconds_since_seen}s ago</span>`,
   ]);
   const warn = connect.severity === "warn"
     ? `<p class="bad">${esc(connect.warning || "nodes may not be able to reach this address")}</p>` : "";
   return `
   <h2>Nodes</h2>
-  ${table(["node","hardware","gpus free","vram","state","load","seen"], rows)}
+  ${table(["node","hardware","gpus free","vram","state","load","путь к соседям","seen"], rows)}
   <h2>How a machine joins</h2>
   <p class="dim">Address nodes dial: <b>${esc(connect.dial_address || "unknown")}</b>
      <span class="dim">(${esc(connect.source || "—")})</span></p>
@@ -175,7 +177,7 @@ async function runTask() {
   if (!command) { message = "a task needs a command"; return render(); }
   const reqs = $("#t-reqs").value.split(/[,\s]+/).filter(Boolean);
   const body = {
-    command: command.split(/\s+/),
+    command: splitCommand(command),
     timeout_s: parseInt($("#t-timeout").value, 10) || 3600,
     resources: {gpus: parseInt($("#t-gpus").value, 10) || 0},
     environment: reqs.length ? {kind: "python", requirements: reqs} : {kind: "none"},
@@ -309,8 +311,125 @@ const setWave = (percent) => act("/admin/release/wave",
   {method:"POST", body: JSON.stringify({percent})});
 const withdraw = () => act("/admin/release/withdraw", {method:"POST"});
 
+
+// ------------------------------------------------------------------ models
+let deployMsg = "";
+let chatOut = "";
+
+async function viewModels() {
+  const groups = (await api("/admin/groups")).groups || [];
+  const tasks = (await api("/admin/tasks")).tasks || [];
+  const nodes = (await api("/admin/agents")).nodes || [];
+  const byId = Object.fromEntries(tasks.map(t => [t.task_id, t]));
+  const serving = (await api("/v1/models")).data || [];
+
+  const rows = groups.filter(g => g.label).map(g => {
+    const stages = g.ranks.map(r => {
+      const t = byId[r.task_id] || {};
+      return `<span class="dim">${r.rank}:</span> ${esc(r.node_id)} ` +
+             `<span class="${stateCls(t.state)}">${esc(t.state || "?")}</span>` +
+             (t.error ? `<br><span class="dim" style="margin-left:1.5em">${esc(t.error)}</span>` : "");
+    }).join("<br>");
+    const up = serving.some(m => m.id === g.label);
+    return [
+      `<b class="acc">${esc(g.label)}</b><br><span class="dim">${esc(g.group_id)}</span>`,
+      g.size,
+      stages,
+      up ? `<span class="ok">отвечает</span>` : `<span class="warn">поднимается</span>`,
+      `<button onclick="stopGroup('${g.group_id}')">снять</button>`,
+    ];
+  });
+
+  const options = nodes.filter(n => n.accepts_tasks).map(n =>
+    `<option value="${esc(n.node_id)}">${esc(n.node_id)} · ` +
+    `${gb(n.vram_free_bytes)} GB · ${n.gpus_free}/${n.gpus_total} карт</option>`).join("");
+
+  return `
+  <h2>Развернуть модель</h2>
+  <div class="row">
+    <input id="m-repo" type="text" placeholder="Qwen/Qwen3-8B" style="min-width:240px">
+    <input id="m-label" type="text" placeholder="имя для клиентов (по умолчанию — хвост repo)" style="min-width:220px">
+    <select id="m-dtype"><option>bfloat16</option><option>float16</option><option>float32</option></select>
+    <select id="m-device"><option>cuda</option><option>cpu</option></select>
+    <button onclick="describeModel()">сколько слоёв</button>
+  </div>
+  <div class="row">
+    <span class="dim">узлы (ничего не выбрано — возьмёт самые свободные):</span>
+    <select id="m-nodes" multiple size="4" style="min-width:320px">${options}</select>
+    <input id="m-stages" type="text" value="2" title="стадий, если узлы не выбраны" style="width:60px">
+    <label class="dim"><input type="checkbox" id="m-byvram" checked> резать по VRAM</label>
+    <button class="action" onclick="deploy()">развернуть</button>
+  </div>
+  <p class="muted">Веса качает сама стадия и только свой кусок. Первый запуск на
+  узле долгий: ставится окружение и качаются веса; второй — из кэша.</p>
+  ${deployMsg ? `<pre>${esc(deployMsg)}</pre>` : ""}
+  <h2>Развёрнуто</h2>
+  ${table(["модель","стадий","где и как","состояние",""], rows)}
+  <h2>Проверить</h2>
+  <div class="row">
+    <input id="c-model" type="text" placeholder="имя модели" style="width:180px">
+    <input id="c-text" type="text" placeholder="привет" style="min-width:320px">
+    <input id="c-max" type="text" value="64" title="max_tokens" style="width:70px">
+    <button class="action" onclick="ask()">спросить</button>
+  </div>
+  <pre id="c-out">${esc(chatOut || "ответ появится здесь")}</pre>`;
+}
+
+async function describeModel() {
+  const repo = $("#m-repo").value.trim();
+  try {
+    const m = await api("/admin/models/describe", {method:"POST", body: JSON.stringify({repo})});
+    deployMsg = `${m.repo}: ${m.num_layers} слоёв, ${m.architecture || "архитектура не указана"}`;
+  } catch (e) { deployMsg = e.message; }
+  render();
+}
+
+async function deploy() {
+  const selected = Array.from($("#m-nodes").selectedOptions).map(o => o.value);
+  const body = {
+    repo: $("#m-repo").value.trim(),
+    label: $("#m-label").value.trim() || undefined,
+    dtype: $("#m-dtype").value,
+    device: $("#m-device").value,
+    by_vram: $("#m-byvram").checked,
+  };
+  if (selected.length) body.node_ids = selected;
+  else body.stages = parseInt($("#m-stages").value, 10) || 1;
+  try {
+    const r = await api("/admin/deploy", {method:"POST", body: JSON.stringify(body)});
+    deployMsg = `${r.label}: ${r.model.num_layers} слоёв разрезаны так —\n` +
+      r.split.map(s => `  ранг ${s.rank}: слои [${s.start_layer}, ${s.end_layer}) на ${s.node_id}`).join("\n") +
+      `\n\nПоднимается. Первый запуск на узле — минуты: ставится окружение и качаются веса.`;
+  } catch (e) { deployMsg = "не принято: " + e.message; }
+  render();
+}
+
+async function ask() {
+  const model = $("#c-model").value.trim();
+  const text = $("#c-text").value.trim();
+  if (!model || !text) { chatOut = "нужны модель и вопрос"; return render(); }
+  chatOut = "ждём…"; render();
+  const started = Date.now();
+  try {
+    const r = await fetch("/v1/chat/completions", {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({model, messages: [{role: "user", content: text}],
+                            max_tokens: parseInt($("#c-max").value, 10) || 64}),
+    });
+    const body = await r.json();
+    const seconds = ((Date.now() - started) / 1000).toFixed(1);
+    chatOut = r.ok
+      ? (body.choices?.[0]?.message?.content ?? JSON.stringify(body, null, 2)) +
+        `\n\n[${seconds}s` + (body.usage ? `, ${body.usage.completion_tokens} токенов, ` +
+        `${(body.usage.completion_tokens / Number(seconds)).toFixed(1)} ток/с]` : "]")
+      : `ошибка: ${body.error?.message ?? r.status}`;
+  } catch (e) { chatOut = "не дошло: " + e.message; }
+  render();
+}
+
 // ------------------------------------------------------------------ shell
-const VIEWS = {"Nodes": viewNodes, "Work": viewWork, "Keys": viewKeys, "Release": viewRelease};
+const VIEWS = {"Nodes": viewNodes, "Models": viewModels, "Work": viewWork,
+               "Keys": viewKeys, "Release": viewRelease};
 
 function isEditing() {
   // Re-rendering under the operator's hands wipes a half-typed command.

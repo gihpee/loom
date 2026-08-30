@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 from pathlib import Path
 
 from fastapi import FastAPI, Header, Request
@@ -22,6 +23,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, Response
 
 from loom.logging_config import get_logger
 from loom.orchestrator.agents import AgentError
+from loom.orchestrator.models import ModelError, describe, split_layers, stage_payload
 from loom.orchestrator.releases import ReleaseError
 
 logger = get_logger(__name__)
@@ -308,6 +310,105 @@ def create_app(*, agents=None, releases=None, keystore=None, config=None,
                                      reason="stopped from the admin page").as_dict()
         except AgentError as exc:
             return _error(409, str(exc))
+
+    # -------------------------------------------------------------- models
+    @app.post("/admin/models/describe")
+    async def admin_describe_model(request: Request,
+                                   x_loom_admin_token: str | None = Header(default=None)):
+        """Сколько в модели слоёв — прежде чем решать, на сколько узлов её резать."""
+        if forbidden(x_loom_admin_token):
+            return _error(403, "invalid admin token")
+        raw = await request.json()
+        try:
+            return describe((raw.get("repo") or "").strip()).as_dict()
+        except ModelError as exc:
+            return _error(400, str(exc))
+
+    @app.post("/admin/deploy")
+    async def admin_deploy(request: Request,
+                           x_loom_admin_token: str | None = Header(default=None)):
+        """Развернуть модель конвейером по узлам.
+
+        Одно действие вместо четырёх: узнать число слоёв, выбрать узлы,
+        разрезать слои между ними, отправить стадии вместе с кодом стадии.
+        Всё это можно сделать и руками через /admin/groups — здесь просто
+        собрано то, что иначе набирают в четыре запроса и один раз ошибаются.
+        """
+        if forbidden(x_loom_admin_token):
+            return _error(403, "invalid admin token")
+        if agents is None:
+            return need_agents()
+        raw = await request.json()
+        try:
+            model = describe((raw.get("repo") or "").strip())
+        except ModelError as exc:
+            return _error(400, str(exc))
+
+        available = [n for n in agents.node_list() if n["accepts_tasks"]]
+        if not available:
+            return _error(409, "ни один подключённый узел не берёт задачи")
+        named = list(raw.get("node_ids") or [])
+        if named:
+            by_id = {n["node_id"]: n for n in available}
+            missing = [n for n in named if n not in by_id]
+            if missing:
+                return _error(409, f"эти узлы не подключены или не берут работу: {missing}")
+            chosen = [by_id[n] for n in named]
+        else:
+            stages = int(raw.get("stages") or 1)
+            if stages > len(available):
+                return _error(409,
+                              f"просят {stages} стадий, а работу берут {len(available)} узлов")
+            # Самые свободные первыми: голове конвейера достаются ещё и
+            # эмбеддинги, так что ей полезнее место.
+            chosen = sorted(available, key=lambda n: -n["vram_free_bytes"])[:stages]
+
+        weights = [n["vram_free_bytes"] for n in chosen] if raw.get("by_vram", True) else None
+        try:
+            ranges = split_layers(model.num_layers, len(chosen), weights)
+            payload = stage_payload()
+        except ModelError as exc:
+            return _error(400, str(exc))
+
+        device = (raw.get("device") or "cuda").strip()
+        dtype = (raw.get("dtype") or "bfloat16").strip()
+        label = (raw.get("label") or model.repo.split("/")[-1]).strip()
+        per_rank = [{
+            "command": [
+                "python", "-m", "loom_stage.server",
+                "--model-id", label,
+                "--weights-uri", model.repo,
+                "--start-layer", str(start), "--end-layer", str(end),
+                "--device", device, "--dtype", dtype,
+            ],
+        } for start, end in ranges]
+
+        try:
+            record = agents.submit_group(
+                size=len(chosen),
+                command=per_rank[0]["command"],
+                per_rank=per_rank,
+                node_ids=[n["node_id"] for n in chosen],
+                label=label,
+                serve_port=1,
+                # Веса модели качает сама стадия — сюда едет только её код.
+                inputs=payload,
+                environment={"kind": "python", "requirements": [
+                    "torch", "transformers", "safetensors", "huggingface-hub",
+                ]},
+                # Без потолка: стадия живёт, пока модель развёрнута.
+                timeout_s=raw.get("timeout_s") or 30 * 24 * 3600,
+                env={"HF_TOKEN": os.environ.get("HF_TOKEN", "")} if os.environ.get("HF_TOKEN") else None,
+            )
+        except AgentError as exc:
+            return _error(409, str(exc))
+        return {
+            **record.as_dict(),
+            "model": model.as_dict(),
+            "split": [{"rank": i, "node_id": chosen[i]["node_id"],
+                       "start_layer": s, "end_layer": e}
+                      for i, (s, e) in enumerate(ranges)],
+        }
 
     # ------------------------------------------------------------ releases
     @app.get("/agent/release/{version}.tar.gz")

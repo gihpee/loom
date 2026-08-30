@@ -250,6 +250,22 @@ message Probe {
   string command_id = 1;
 }
 
+// Whether this node actually talks to its neighbours directly, and how often.
+// Reported because "the pipeline is slow" and "every activation is going the
+// long way round" look identical from the outside, and only this tells them
+// apart.
+message PeerStatus {
+  string peer_id = 1;
+  bool symmetric_nat = 2;      // hole punching cannot work; peers will relay
+  repeated string visible_addrs = 3;
+  uint64 direct = 4;           // messages that took the direct path
+  uint64 relayed = 5;          // and that went through the orchestrator
+  uint64 fallbacks = 6;        // direct was tried and failed
+  double direct_share = 7;
+  double link_rtt_ms = 8;
+  double relay_rtt_ms = 9;
+}
+
 message Telemetry {
   string node_id = 1;
   uint64 vram_free_bytes = 2;
@@ -259,6 +275,7 @@ message Telemetry {
   uint32 tasks_running = 6;
   uint64 env_cache_bytes = 7;
   repeated TaskState tasks = 8;
+  PeerStatus peer = 9;
 }
 
 // ---------------------------------------------------------------- envelopes

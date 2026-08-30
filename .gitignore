@@ -6,3 +6,4 @@ __pycache__/
 .pytest_cache/
 uv.lock.bak
 node_modules/
+agent-release.key
