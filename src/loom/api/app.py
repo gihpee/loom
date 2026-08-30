@@ -19,7 +19,7 @@ import os
 from pathlib import Path
 
 from fastapi import FastAPI, Header, Request
-from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from loom.logging_config import get_logger
 from loom.orchestrator.agents import AgentError
@@ -112,10 +112,8 @@ def create_app(*, agents=None, releases=None, keystore=None, config=None,
                                           "X-Accel-Buffering": "no"})
 
     # --------------------------------------------------------------- nodes
-    @app.get("/admin", response_class=HTMLResponse)
-    async def admin_ui():
-        """Operator dashboard. Its data calls carry the admin token."""
-        return HTMLResponse(Path(__file__).with_name("admin_ui.html").read_text())
+    # HTML тут не раздаётся: панель — отдельный сервис (docker/web.Dockerfile),
+    # который проксирует сюда /admin и /v1. Оркестратор отвечает только данными.
 
     @app.get("/admin/connect")
     async def admin_connect(x_loom_admin_token: str | None = Header(default=None)):

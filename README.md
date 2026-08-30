@@ -20,6 +20,7 @@
 
 ```
 src/loom/            оркестратор: кому какую работу, кто чем занят, кому какой релиз
+web/                 панель оператора (React), отдельный образ за nginx
 agent/               то, что ставится на чужую машину. Тонкое: агент и больше ничего
 payloads/loom_stage/ стадия модели. Ставится в задачу, когда просят инференс
 relay/               circuit-relay для узлов, до которых не дозвониться напрямую
@@ -38,7 +39,7 @@ relay/               circuit-relay для узлов, до которых не �
 bash scripts/init_env.sh && docker compose up -d --build
 ```
 
-Узел — команду с ключом выдаёт админка на `/admin`, вкладка Keys:
+Узел — команду с ключом выдаёт панель на `:8080`, вкладка Keys:
 
 ```bash
 docker run -d --gpus all --restart unless-stopped --network host \
@@ -65,6 +66,12 @@ uv sync
 uv run pytest tests -q                      # оркестратор и интеграция
 cd agent && uv run pytest tests -q          # узел
 cd payloads/loom_stage && uv run pytest tests -q
+```
+
+Панель оператора — React в `web/`, отдельный сервис в compose. Править вживую:
+
+```bash
+cd web && npm run dev        # проксирует /admin и /v1 в :8000
 ```
 
 Протокол между оркестратором и узлами — один файл,

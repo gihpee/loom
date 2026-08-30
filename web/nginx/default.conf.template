@@ -1,0 +1,44 @@
+# Панель оператора и единственный вход для браузера.
+#
+# Приложение отдаётся по корню, а /admin и /v1 проксируются в оркестратор.
+# Так у API и у SPA не спорят пути, а браузер ходит на один origin — без CORS
+# и без адреса оркестратора, зашитого в сборку.
+server {
+    listen ${LOOM_WEB_PORT};
+    server_name _;
+
+    root /usr/share/nginx/html;
+    index index.html;
+
+    # Single-page app: любой путь, которого нет на диске, отдаёт index.html.
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+
+    # Хеши в именах файлов — можно кэшировать надолго; index.html нельзя,
+    # иначе после обновления браузер будет грузить старые скрипты.
+    location /assets/ {
+        expires 1y;
+        add_header Cache-Control "public, immutable";
+    }
+
+    location /admin/ {
+        proxy_pass http://${LOOM_API_HOST}:${LOOM_HTTP_PORT};
+        proxy_set_header Host $host;
+        proxy_set_header X-Loom-Admin-Token $http_x_loom_admin_token;
+        # Результат задачи может быть большим, а установка окружения — долгой.
+        client_max_body_size 512m;
+        proxy_read_timeout 900s;
+    }
+
+    location /v1/ {
+        proxy_pass http://${LOOM_API_HOST}:${LOOM_HTTP_PORT};
+        proxy_set_header Host $host;
+        # Без этого nginx копит ответ целиком и стрим превращается в паузу на
+        # всю генерацию, а потом разом весь текст.
+        proxy_buffering off;
+        proxy_cache off;
+        chunked_transfer_encoding on;
+        proxy_read_timeout 900s;
+    }
+}

@@ -54,53 +54,81 @@ def build(target: Path, requirements: Sequence[str]) -> None:
     if not requirements:
         return
     python = _interpreter(target)
-    _run(
-        [str(python), "-m", "pip", "install", "--no-input", "--disable-pip-version-check",
-         *_wheel_source(requirements), *requirements],
-        what=f"install {', '.join(requirements)}",
-    )
+    torch_names = [name for name in requirements if _is_torch(name)]
+    others = [name for name in requirements if not _is_torch(name)]
+
+    # Двумя заходами, и это не аккуратность. `--extra-index-url` ДОБАВЛЯЕТ
+    # индекс, после чего pip выбирает версию повыше — а на PyPI лежит сборка
+    # под самую свежую CUDA. Так каталог окружения назывался cu124, а внутри
+    # оказывался torch, которому мало драйвера, и падало это только при первом
+    # обращении к карте, через десять минут после скачивания весов.
+    #
+    # Единственный способ гарантировать нужную сборку — ставить torch ОТДЕЛЬНО
+    # и только из его индекса.
+    if torch_names:
+        index = _torch_index(torch_names)
+        _run(
+            [str(python), "-m", "pip", "install", "--no-input",
+             "--disable-pip-version-check", *index, *torch_names],
+            what=f"install {', '.join(torch_names)}"
+                 + (f" from {index[-1]}" if index else ""),
+        )
+    if others:
+        _run(
+            [str(python), "-m", "pip", "install", "--no-input",
+             "--disable-pip-version-check", *others],
+            what=f"install {', '.join(others)}",
+        )
+
+
+# Меняется, когда меняется СПОСОБ сборки, а не только её вход. Иначе узел с
+# уже собранным окружением переиспользовал бы то, что собрано по-старому: имя
+# каталога обещало cu124, а внутри лежал torch с PyPI.
+RECIPE = 2
 
 
 def wheel_variant(requirements: Sequence[str]) -> str:
-    """Короткое имя того, что на этом узле реально поставится: cu124, cpu, "".
+    """Короткое имя того, что на этом узле реально поставится: cu124-r2, cpu-r2.
 
-    Входит в имя кэшированного окружения, поэтому смена драйвера даёт новое
-    окружение, а не тихое переиспользование несовместимого.
+    Входит в имя кэшированного окружения, поэтому и смена драйвера, и
+    изменение самого способа установки дают новое окружение, а не тихое
+    переиспользование несовместимого.
     """
-    source = _wheel_source(requirements)
-    return source[-1].rsplit("/", 1)[-1] if source else ""
+    tag = _torch_tag(requirements)
+    return f"{tag}-r{RECIPE}" if tag else ""
 
 
-def _wheel_source(requirements: Sequence[str]) -> list:
-    """Откуда брать torch, чтобы он завёлся именно на этой машине.
-
-    По умолчанию pip ставит сборку под самую новую CUDA. На узле с драйвером
-    постарее она ставится молча и падает при первом обращении к карте:
-    "The NVIDIA driver on your system is too old (found version 12040)" —
-    сообщение, из которого не следует ни что делать, ни кто виноват.
+def _torch_tag(requirements: Sequence[str]) -> str:
+    """Какая сборка torch нужна этому железу: cu124, cpu или "" (решай сам).
 
     Выбирает узел, а не оркестратор: тот говорит, ЧТО нужно, а какое колесо
-    подходит этому железу, знает только само железо.
+    подходит этой машине, знает только она.
     """
     if not any(_is_torch(name) for name in requirements):
-        return []
+        return ""
     from loom_agent.hwinfo import cuda_driver_version
 
     driver = cuda_driver_version()
     if driver is None:
         # Карты нет или её не видно — CPU-колёса вместо гигабайтов CUDA,
         # которые всё равно не пригодятся.
-        logger.info("environment: no CUDA driver here, taking CPU wheels")
-        return ["--extra-index-url", f"{TORCH_INDEX}/cpu"]
+        return "cpu"
     for version, tag in TORCH_WHEELS:
         if driver >= version:
-            logger.info("environment: driver supports CUDA %d.%d, taking %s wheels",
-                        driver[0], driver[1], tag)
-            return ["--extra-index-url", f"{TORCH_INDEX}/{tag}"]
+            return tag
     logger.warning(
-        "environment: driver supports only CUDA %d.%d, which is older than any "
-        "torch build we know; letting pip choose and hoping", driver[0], driver[1])
-    return []
+        "environment: driver supports only CUDA %d.%d, older than any torch "
+        "build we know; letting pip choose and hoping", driver[0], driver[1])
+    return ""
+
+
+def _torch_index(requirements: Sequence[str]) -> list:
+    """`--index-url`, а не `--extra-index-url`: заменить, а не добавить."""
+    tag = _torch_tag(requirements)
+    if not tag:
+        return []
+    logger.info("environment: taking %s torch wheels", tag)
+    return ["--index-url", f"{TORCH_INDEX}/{tag}"]
 
 
 def _is_torch(requirement: str) -> bool:

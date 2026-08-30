@@ -32,7 +32,7 @@ curl -s localhost:8000/admin/connect -H "X-Loom-Admin-Token: $LOOM_ADMIN_TOKEN"
 
 ## 2. Ключ и узел
 
-Ключ выдаётся в админке (`/admin`, вкладка Keys) или запросом:
+Ключ выдаётся в панели (`http://<оркестратор>:8080`, вкладка Keys) или запросом:
 
 ```bash
 curl -s localhost:8000/admin/keys -X POST \
@@ -163,7 +163,7 @@ uv run --with cryptography python scripts/sign_release.py \
 ```
 
 Команда печатает подпись и готовый `curl` для публикации. Публикация **не
-начинает выкатку** — ступень переводится руками в админке, на вкладке Release.
+начинает выкатку** — ступень переводится руками в панели, на вкладке Release.
 Почему не автоматически: [WORKER_UPDATE.md](WORKER_UPDATE.md).
 
 ---

@@ -371,6 +371,37 @@ def test_свежую_чужую_сборку_не_подметают(tmp_path):
 
 
 # ------------------------------------------------- колесо под драйвер узла
+def test_индекс_torch_заменяет_а_не_дополняет():
+    """`--extra-index-url` ДОБАВЛЯЕТ индекс, и pip дальше берёт версию повыше —
+    с PyPI, то есть сборку под самую свежую CUDA.
+
+    Симптом со стенда: каталог окружения назывался cu124, а внутри лежал torch,
+    которому мало драйвера. Падало это при первом обращении к карте, через
+    десять минут после скачивания весов. Проверено вживую: со старым флагом pip
+    резолвил torch 2.13.0 с files.pythonhosted.org.
+    """
+    from unittest import mock
+
+    from loom_agent.tasks.env.python import _torch_index
+
+    with mock.patch("loom_agent.hwinfo.cuda_driver_version", return_value=(12, 4)):
+        flags = _torch_index(["torch"])
+    assert flags[0] == "--index-url", \
+        "--extra-index-url не гарантирует сборку: pip выберет версию повыше"
+    assert flags[1].endswith("/cu124")
+
+
+def test_способ_сборки_входит_в_имя_окружения():
+    """Иначе узел с уже собранным окружением переиспользовал бы собранное
+    по-старому: имя обещало cu124, а внутри лежал torch с PyPI."""
+    from unittest import mock
+
+    from loom_agent.tasks.env.python import RECIPE, wheel_variant
+
+    with mock.patch("loom_agent.hwinfo.cuda_driver_version", return_value=(12, 4)):
+        assert wheel_variant(["torch"]) == f"cu124-r{RECIPE}"
+
+
 def test_колесо_torch_выбирается_под_драйвер_узла():
     """Симптом со стенда: pip поставил torch под свежую CUDA, и он упал при
     первом обращении к карте — "The NVIDIA driver on your system is too old
@@ -381,29 +412,29 @@ def test_колесо_torch_выбирается_под_драйвер_узла(
     """
     from unittest import mock
 
-    from loom_agent.tasks.env.python import _wheel_source
+    from loom_agent.tasks.env.python import _torch_index
 
     with mock.patch("loom_agent.hwinfo.cuda_driver_version", return_value=(12, 4)):
-        assert _wheel_source(["torch"])[-1].endswith("/cu124")
+        assert _torch_index(["torch"])[-1].endswith("/cu124")
     with mock.patch("loom_agent.hwinfo.cuda_driver_version", return_value=(12, 8)):
-        assert _wheel_source(["torch"])[-1].endswith("/cu128")
+        assert _torch_index(["torch"])[-1].endswith("/cu128")
 
 
 def test_без_карты_берутся_cpu_колёса():
     """Гигабайты CUDA на машине без NVIDIA — трафик владельца впустую."""
     from unittest import mock
 
-    from loom_agent.tasks.env.python import _wheel_source
+    from loom_agent.tasks.env.python import _torch_index
 
     with mock.patch("loom_agent.hwinfo.cuda_driver_version", return_value=None):
-        assert _wheel_source(["torch"])[-1].endswith("/cpu")
+        assert _torch_index(["torch"])[-1].endswith("/cpu")
 
 
 def test_окружение_без_torch_не_трогает_индекс():
-    from loom_agent.tasks.env.python import _wheel_source
+    from loom_agent.tasks.env.python import _torch_index
 
-    assert _wheel_source(["numpy", "pillow"]) == []
-    assert _wheel_source(["torchmetrics"]) == [], "torchmetrics — это не torch"
+    assert _torch_index(["numpy", "pillow"]) == []
+    assert _torch_index(["torchmetrics"]) == [], "torchmetrics — это не torch"
 
 
 def test_смена_драйвера_даёт_новое_окружение(tmp_path):
@@ -418,4 +449,4 @@ def test_смена_драйвера_даёт_новое_окружение(tmp_
     with mock.patch("loom_agent.hwinfo.cuda_driver_version", return_value=(12, 8)):
         new = cache._key(spec)
     assert old != new
-    assert old.endswith("-cu124") and new.endswith("-cu128")
+    assert "cu124" in old and "cu128" in new

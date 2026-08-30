@@ -8,3 +8,5 @@ __pycache__/
 uv.lock.bak
 node_modules/
 agent-release.key
+web/node_modules/
+web/dist/
