@@ -27,6 +27,17 @@ logger = logging.getLogger("loom_agent.tasks.env.python")
 # whose network died mid-install must not hold a build slot forever.
 INSTALL_TIMEOUT_S = int(os.environ.get("LOOM_ENV_INSTALL_TIMEOUT_S", "1800"))
 
+# Сборки torch под конкретные версии CUDA. По убыванию: берём самую новую,
+# которую держит драйвер узла.
+TORCH_INDEX = "https://download.pytorch.org/whl"
+TORCH_WHEELS = (
+    ((12, 8), "cu128"),
+    ((12, 6), "cu126"),
+    ((12, 4), "cu124"),
+    ((12, 1), "cu121"),
+    ((11, 8), "cu118"),
+)
+
 
 def build(target: Path, requirements: Sequence[str]) -> None:
     """Create the venv and install into it. Raises TaskRefused with the output.
@@ -45,9 +56,58 @@ def build(target: Path, requirements: Sequence[str]) -> None:
     python = _interpreter(target)
     _run(
         [str(python), "-m", "pip", "install", "--no-input", "--disable-pip-version-check",
-         *requirements],
+         *_wheel_source(requirements), *requirements],
         what=f"install {', '.join(requirements)}",
     )
+
+
+def wheel_variant(requirements: Sequence[str]) -> str:
+    """Короткое имя того, что на этом узле реально поставится: cu124, cpu, "".
+
+    Входит в имя кэшированного окружения, поэтому смена драйвера даёт новое
+    окружение, а не тихое переиспользование несовместимого.
+    """
+    source = _wheel_source(requirements)
+    return source[-1].rsplit("/", 1)[-1] if source else ""
+
+
+def _wheel_source(requirements: Sequence[str]) -> list:
+    """Откуда брать torch, чтобы он завёлся именно на этой машине.
+
+    По умолчанию pip ставит сборку под самую новую CUDA. На узле с драйвером
+    постарее она ставится молча и падает при первом обращении к карте:
+    "The NVIDIA driver on your system is too old (found version 12040)" —
+    сообщение, из которого не следует ни что делать, ни кто виноват.
+
+    Выбирает узел, а не оркестратор: тот говорит, ЧТО нужно, а какое колесо
+    подходит этому железу, знает только само железо.
+    """
+    if not any(_is_torch(name) for name in requirements):
+        return []
+    from loom_agent.hwinfo import cuda_driver_version
+
+    driver = cuda_driver_version()
+    if driver is None:
+        # Карты нет или её не видно — CPU-колёса вместо гигабайтов CUDA,
+        # которые всё равно не пригодятся.
+        logger.info("environment: no CUDA driver here, taking CPU wheels")
+        return ["--extra-index-url", f"{TORCH_INDEX}/cpu"]
+    for version, tag in TORCH_WHEELS:
+        if driver >= version:
+            logger.info("environment: driver supports CUDA %d.%d, taking %s wheels",
+                        driver[0], driver[1], tag)
+            return ["--extra-index-url", f"{TORCH_INDEX}/{tag}"]
+    logger.warning(
+        "environment: driver supports only CUDA %d.%d, which is older than any "
+        "torch build we know; letting pip choose and hoping", driver[0], driver[1])
+    return []
+
+
+def _is_torch(requirement: str) -> bool:
+    name = requirement.strip().lower()
+    for separator in ("==", ">=", "<=", "~=", ">", "<", "[", " "):
+        name = name.split(separator)[0]
+    return name in ("torch", "torchvision", "torchaudio")
 
 
 def _inherit_our_packages(target: Path) -> None:

@@ -352,3 +352,36 @@ def test_a_download_that_fails_leaves_the_node_on_the_version_it_has(tmp_path, m
     assert "could not fetch" in updater.last_refusal
     assert stopped == [], "it restarted for an update that never arrived"
     assert not list((tmp_path / "incoming").glob("*.json"))
+
+
+def test_плановый_выход_ради_обновления_не_считается_падением(root, release_key):
+    """Иначе три обновления подряд подвели бы исправную версию под откат.
+
+    Обычный ноль от «я ушёл, чтобы уступить место» не отличить, поэтому агент
+    выходит отдельным кодом.
+    """
+    from loom_launcher.supervise import UPDATE_EXIT_CODE
+
+    payload_mod.switch_to(payload_mod.install(
+        offer(root, release_key, version="0.2.0"), installed_version="0.1.0"))
+    current = payload_mod.resolve()
+    supervisor = Supervisor(current, [])
+    supervisor.consecutive_failures = 2
+
+    # Так пусковой слой видит завершение: код и время жизни.
+    assert UPDATE_EXIT_CODE != 0, "плановый выход должен отличаться от обычного"
+    supervisor._run_once = lambda: UPDATE_EXIT_CODE
+    supervisor._stop.set()          # один проход и выходим
+    supervisor.run_forever()
+    assert supervisor.consecutive_failures == 2, "проход при остановке ничего не менял"
+
+
+def test_агент_сообщает_что_ушёл_ради_обновления():
+    """Код выхода — единственное, что пусковой слой видит от агента."""
+    from loom_agent.update import UPDATE_EXIT_CODE, Updater
+    from loom_launcher.supervise import UPDATE_EXIT_CODE as SEEN_BY_LAUNCHER
+
+    assert UPDATE_EXIT_CODE == SEEN_BY_LAUNCHER, \
+        "две половины разошлись в том, что означает этот код"
+    updater = Updater(current_version="0.1.0", drain=lambda _t: True, stop=lambda: None)
+    assert updater.exit_code == 0, "до обновления выход обычный"

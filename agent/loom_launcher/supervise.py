@@ -38,6 +38,10 @@ TOO_SOON_S = 30.0
 # put the previous one back. Two rather than one: a single crash can be the
 # machine (a card gone, a full disk), and rolling back would not fix it.
 FAILURES_BEFORE_ROLLBACK = 3
+# Этим кодом агент говорит, что вышел нарочно — скачал обновление и уступает
+# место. Обычный ноль от этого не отличить, а считать плановую остановку
+# падением значит подвести исправную версию под откат.
+UPDATE_EXIT_CODE = 70
 
 
 class Supervisor:
@@ -58,6 +62,10 @@ class Supervisor:
             if self._stop.is_set():
                 return code or 0
             lived = time.monotonic() - started
+            if code == UPDATE_EXIT_CODE:
+                logger.info("agent %s stepped aside for an update", self.payload.version)
+                self.consecutive_failures = 0
+                continue
             if lived < TOO_SOON_S:
                 self.consecutive_failures += 1
                 logger.warning(

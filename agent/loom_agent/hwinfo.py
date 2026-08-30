@@ -399,3 +399,38 @@ def free_vram_bytes() -> int:
         if answer:
             return answer[3]
     return 0
+
+
+def cuda_driver_version() -> Optional[Tuple[int, int]]:
+    """Какую CUDA держит драйвер на этой машине, или None.
+
+    Не «какая CUDA собрана в torch», а именно потолок драйвера: колесо torch
+    под CUDA новее драйвера ставится молча и падает только при первом обращении
+    к карте — сообщением про «too old», в котором не сказано, что делать.
+    """
+    try:
+        import pynvml
+
+        pynvml.nvmlInit()
+        raw = int(pynvml.nvmlSystemGetCudaDriverVersion())
+        return raw // 1000, (raw % 1000) // 10
+    except Exception:
+        pass
+    try:
+        out = subprocess.run(
+            ["nvidia-smi", "--query-gpu=driver_version", "--format=csv,noheader"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if out.returncode != 0 or not out.stdout.strip():
+            return None
+        # nvidia-smi отдаёт версию драйвера (550.54), а не CUDA. Таблица
+        # соответствия короткая и меняется редко; всё старое — 11.8, всё
+        # свежее — берём консервативно.
+        major = int(out.stdout.strip().splitlines()[0].split(".")[0])
+    except Exception:
+        return None
+    for floor, cuda in ((580, (12, 8)), (560, (12, 6)), (550, (12, 4)),
+                        (530, (12, 1)), (520, (11, 8))):
+        if major >= floor:
+            return cuda
+    return (11, 8)

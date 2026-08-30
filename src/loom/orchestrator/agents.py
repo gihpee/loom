@@ -143,6 +143,7 @@ class AgentNode:
             "agent_version": self.agent_version,
             "device": hardware.device if hardware else "",
             "gpu_name": hardware.gpu_name if hardware else "",
+            "cuda_version": hardware.cuda_version if hardware else "",
             "gpus_total": self.gpus_total,
             "gpus_free": self.gpus_free,
             "vram_free_bytes": hardware.vram_free_bytes if hardware else 0,

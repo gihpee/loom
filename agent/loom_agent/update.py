@@ -34,6 +34,11 @@ logger = logging.getLogger("loom_agent.update")
 DOWNLOAD_TIMEOUT_S = 300
 # How long running tasks get to finish before the agent restarts anyway.
 DRAIN_TIMEOUT_S = float(os.environ.get("LOOM_DRAIN_TIMEOUT_S", "600"))
+# Чем агент говорит пусковому слою «я вышел нарочно, ради обновления».
+# Обычный ноль от этого не отличить, и плановая остановка считалась бы
+# падением — а три падения подряд у версии без отметки о здоровье означают
+# откат. Откатывать исправную версию за то, что она обновилась, — так себе.
+UPDATE_EXIT_CODE = 70
 
 
 def health_file() -> Optional[Path]:
@@ -76,6 +81,8 @@ class Updater:
         self._stop = stop
         self._working = threading.Lock()
         self.last_refusal = ""
+        # Ноль, пока выход не запланирован ради обновления.
+        self.exit_code = 0
 
     def on_release(self, release: agent_pb2.AgentRelease) -> None:
         """What the orchestrator says this node should run."""
@@ -109,6 +116,7 @@ class Updater:
             if not self._drain(DRAIN_TIMEOUT_S):
                 logger.warning("tasks were still running after %.0fs; restarting anyway",
                                DRAIN_TIMEOUT_S)
+            self.exit_code = UPDATE_EXIT_CODE
             self._stop()
         finally:
             self._working.release()

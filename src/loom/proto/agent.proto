@@ -31,6 +31,9 @@ message Hardware {
   uint64 vram_total_bytes = 8;
   double host_ram_gb = 9;
   string detection_source = 10;
+  // Какую CUDA держит драйвер узла, "12.4". Не украшение: колесо torch под
+  // CUDA новее драйвера ставится молча и падает при первом обращении к карте.
+  string cuda_version = 11;
 }
 
 // How peers can reach this node directly. Absent when it has no p2p stack, in

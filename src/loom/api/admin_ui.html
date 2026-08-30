@@ -105,7 +105,8 @@ async function viewNodes() {
   const connect = await api("/admin/connect").catch(() => ({}));
   const rows = nodes.map(n => [
     `${esc(n.node_id)}<br><span class="dim">agent ${esc(n.agent_version)}</span>`,
-    esc(n.gpu_name || n.device || "—"),
+    esc(n.gpu_name || n.device || "—") +
+      (n.cuda_version ? `<br><span class="dim">CUDA ${esc(n.cuda_version)}</span>` : ""),
     `${n.gpus_free} / ${n.gpus_total}`,
     `${gb(n.vram_free_bytes)} GB`,
     n.accepts_tasks

@@ -18,11 +18,13 @@ Three properties it must have, in order of how badly their absence hurts:
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import shutil
 import threading
 import time
+import uuid
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -41,6 +43,18 @@ from loom_agent.tasks.spec import EnvSpec, TaskRefused
 logger = logging.getLogger("loom_agent.tasks.env.cache")
 
 BUILDING_PREFIX = ".building-"
+# Сколько каталог сборки должен пролежать нетронутым, чтобы считаться брошенным.
+# Дольше самой долгой честной установки и короче человеческого терпения.
+STALE_BUILD_S = float(os.environ.get("LOOM_ENV_STALE_S", str(6 * 3600)))
+
+
+def _variant(spec: EnvSpec) -> str:
+    """Чем сборка на ЭТОМ узле отличается от такой же на другом."""
+    if spec.kind != "python":
+        return ""
+    from loom_agent.tasks.env.python import wheel_variant
+
+    return wheel_variant(spec.requirements)
 
 
 def _build_python(target, spec) -> dict:
@@ -82,6 +96,42 @@ BUILDERS = {
 DEFAULT_QUOTA_BYTES = int(os.environ.get("LOOM_ENV_QUOTA_BYTES", str(64 * 1024**3)))
 
 
+@contextlib.contextmanager
+def _across_processes(root: Path, fingerprint: str):
+    """Не дать двум агентам на одной машине собирать одно и то же дважды.
+
+    Замок внутри процесса покрывает только свои задачи, а том с этим кэшем
+    может быть общим: многокарточный хост держат двумя агентами. Файловая
+    блокировка — единственное, что они оба видят.
+
+    Не получилось взять — работаем дальше без неё. Хуже всего тут лишняя
+    параллельная сборка, и она уже безопасна: у каждой свой каталог, а
+    проигравший гонку переименования просто берёт чужой результат.
+    """
+    handle = None
+    try:
+        import fcntl
+
+        root.mkdir(parents=True, exist_ok=True)
+        handle = open(root / f".lock-{fingerprint}", "w")
+        fcntl.flock(handle, fcntl.LOCK_EX)
+    except Exception:
+        if handle is not None:
+            handle.close()
+            handle = None
+    try:
+        yield
+    finally:
+        if handle is not None:
+            try:
+                import fcntl
+
+                fcntl.flock(handle, fcntl.LOCK_UN)
+            except Exception:
+                pass
+            handle.close()
+
+
 class EnvironmentCache:
     def __init__(self, root: Path, *, quota_bytes: int = DEFAULT_QUOTA_BYTES) -> None:
         self.root = root
@@ -114,16 +164,17 @@ class EnvironmentCache:
                 f"this agent cannot build a {spec.kind!r} environment; it knows "
                 f"{', '.join(sorted(BUILDERS))}"
             )
-        fingerprint = spec.fingerprint()
+        fingerprint = self._key(spec)
         existing = self._ready(fingerprint)
         if existing is not None:
             self._lease(fingerprint)
             self._touch(existing.path)
             logger.info("environment %s was already here", fingerprint)
             return existing
-        with self._build_lock(fingerprint):
-            # Somebody may have finished it while we waited for the lock. This
-            # is the point of waiting rather than racing.
+        with self._build_lock(fingerprint), _across_processes(self.root, fingerprint):
+            # Кто-то мог закончить, пока мы ждали замок. Ради этого и ждём, а
+            # не гоняемся: две одинаковые сборки — это два полных torch,
+            # скачанных на канал владельца машины.
             existing = self._ready(fingerprint)
             if existing is None:
                 existing = self._build(spec, fingerprint)
@@ -142,20 +193,48 @@ class EnvironmentCache:
                 self._leases.pop(fingerprint, None)
 
     # ------------------------------------------------------------------ private
+    def _key(self, spec: EnvSpec) -> str:
+        """Имя окружения на диске: что просили ПЛЮС что здесь из этого выйдет.
+
+        Отпечаток спецификации считает оркестратор, и одинаковых требований ему
+        достаточно. Но собранное окружение зависит ещё и от узла: колесо torch
+        выбирается под его драйвер. Без этого нода, у которой обновили драйвер —
+        или у которой мы починили выбор колеса, — молча переиспользовала бы
+        окружение, собранное под старые условия, и падала бы ровно так же.
+        """
+        base = spec.fingerprint()
+        variant = _variant(spec)
+        return f"{base}-{variant}" if variant else base
+
     def _build(self, spec: EnvSpec, fingerprint: str) -> Environment:
-        staging = self.root / f"{BUILDING_PREFIX}{fingerprint}-{os.getpid()}"
-        shutil.rmtree(staging, ignore_errors=True)
+        # uuid, НЕ pid: два агента на одной машине делят том с этим кэшем, а в
+        # своих контейнерах оба — процесс номер 7. Совпавшее имя означало, что
+        # один сносил недостроенное окружение другого: у первого падал
+        # ensurepip, у второго mkdir с "File exists", и ни одно из сообщений не
+        # называло настоящую причину.
+        staging = self.root / f"{BUILDING_PREFIX}{fingerprint}-{uuid.uuid4().hex[:12]}"
         started = time.time()
+        final = self.root / fingerprint
         try:
             extra = BUILDERS[spec.kind](staging, spec) or {}
             size = directory_size(staging)
             write_marker(staging, fingerprint=fingerprint, kind=spec.kind,
                          size_bytes=size, extra=extra)
-            final = self.root / fingerprint
-            # Atomic: a task either sees a finished environment or none. The
-            # half-built state that costs an afternoon to diagnose cannot be
-            # observed from outside this function.
-            os.rename(staging, final)
+            try:
+                # Атомарно: задача видит либо готовое окружение, либо никакого.
+                # Недостроенное состояние, на диагностику которого уходит
+                # вечер, снаружи этой функции наблюдать нельзя.
+                os.rename(staging, final)
+            except OSError:
+                # Кто-то собрал то же самое, пока собирали мы. Его результат
+                # ничем не хуже — выкидываем свой, а не ломаем чужой.
+                theirs = self._ready(fingerprint)
+                if theirs is None:
+                    raise
+                logger.info("environment %s was built elsewhere while we built it too",
+                            fingerprint)
+                shutil.rmtree(staging, ignore_errors=True)
+                return theirs
         except Exception:
             shutil.rmtree(staging, ignore_errors=True)
             raise
@@ -206,12 +285,21 @@ class EnvironmentCache:
             pass
 
     def _sweep_unfinished(self) -> None:
-        """Remove what a crashed agent left half-built.
+        """Убрать то, что осталось от упавшего агента.
 
-        Safe without any locking: a staging directory belongs to a process that
-        no longer exists, and a finished environment never has this prefix.
+        По возрасту, а не просто по префиксу: том может быть общим с другим
+        агентом на этой же машине, и он прямо сейчас может что-то собирать.
+        Настоящая сборка не длится часами, а живая никогда не бывает такой
+        старой — так что старое чужое и старое своё одинаково безопасно
+        удалять, а свежее чужое остаётся нетронутым.
         """
+        deadline = time.time() - STALE_BUILD_S
         for entry in self.root.glob(f"{BUILDING_PREFIX}*"):
+            try:
+                if entry.stat().st_mtime > deadline:
+                    continue
+            except OSError:
+                continue
             logger.info("removing a half-built environment left behind: %s", entry.name)
             shutil.rmtree(entry, ignore_errors=True)
 

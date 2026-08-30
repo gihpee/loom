@@ -7,6 +7,7 @@ tests are about the properties that make it pay off instead.
 
 from __future__ import annotations
 
+import shutil
 import sys
 import threading
 import time
@@ -122,11 +123,20 @@ def test_a_failed_build_leaves_nothing_behind(cache, monkeypatch):
 
 
 def test_what_a_crashed_agent_left_half_built_is_swept(tmp_path):
+    """Брошенное убирается — но по возрасту, а не по одному лишь префиксу.
+
+    Том может быть общим со вторым агентом на этой же машине, и подметание
+    всего подряд снесло бы то, что он собирает прямо сейчас.
+    """
+    import os as _os
+
     root = tmp_path / "envs"
     root.mkdir()
     leftover = root / ".building-python-abc123-4242"
     leftover.mkdir()
     (leftover / "junk").write_text("x")
+    old = time.time() - cache_mod.STALE_BUILD_S - 60
+    _os.utime(leftover, (old, old))
     keep = root / "python-good"
     keep.mkdir()
     write_marker(keep, fingerprint="python-good", kind="python", size_bytes=1)
@@ -282,3 +292,130 @@ def test_an_environment_outlives_the_task_that_built_it(registry):
     registry.release("p5")
     assert not task.directory.root.exists()
     assert path.exists(), "the environment went away with the task that used it"
+
+
+# ------------------------------------------- два агента на одной машине
+def test_два_агента_на_общем_томе_не_ломают_сборку_друг_другу(tmp_path, monkeypatch):
+    """Симптом со стенда: у одного упал ensurepip, у второго "File exists".
+
+    Причина была одна: имя каталога сборки содержало pid, а в своих контейнерах
+    оба агента — процесс номер 7. Пути совпадали, и один сносил недостроенное
+    окружение другого. Ни одно из двух сообщений на настоящую причину не
+    указывало.
+    """
+    shared = tmp_path / "envs"
+    first, second = EnvironmentCache(shared), EnvironmentCache(shared)
+    spec = EnvSpec(kind="python")
+
+    started, hurt = threading.Barrier(2), []
+
+    def build(cache):
+        started.wait(timeout=10)
+        try:
+            cache.acquire(spec)
+        except Exception as exc:      # noqa: BLE001 — интересен любой отказ
+            hurt.append(exc)
+
+    threads = [threading.Thread(target=build, args=(c,)) for c in (first, second)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=180)
+
+    assert not hurt, f"агенты помешали друг другу: {hurt}"
+    assert cache_ready(first, spec) and cache_ready(second, spec)
+
+
+def cache_ready(cache, spec):
+    ready = cache._ready(spec.fingerprint())
+    return ready is not None and (ready.path / ".loom-env.json").is_file()
+
+
+def test_каталоги_сборки_не_совпадают_у_разных_процессов(tmp_path, monkeypatch):
+    """Уникальность не должна держаться на pid: он повторяется между
+    контейнерами."""
+    cache = EnvironmentCache(tmp_path / "envs")
+    seen = set()
+    real = cache_mod.python_env.build
+
+    def note(target, requirements):
+        seen.add(target.name)
+        real(target, requirements)
+
+    monkeypatch.setattr(cache_mod.python_env, "build", note)
+    for suffix in ("a", "b", "c"):
+        cache.acquire(EnvSpec(kind="python", requirements=(suffix,) if False else ()))
+        cache.release(EnvSpec(kind="python").fingerprint())
+        # каждый раз с нуля, чтобы сборка действительно происходила
+        shutil.rmtree(cache.root / EnvSpec(kind="python").fingerprint(), ignore_errors=True)
+    assert len(seen) == 3, f"имена каталогов повторились: {seen}"
+
+
+def test_свежую_чужую_сборку_не_подметают(tmp_path):
+    """Том общий: подметание по одному лишь префиксу снесло бы то, что прямо
+    сейчас собирает сосед."""
+    root = tmp_path / "envs"
+    root.mkdir()
+    fresh = root / ".building-python-abc-собирается"
+    fresh.mkdir()
+    stale = root / ".building-python-abc-брошено"
+    stale.mkdir()
+    import os as _os
+
+    old = time.time() - cache_mod.STALE_BUILD_S - 60
+    _os.utime(stale, (old, old))
+
+    EnvironmentCache(root)
+    assert fresh.exists(), "снесли чужую живую сборку"
+    assert not stale.exists(), "брошенное осталось лежать"
+
+
+# ------------------------------------------------- колесо под драйвер узла
+def test_колесо_torch_выбирается_под_драйвер_узла():
+    """Симптом со стенда: pip поставил torch под свежую CUDA, и он упал при
+    первом обращении к карте — "The NVIDIA driver on your system is too old
+    (found version 12040)". Сообщение не говорит ни что делать, ни кто виноват.
+
+    Выбирает узел, а не оркестратор: тот говорит, ЧТО нужно, а какое колесо
+    подходит этому железу, знает только само железо.
+    """
+    from unittest import mock
+
+    from loom_agent.tasks.env.python import _wheel_source
+
+    with mock.patch("loom_agent.hwinfo.cuda_driver_version", return_value=(12, 4)):
+        assert _wheel_source(["torch"])[-1].endswith("/cu124")
+    with mock.patch("loom_agent.hwinfo.cuda_driver_version", return_value=(12, 8)):
+        assert _wheel_source(["torch"])[-1].endswith("/cu128")
+
+
+def test_без_карты_берутся_cpu_колёса():
+    """Гигабайты CUDA на машине без NVIDIA — трафик владельца впустую."""
+    from unittest import mock
+
+    from loom_agent.tasks.env.python import _wheel_source
+
+    with mock.patch("loom_agent.hwinfo.cuda_driver_version", return_value=None):
+        assert _wheel_source(["torch"])[-1].endswith("/cpu")
+
+
+def test_окружение_без_torch_не_трогает_индекс():
+    from loom_agent.tasks.env.python import _wheel_source
+
+    assert _wheel_source(["numpy", "pillow"]) == []
+    assert _wheel_source(["torchmetrics"]) == [], "torchmetrics — это не torch"
+
+
+def test_смена_драйвера_даёт_новое_окружение(tmp_path):
+    """Иначе узел переиспользовал бы кэш, собранный под старые условия, и падал
+    бы ровно так же — включая случай, когда мы починили сам выбор колеса."""
+    from unittest import mock
+
+    cache = EnvironmentCache(tmp_path / "envs")
+    spec = EnvSpec(kind="python", requirements=("torch",))
+    with mock.patch("loom_agent.hwinfo.cuda_driver_version", return_value=(12, 4)):
+        old = cache._key(spec)
+    with mock.patch("loom_agent.hwinfo.cuda_driver_version", return_value=(12, 8)):
+        new = cache._key(spec)
+    assert old != new
+    assert old.endswith("-cu124") and new.endswith("-cu128")

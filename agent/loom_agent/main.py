@@ -27,7 +27,7 @@ from loom_agent import __version__
 from loom_agent.config import Config, parse_args
 from loom_agent.control.client import ControlClient
 from loom_agent.control.handlers import CommandHandlers
-from loom_agent.hwinfo import detect_hardware, free_vram_bytes
+from loom_agent.hwinfo import cuda_driver_version, detect_hardware, free_vram_bytes
 from loom_agent.identity import BadJoinKey, default_node_id, parse_join_key
 from loom_agent.p2p.layer import PeerLayer
 from loom_agent.tasks.env import EnvironmentCache
@@ -56,6 +56,7 @@ def hardware_message() -> agent_pb2.Hardware:
     of NVML / torch / nvidia-smi / sysctl actually answered.
     """
     hw = detect_hardware()
+    driver = cuda_driver_version()
     logger.info(
         "hardware: device=%s gpu=%s x%d vram_free=%.1fGB tflops=%.1f (%s)",
         hw.device, hw.gpu_name, hw.num_gpus,
@@ -72,6 +73,7 @@ def hardware_message() -> agent_pb2.Hardware:
         vram_total_bytes=hw.vram_total_bytes,
         host_ram_gb=hw.host_ram_gb,
         detection_source=hw.detection_source,
+        cuda_version=f"{driver[0]}.{driver[1]}" if driver else "",
     )
 
 
@@ -226,7 +228,9 @@ class Agent:
         self.commands.start()
         threading.Thread(target=self._heartbeat_loop, name="heartbeat", daemon=True).start()
         self.client.run_forever()
-        return 0
+        # Ненулевой код здесь означает «остановился ради обновления», а не
+        # поломку: пусковой слой не должен считать это падением.
+        return self.updater.exit_code
 
     def stop(self) -> None:
         self._stop.set()
