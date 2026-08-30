@@ -90,3 +90,29 @@ def test_настоящая_модель_читается_с_huggingface():
     assert info.num_layers == 36
     assert info.hidden_size == 4096
     assert "Qwen3" in info.architecture
+
+
+def test_код_стадии_находится_и_в_установленном_пакете(tmp_path, monkeypatch):
+    """В образе оркестратор живёт в site-packages, где никакого payloads/ рядом нет.
+
+    Симптом со стенда: деплой отказал с путём
+    /usr/local/lib/python3.12/payloads/... — путь считался от исходников и
+    установку не пережил.
+    """
+    where = tmp_path / "payloads" / "loom_stage" / "loom_stage"
+    where.mkdir(parents=True)
+    (where / "server.py").write_text("# стадия\n")
+    (where / "loader.py").write_text("# загрузчик\n")
+    monkeypatch.setenv("LOOM_PAYLOADS_DIR", str(tmp_path / "payloads"))
+    payload = stage_payload()
+    assert set(payload) == {"loom_stage/server.py", "loom_stage/loader.py"}
+
+
+def test_отсутствие_стадии_называет_где_искали(tmp_path, monkeypatch):
+    monkeypatch.setenv("LOOM_PAYLOADS_DIR", str(tmp_path / "нет-такого"))
+    monkeypatch.setattr("loom.orchestrator.models._payload_dirs",
+                        lambda: iter([tmp_path / "нет-такого"]))
+    with pytest.raises(ModelError) as exc:
+        stage_payload()
+    assert "Искали в" in str(exc.value)
+    assert "LOOM_PAYLOADS_DIR" in str(exc.value)
