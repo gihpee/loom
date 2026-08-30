@@ -10,9 +10,16 @@ from __future__ import annotations
 
 import json
 import os
+import time
 import threading
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+# Сколько секунд «грузить веса» перед тем, как объявить себя готовой.
+# Настоящая стадия делает это минутами; здесь — чтобы проверить, что до
+# готовности запросы не отдают.
+WARMUP_S = float(os.environ.get("STAGE_WARMUP_S", "0"))
+STARTED = time.monotonic()
 
 RANK = int(os.environ.get("LOOM_RANK", "0"))
 SIZE = int(os.environ.get("LOOM_GROUP_SIZE", "1"))
@@ -51,6 +58,16 @@ class Handler(BaseHTTPRequestHandler):
             send_on(1, {"id": payload["id"], "text": payload["text"], "hops": [RANK]})
 
     def do_GET(self):
+        if self.path == "/health":
+            ready = time.monotonic() - STARTED >= WARMUP_S
+            self.send_response(200 if ready else 503)
+            body = json.dumps({"status": "ok" if ready else "loading",
+                               "stage": RANK, "layers": [0, 1]}).encode()
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if self.path.startswith("/answer/"):
             key = self.path.rsplit("/", 1)[1]
             if key in answers:

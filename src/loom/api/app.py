@@ -51,10 +51,13 @@ def create_app(*, agents=None, releases=None, keystore=None, config=None,
         """What is up and answering, by the name a client would ask for."""
         if agents is None:
             return {"object": "list", "data": []}
-        served = {g.label for g in agents.groups.values()
-                  if g.label and agents.group_for(g.label) is not None}
-        return {"object": "list",
-                "data": [{"id": name, "object": "model"} for name in sorted(served)]}
+        served = []
+        for label in sorted({g.label for g in agents.groups.values() if g.label}):
+            # Именно «отвечает», а не «процесс запущен»: список моделей — это
+            # обещание клиенту, и оно не должно опережать загрузку весов.
+            if await agents.serving(label) is not None:
+                served.append({"id": label, "object": "model"})
+        return {"object": "list", "data": served}
 
     @app.post("/v1/chat/completions")
     async def chat(request: Request):
@@ -74,8 +77,11 @@ def create_app(*, agents=None, releases=None, keystore=None, config=None,
         model = (body.get("model") or "").strip()
         if not model:
             return _error(400, "нужно поле 'model'")
-        group = agents.group_for(model)
+        group = await agents.serving(model)
         if group is None:
+            placed = agents.group_for(model)
+            if placed is not None:
+                return _error(503, f"{model} ещё поднимается: стадии загружают веса")
             return _error(404, f"{model!r} сейчас никто не обслуживает")
 
         head = group.tasks[0]

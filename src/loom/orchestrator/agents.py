@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -212,6 +213,9 @@ class AgentHub:
         self.sessions: Dict[str, AgentSession] = {}
         self.tasks: Dict[str, TaskRecord] = {}
         self.groups: Dict[str, GroupRecord] = {}
+        # Группы, чьи стадии уже доложили о готовности. Загруженная стадия не
+        # разгружается, так что проверять повторно незачем.
+        self._ready_groups: set = set()
         # Replies a caller is waiting for, by command id. A node that never
         # answers leaves a future nobody resolves, which is why every wait has
         # a timeout.
@@ -504,10 +508,14 @@ class AgentHub:
         return chosen
 
     def group_for(self, label: str) -> Optional[GroupRecord]:
-        """A group serving this name, if one is up.
+        """Группа, обслуживающая это имя — та, что ЗАПУЩЕНА.
 
-        Newest first: redeploying a model leaves the old group draining for a
-        while, and a request should go to what was deployed last.
+        Запущена не значит готова: процесс слушает за минуты до того, как
+        веса окажутся в памяти. Готовность спрашивают отдельно — see
+        `serving()`; здесь только выбор среди кандидатов.
+
+        Свежайшая первой: передеплой оставляет старую группу дослуживать, и
+        запрос должен идти в то, что развернули последним.
         """
         candidates = [g for g in self.groups.values() if g.label == label]
         for record in sorted(candidates, key=lambda g: g.submitted_at, reverse=True):
@@ -516,10 +524,42 @@ class AgentHub:
                 return record
         return None
 
+    async def serving(self, label: str) -> Optional[GroupRecord]:
+        """Группа, которая реально ОТВЕЧАЕТ.
+
+        Состояние задачи говорит только о процессе. Стадия сообщает о своей
+        готовности сама, и спрашивать надо её: иначе запрос уходит в стадию,
+        которая ещё качает веса, и падает через минуту после того, как панель
+        показала «отвечает».
+
+        Спрашивается один раз: загруженная стадия не разгружается обратно, так
+        что в установившемся режиме это ничего не стоит.
+        """
+        record = self.group_for(label)
+        if record is None:
+            return None
+        if record.group_id in self._ready_groups:
+            return record
+        try:
+            status, _headers, body = await self.request(
+                record.tasks[0], path="/health", timeout_s=15)
+        except AgentError:
+            return None
+        if status != 200:
+            return None
+        try:
+            if json.loads(body).get("status") != "ok":
+                return None
+        except ValueError:
+            return None
+        self._ready_groups.add(record.group_id)
+        return record
+
     def stop_group(self, group_id: str, *, reason: str = "cancelled") -> GroupRecord:
         record = self.groups.get(group_id)
         if record is None:
             raise AgentError(f"no group {group_id!r}")
+        self._ready_groups.discard(group_id)
         for task_id in record.tasks.values():
             try:
                 self.stop(task_id, reason=reason)

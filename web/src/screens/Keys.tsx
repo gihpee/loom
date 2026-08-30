@@ -102,8 +102,8 @@ export function Keys() {
           </div>
         }>
           <div className="form-grid two">
-            <Field label="Метка" hint="чья машина — видно только вам">
-              <input type="text" autoFocus value={label} placeholder="машина Миши"
+            <Field label="Метка" hint="видно только вам">
+              <input type="text" autoFocus value={label} placeholder="машина 1"
                      onChange={(e) => setLabel(e.target.value)} />
             </Field>
             <Field label="Лимит узлов" hint="0 — без лимита">

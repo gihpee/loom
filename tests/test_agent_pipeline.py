@@ -195,3 +195,50 @@ def ask(orchestrator, group, text: str, timeout: float = 60.0) -> dict:
             return answer
         time.sleep(0.2)
     pytest.fail("the message never came back round the pipeline")
+
+
+def test_модель_не_считается_отвечающей_пока_грузит_веса(two_nodes, monkeypatch):
+    """Симптом со стенда: панель показала «отвечает», запрос ушёл в стадию,
+    которая ещё качала веса, и упал на KeyError: 'executor' — ошибке, из
+    которой ничего не следует.
+
+    Состояние задачи говорит только о процессе: он слушает за минуты до того,
+    как веса окажутся в памяти.
+    """
+    port = free_port()
+    group = two_nodes.hub.submit_group(
+        size=2, command=[sys.executable, STAGE], serve_port=port, timeout_s=120,
+        node_ids=["node-0", "node-1"], label="warming",
+        env={"STAGE_WARMUP_S": "6"},
+    )
+    for rank in range(2):
+        two_nodes.wait_state(group.tasks[rank], "running", timeout=60)
+
+    # Процесс запущен — но группа ещё не обслуживает.
+    assert two_nodes.hub.group_for("warming") is not None, "группа размещена"
+    assert two_nodes.call(two_nodes.hub.serving("warming")) is None, \
+        "модель объявлена отвечающей, пока стадии грузят веса"
+
+    deadline = time.time() + 40
+    while time.time() < deadline:
+        if two_nodes.call(two_nodes.hub.serving("warming")) is not None:
+            return
+        time.sleep(1)
+    pytest.fail("стадия так и не доложила о готовности")
+
+
+def test_готовность_спрашивается_один_раз(two_nodes):
+    """Загруженная стадия не разгружается обратно, так что в установившемся
+    режиме проверка не должна стоить ничего."""
+    group, _port = start_pipeline(two_nodes)
+    deadline = time.time() + 40
+    while time.time() < deadline:
+        if two_nodes.call(two_nodes.hub.serving("warming2")) is not None:
+            break
+        if two_nodes.hub.groups.get(group.group_id):
+            break
+        time.sleep(0.5)
+    # Группа из start_pipeline без label; проверяем сам механизм запоминания.
+    two_nodes.hub._ready_groups.add(group.group_id)
+    two_nodes.hub.groups[group.group_id].label = "cached"
+    assert two_nodes.call(two_nodes.hub.serving("cached")) is not None

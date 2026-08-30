@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { ReactNode, useEffect, useRef, useState } from "react";
 import { get, message, send } from "../lib/api";
 import { gb } from "../lib/format";
 import type { Group, GroupHealth, Node, StageHealth } from "../lib/types";
@@ -187,19 +187,49 @@ function Deploy({ nodes, onClose, onDone }: {
   );
 }
 
+interface Usage { prompt_tokens: number; completion_tokens: number }
+interface Timings {
+  ttft_ms: number; total_ms: number; decode_ms: number;
+  decode_tokens_per_s: number; tokens_per_s: number;
+  inter_token_ms_p50: number; inter_token_ms_p95: number; inter_token_ms_max: number;
+  stages: number;
+}
+
+function Metric({ label, value, unit }: { label: string; value: ReactNode; unit?: string }) {
+  return (
+    <div>
+      <div style={{ color: "var(--text-mute)", fontSize: 11, textTransform: "uppercase",
+                    letterSpacing: ".05em" }}>{label}</div>
+      <div className="num" style={{ fontSize: 17, fontWeight: 600, marginTop: 2 }}>
+        {value}{unit && <small style={{ fontSize: 12, color: "var(--text-mute)",
+                                        fontWeight: 400 }}> {unit}</small>}
+      </div>
+    </div>
+  );
+}
+
 function Chat({ model }: { model: string }) {
+  const toast = useToast();
   const [prompt, setPrompt] = useState("");
   const [maxTokens, setMaxTokens] = useState("128");
   const [text, setText] = useState("");
-  const [stats, setStats] = useState("");
   const [busy, setBusy] = useState(false);
+  const [usage, setUsage] = useState<Usage | null>(null);
+  const [timings, setTimings] = useState<Timings | null>(null);
+  const [live, setLive] = useState<{ pieces: number; first: number | null; elapsed: number }>(
+    { pieces: 0, first: null, elapsed: 0 });
+  const [events, setEvents] = useState<unknown[]>([]);
   const box = useRef<HTMLPreElement>(null);
 
   const ask = async () => {
     if (!model || !prompt || busy) return;
-    setBusy(true); setText(""); setStats("");
+    setBusy(true); setText(""); setUsage(null); setTimings(null); setEvents([]);
+    setLive({ pieces: 0, first: null, elapsed: 0 });
     const began = Date.now();
+    const collected: unknown[] = [];
     let first: number | null = null, pieces = 0, acc = "";
+    const ticker = setInterval(
+      () => setLive((s) => ({ ...s, elapsed: (Date.now() - began) / 1000 })), 100);
     try {
       const r = await fetch("/v1/chat/completions", {
         method: "POST", headers: { "Content-Type": "application/json" },
@@ -220,34 +250,60 @@ function Chat({ model }: { model: string }) {
         if (done) break;
         buffer += decoder.decode(value, { stream: true });
         // SSE: события разделены пустой строкой, последнее может быть неполным.
-        const events = buffer.split("\n\n");
-        buffer = events.pop() ?? "";
-        for (const event of events) {
-          const line = event.split("\n").find((l) => l.startsWith("data: "));
+        const chunks = buffer.split("\n\n");
+        buffer = chunks.pop() ?? "";
+        for (const chunk of chunks) {
+          const line = chunk.split("\n").find((l) => l.startsWith("data: "));
           if (!line) continue;
           const raw = line.slice(6).trim();
           if (raw === "[DONE]") continue;
           let parsed: any;
           try { parsed = JSON.parse(raw); } catch { continue; }
-          if (parsed.error) { acc += `\n[${parsed.error.message}]`; setText(acc); continue; }
+          collected.push(parsed);
+          if (parsed.error) {
+            // Стадия шлёт ошибку строкой; клиентские — объектом. Раньше
+            // читалось только второе, и в окне появлялось «[undefined]».
+            const what = typeof parsed.error === "string"
+              ? parsed.error : parsed.error.message ?? JSON.stringify(parsed.error);
+            acc += (acc ? "\n\n" : "") + `[${what}]`;
+            setText(acc);
+            continue;
+          }
+          if (parsed.usage) setUsage(parsed.usage);
+          if (parsed.timings) setTimings(parsed.timings);
           const piece = parsed.choices?.[0]?.delta?.content ?? "";
           if (piece) {
-            if (first === null) first = (Date.now() - began) / 1000;
-            pieces += 1; acc += piece; setText(acc);
+            if (first === null) { first = (Date.now() - began) / 1000; }
+            pieces += 1; acc += piece;
+            setText(acc);
+            setLive({ pieces, first, elapsed: (Date.now() - began) / 1000 });
             box.current?.scrollTo({ top: box.current.scrollHeight });
           }
         }
       }
-      const total = (Date.now() - began) / 1000;
-      setStats(`${total.toFixed(1)}s` +
-        (first !== null ? ` · первый токен ${first.toFixed(1)}s` : "") +
-        (pieces ? ` · ${(pieces / total).toFixed(1)} кусков/с` : ""));
+      setEvents(collected);
     } catch (e) {
       setText((prev) => prev + (prev ? "\n\n" : "") + message(e));
     } finally {
+      clearInterval(ticker);
+      setLive((s) => ({ ...s, elapsed: (Date.now() - began) / 1000 }));
       setBusy(false);
     }
   };
+
+  const save = () => {
+    const body = JSON.stringify(
+      { model, prompt, text, usage, timings, events }, null, 2);
+    const url = URL.createObjectURL(new Blob([body], { type: "application/json" }));
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${model}-${new Date().toISOString().slice(0, 19)}.json`;
+    document.body.appendChild(a); a.click(); a.remove();
+    URL.revokeObjectURL(url);
+  };
+
+  const perSecond = timings?.decode_tokens_per_s
+    ?? (live.pieces && live.elapsed ? live.pieces / live.elapsed : 0);
 
   return (
     <div className="card">
@@ -269,8 +325,44 @@ function Chat({ model }: { model: string }) {
           {busy ? "генерация…" : "спросить"}
         </Button>
       </div>
-      <pre className="block tall" ref={box}>{text || "ответ появится здесь, потоком"}</pre>
-      {stats && <div className="sub">{stats}</div>}
+
+      <pre className="block tall" ref={box}>{text || "ответ появится здесь, стримом"}</pre>
+
+      {(busy || live.pieces > 0 || timings) && (
+        <div style={{
+          display: "grid", gap: 16, marginTop: 14, padding: "14px 0 0",
+          borderTop: "1px solid var(--line-soft)",
+          gridTemplateColumns: "repeat(auto-fit, minmax(112px, 1fr))",
+        }}>
+          <Metric label="время" value={(timings ? timings.total_ms / 1000 : live.elapsed)
+            .toFixed(1)} unit="s" />
+          <Metric label="первый токен"
+                  value={timings ? (timings.ttft_ms / 1000).toFixed(2)
+                                 : live.first?.toFixed(2) ?? "—"} unit="s" />
+          <Metric label="скорость" value={perSecond ? perSecond.toFixed(1) : "—"}
+                  unit="tok/s" />
+          <Metric label="токенов"
+                  value={usage?.completion_tokens ?? live.pieces} />
+          {timings && <Metric label="между токенами"
+                              value={timings.inter_token_ms_p50.toFixed(0)} unit="ms p50" />}
+          {timings && <Metric label="худший разрыв"
+                              value={timings.inter_token_ms_max.toFixed(0)} unit="ms" />}
+          {timings && <Metric label="стадий" value={timings.stages} />}
+          {usage && <Metric label="промпт" value={usage.prompt_tokens} unit="tok" />}
+        </div>
+      )}
+
+      {(text || events.length > 0) && !busy && (
+        <div style={{ display: "flex", gap: 8, marginTop: 14 }}>
+          <Button size="sm" onClick={() => {
+            navigator.clipboard.writeText(text); toast("ok", "ответ скопирован");
+          }}>копировать ответ</Button>
+          <Button size="sm" onClick={save}>скачать JSON</Button>
+          <span className="sub" style={{ margin: "auto 0 auto 0" }}>
+            {events.length} событий в потоке
+          </span>
+        </div>
+      )}
     </div>
   );
 }

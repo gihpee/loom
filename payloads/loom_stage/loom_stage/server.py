@@ -728,6 +728,15 @@ class Handler(BaseHTTPRequestHandler):
             if not STATE["topology"]["is_first"]:
                 self._json(404, {"error": "not the head stage"})
                 return
+            if not STATE.get("ready"):
+                # Веса грузятся минутами, и всё это время процесс уже слушает.
+                # Без этой проверки запрос доходил до генерации и падал на
+                # KeyError: 'executor' — ошибке, которая ничего не объясняет.
+                self._json(503, {"error": {
+                    "message": "стадия ещё загружает веса",
+                    "type": "loading",
+                }})
+                return
             self._chat(payload)
             return
 
