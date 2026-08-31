@@ -173,3 +173,25 @@ def test_узлы_подбираются_по_связности(two_nodes, monk
     answer = client(two_nodes.hub).post("/admin/ray", json={"size": 1})
     assert answer.status_code == 200, answer.text
     assert answer.json()["nodes"] == [nodes[1].node.node_id]
+
+
+def test_узел_названный_дважды_получает_два_ранга(two_nodes):
+    """На что опирается форма: собрать кластер там, где сеть между рангами не
+    нужна вовсе. Соседи оказываются локальными, проброс не включается."""
+    hub = two_nodes.hub
+    answer = client(hub).post("/admin/ray", json={
+        "node_ids": ["node-0", "node-0"], "label": "вдвоём-на-одном"})
+    assert answer.status_code == 200, answer.text
+    body = answer.json()
+    assert body["size"] == 2
+    assert body["nodes"] == ["node-0", "node-0"]
+    # Связность тут ни при чём: узел с самим собой встречается всегда.
+    assert body["path"] == "direct"
+
+    record = hub.groups[body["group_id"]]
+    assert set(record.nodes.values()) == {"node-0"}
+    assert len(record.tasks) == 2
+    # Оба ранга получают одну команду: свой номер задача берёт из окружения.
+    assert (hub.tasks[record.tasks[0]].command[:3]
+            == hub.tasks[record.tasks[1]].command[:3]
+            == ["python", "-m", "loom_ray.server"])

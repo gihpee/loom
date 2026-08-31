@@ -94,3 +94,19 @@ def test_длинный_список_пар_сокращается():
     why = verdict(nodes, relay_available=False)["why"]
     assert "и ещё" in why
     assert len(pairs_needing_relay(nodes)) == 15
+
+
+def test_узел_всегда_сходится_сам_с_собой():
+    """Два ранга на одной машине разговаривают по настоящему локалхосту —
+    сеть между ними не участвует вовсе. Единственная конфигурация, которой
+    связность не нужна в принципе, не должна отвергаться из-за NAT."""
+    глухой = node("nv3-a", symmetric_nat=True)
+    assert pairs_needing_relay([глухой, глухой]) == []
+    assert verdict([глухой, глухой], relay_available=False)["ok"]
+
+
+def test_разные_узлы_за_симметричным_nat_всё_ещё_не_сходятся():
+    """Оговорка про себя не должна отменять само правило."""
+    a = node("nv3-a", symmetric_nat=True)
+    b = node("nv3-b", symmetric_nat=True)
+    assert pairs_needing_relay([a, b]) == [("nv3-a", "nv3-b")]

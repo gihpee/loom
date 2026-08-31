@@ -63,10 +63,19 @@ def prefer_meshy(nodes: Sequence[dict]) -> List[dict]:
 
 
 def pairs_needing_relay(nodes: Sequence[dict]) -> List[tuple]:
-    """Пары, которым без реле не встретиться. Пусто — значит сойдутся сами."""
+    """Пары, которым без реле не встретиться. Пусто — значит сойдутся сами.
+
+    Узел с самим собой — не пара: два ранга на одной машине разговаривают по
+    настоящему локалхосту, и сеть между ними не участвует вовсе. Без этой
+    оговорки узел за симметричным NAT «не мог соединиться сам с собой», и
+    группа из двух рангов на нём отвергалась — при том, что это единственная
+    конфигурация, которой связность не нужна в принципе.
+    """
     stuck = []
     for i, a in enumerate(nodes):
         for b in nodes[i + 1:]:
+            if a.get("node_id") and a.get("node_id") == b.get("node_id"):
+                continue
             if not can_meet(a, b):
                 stuck.append((a.get("node_id", ""), b.get("node_id", "")))
     return stuck

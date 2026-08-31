@@ -177,10 +177,14 @@ export function Ray() {
     reader.readAsDataURL(file);
   };
 
+  const count = Math.max(1, Number(size) || 1);
+
   const launch = () => action.run(async () => {
     await send("/admin/ray", "POST", {
-      node_ids: node ? [node] : [],
-      size: node ? undefined : Number(size) || 1,
+      // Узел, названный дважды, получает два ранга. Это не трюк, а способ
+      // собрать кластер там, где сеть между рангами не нужна вовсе.
+      node_ids: node ? Array(count).fill(node) : [],
+      size: node ? undefined : count,
       script: script || undefined,
       label: label || undefined,
       ray_version: version || undefined,
@@ -218,11 +222,10 @@ export function Ray() {
                 ))}
               </select>
             </Field>
-            <Field label="узлов"
-                   hint={node ? "узел выбран вручную" : `доступно ${free.length}`}>
-              <input type="number" min={1} max={Math.max(1, free.length)}
-                     value={node ? 1 : size} disabled={!!node}
-                     onChange={(e) => setSize(e.target.value)} />
+            <Field label={node ? "рангов на узле" : "узлов"}
+                   hint={node ? "все на одной машине" : `доступно ${free.length}`}>
+              <input type="number" min={1} max={node ? 8 : Math.max(1, free.length)}
+                     value={size} onChange={(e) => setSize(e.target.value)} />
             </Field>
             <Field label="метка" hint="чтобы найти его потом">
               <input value={label} onChange={(e) => setLabel(e.target.value)}
@@ -245,7 +248,10 @@ export function Ray() {
               поднять кластер
             </Button>
             <span className="sub" style={{ margin: 0 }}>
-              {awkward.length > 0
+              {node && count > 1
+                ? "все ранги на одном узле: разговаривают по локалхосту, "
+                  + "сеть между ними не участвует вовсе"
+                : awkward.length > 0
                 ? `${awkward.length} из ${free.length} узлов за симметричным NAT: `
                   + "с ними кластер пойдёт через реле"
                 : "ранги находят друг друга через агента: порты соседей он "
