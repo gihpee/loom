@@ -423,3 +423,47 @@ def test_сокет_предшественника_не_мешает_следу�
     second = registry.submit(spec("t25", [sys.executable, "-c", bind]))
     assert second.wait(timeout=30)
     assert second.state == "done", second.logs()
+
+
+# ------------------------------------------------------ порт для служащей задачи
+def test_задаче_не_выдают_привилегированный_порт(registry):
+    """Со стенда: оркестратор шлёт serve_port=1 как «да, служи», агент —
+    root, и `bind(1)` у него проходит. Номер уезжал задаче, а та работает
+    под обычным пользователем и падала на
+
+        PermissionError: [Errno 13] Permission denied
+
+    — ошибке, которая не называет ни порт, ни того, кто его выбрал.
+    """
+    from loom_agent.tasks.registry import PRIVILEGED_PORTS, _free_port
+
+    for hint in (1, 80, 443, 1023):
+        assert _free_port(hint) >= PRIVILEGED_PORTS, f"выдал {hint}"
+
+
+def test_свободный_обычный_порт_отдают_как_просили(registry):
+    """Отбрасываются только привилегированные: в остальном подсказка узла —
+    это способ рангам договориться, не спрашивая никого."""
+    import socket
+
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        wanted = probe.getsockname()[1]
+    from loom_agent.tasks.registry import _free_port
+
+    assert _free_port(wanted) == wanted
+
+
+def test_служащая_задача_получает_рабочий_порт(registry):
+    """Сквозь весь путь: то, что попадёт в LOOM_SERVE_PORT, должно
+    биндиться из-под задачи."""
+    program = (
+        "import os, socket;"
+        "s = socket.socket();"
+        "s.bind(('127.0.0.1', int(os.environ['LOOM_SERVE_PORT'])));"
+        "print('занял', os.environ['LOOM_SERVE_PORT'])"
+    )
+    task = registry.submit(spec("t26", [sys.executable, "-c", program], serve_port=1))
+    assert task.wait(timeout=30)
+    assert task.state == "done", task.logs()
+    assert "занял" in task.logs()

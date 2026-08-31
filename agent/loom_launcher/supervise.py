@@ -44,6 +44,17 @@ FAILURES_BEFORE_ROLLBACK = 3
 UPDATE_EXIT_CODE = 70
 
 
+def _why_updates_are_off() -> str:
+    """Пусто, если обновления возможны."""
+    from loom_launcher.signature import public_key_bytes
+
+    if public_key_bytes() is not None:
+        return ""
+    return ("в образе этого узла нет ключа релизов, проверить подпись нечем — "
+            "обновления по сети выключены. Лечится только пересборкой образа "
+            "с ключом и docker pull на узле")
+
+
 class Supervisor:
     def __init__(self, payload: Payload, agent_args: List[str]) -> None:
         self.payload = payload
@@ -129,6 +140,12 @@ class Supervisor:
         # fast exits is what triggers a rollback.
         env["LOOM_AGENT_HEALTH_FILE"] = str(payload_mod.health_marker(self.payload.version))
         env["LOOM_AGENT_INCOMING"] = str(payload_mod.incoming_dir())
+        # Образ без ключа не примет ни одного релиза. Сказать об этом агенту
+        # сейчас — значит увидеть причину в панели; промолчать — значит
+        # смотреть, как узел качает, сливается и перезапускается по кругу.
+        blocked = _why_updates_are_off()
+        if blocked:
+            env["LOOM_UPDATES_DISABLED"] = blocked
         argv = [sys.executable, "-m", "loom_agent.main", *self.agent_args]
         self._proc = subprocess.Popen(argv, env=env, start_new_session=True)
         try:

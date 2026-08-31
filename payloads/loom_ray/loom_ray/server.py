@@ -111,8 +111,20 @@ def ask_forwarding(size: int) -> dict:
 
 def serve_health(port: int) -> ThreadingHTTPServer:
     """Поднять /health ДО того, как начнём собирать кластер: иначе минуты
-    сборки снаружи неотличимы от зависшей задачи."""
-    server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+    сборки снаружи неотличимы от зависшей задачи.
+
+    Предложенный номер — предложение, а не приказ: между ним и нашим bind его
+    мог занять кто угодно, а привилегированный мы и вовсе не займём. Свой
+    выбор сообщаем агенту, иначе он будет стучаться не туда.
+    """
+    for candidate in (port, 0):
+        try:
+            server = ThreadingHTTPServer(("127.0.0.1", candidate), Handler)
+            break
+        except OSError as exc:
+            logger.warning("порт %s занять не вышло (%s)", candidate, exc)
+    else:
+        raise SystemExit("нет порта, на котором можно отвечать")
     threading.Thread(target=server.serve_forever, name="health", daemon=True).start()
     announce(server.server_address[1])
     return server

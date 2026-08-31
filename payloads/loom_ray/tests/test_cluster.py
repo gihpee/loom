@@ -174,3 +174,37 @@ def test_пока_кластер_не_собран_ранг_говорит_чт�
         pytest.fail("/health не отвечал вовсе")
     finally:
         _end(alone)
+
+
+@pytest.mark.slow
+def test_ранг_переживает_негодный_номер_порта(tmp_path):
+    """Со стенда: оркестратор шлёт serve_port=1 как «да, служи», и ранг падал
+    на `Permission denied` через секунду после старта — порт ниже 1024 задаче
+    не занять, она работает не под root.
+
+    Предложенный номер — предложение: свой выбор ранг сообщает агенту сам.
+    """
+    out = tmp_path / "out"
+    out.mkdir()
+    scratch = Path("/tmp") / f"loom-ray-test-{os.getpid()}-priv"
+    scratch.mkdir(parents=True, exist_ok=True)
+    env = dict(
+        os.environ, LOOM_RANK="0", LOOM_GROUP_SIZE="1",
+        LOOM_TASK_ID="privileged", LOOM_TASK_OUT=str(out),
+        LOOM_TASK_TMP=str(scratch),
+        LOOM_RAY_PORT_BASE=str(BASE + 500), LOOM_RAY_PORT_STRIDE=str(STRIDE),
+        RAY_ENABLE_WINDOWS_OR_OSX_CLUSTER="1",
+    )
+    alone = subprocess.Popen(
+        [sys.executable, "-m", "loom_ray.server", "--size", "1", "--rank", "0",
+         "--serve-port", "1", "--gpus", "0"],
+        env=env, cwd=str(tmp_path), start_new_session=True)
+    try:
+        # Раньше умирал меньше чем за секунду. Живёт — значит выбрал другой порт.
+        deadline = time.time() + 45
+        while time.time() < deadline:
+            if alone.poll() is not None:
+                pytest.fail(f"упал с кодом {alone.returncode} вместо выбора порта")
+            time.sleep(1)
+    finally:
+        _end(alone)

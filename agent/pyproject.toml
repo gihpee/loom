@@ -31,3 +31,10 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 include = ["loom_launcher*", "loom_agent*"]
+
+# Ключ релизов — не код, и без этой строчки setuptools его в колесо не кладёт.
+# Лаунчер читает его рядом с собой, то есть уже из site-packages: файл,
+# оставшийся только в контексте сборки, для него не существует. Симптом —
+# образ, который собрался с ключом и отвергает каждое обновление.
+[tool.setuptools.package-data]
+loom_launcher = ["release_key.pub"]

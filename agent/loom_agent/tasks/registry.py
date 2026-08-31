@@ -27,17 +27,27 @@ from loom_agent.tasks.runner import Task
 from loom_agent.tasks.spec import TaskRefused, TaskSpec
 
 
+# Ниже этого порта биндить может только root. Агент — root, задача — нет.
+PRIVILEGED_PORTS = 1024
+
+
 def _free_port(hint: int) -> int:
-    """A port this node can actually bind.
+    """Порт, который сможет занять ЗАДАЧА, а не только мы.
 
     The orchestrator asks for a task to serve; it does not get to say on which
     port. Two agents on one machine — which is how a multi-GPU host is split —
     would otherwise be handed the same number and the second would fail to
     bind, in a way that looks like the task never started.
+
+    Привилегированные номера отбрасываются, не пробуя. Проверка идёт от имени
+    агента, а он root: `bind(1)` у него проходит, номер уезжает задаче, и та
+    падает на `Permission denied` — ошибке, которая не называет ни порт, ни
+    того, кто его выбрал. Оркестратор шлёт сюда единицу как «да, служи»,
+    так что это не редкий случай, а обычный.
     """
     import socket
 
-    for candidate in (hint, 0):
+    for candidate in ([hint, 0] if hint >= PRIVILEGED_PORTS else [0]):
         try:
             with socket.socket() as probe:
                 probe.bind(("127.0.0.1", candidate))

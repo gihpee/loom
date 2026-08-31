@@ -22,6 +22,7 @@ import shutil
 import threading
 import time
 import urllib.request
+import uuid
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -49,6 +50,16 @@ def health_file() -> Optional[Path]:
 def incoming_dir() -> Optional[Path]:
     raw = os.environ.get("LOOM_AGENT_INCOMING", "").strip()
     return Path(raw) if raw else None
+
+
+def updates_disabled() -> str:
+    """Почему этот узел не сможет поставить обновление, если не сможет.
+
+    Ставит пусковой слой: только он знает, есть ли в образе ключ, которым
+    проверяется подпись. Агент об этом узнаёт отсюда — иначе он качает релиз,
+    сливает задачи, перезапускается, получает отказ и начинает сначала.
+    """
+    return os.environ.get("LOOM_UPDATES_DISABLED", "").strip()
 
 
 def mark_healthy() -> None:
@@ -111,6 +122,15 @@ class Updater:
 
     def _carry_out(self, release: agent_pb2.AgentRelease) -> None:
         try:
+            off = updates_disabled()
+            if off:
+                # Качать то, что заведомо не поставится, — значит крутить
+                # бесконечный цикл «скачал, слил задачи, перезапустился,
+                # отказ» на чужой машине и её канале.
+                self.state = "refused"
+                self.last_refusal = off
+                logger.error("обновление до %s невозможно: %s", release.version, off)
+                return
             target = incoming_dir()
             if target is None:
                 # Started outside the launcher — in a test, or by hand. There
@@ -142,10 +162,12 @@ class Updater:
         try:
             target.mkdir(parents=True, exist_ok=True)
             archive = target / f"{release.version}.tar.gz"
-            # Свой файл на процесс: том может быть общим со вторым агентом на
-            # этой же машине, и в общий .part оба писали бы одновременно —
-            # кто переименовал первым, у второго файл исчезал.
-            partial = target / f".{release.version}.{os.getpid()}.part"
+            # uuid, НЕ pid: том бывает общим со вторым агентом на этой же
+            # машине, а в своих контейнерах оба — процесс номер 7. Совпавшее
+            # имя означало, что оба писали в один .part, и тот, кто переименовал
+            # вторым, падал с «No such file or directory» на файле, который
+            # только что был. Ровно та же ошибка уже ловилась в кэше окружений.
+            partial = target / f".{release.version}.{uuid.uuid4().hex[:12]}.part"
             with urllib.request.urlopen(release.url, timeout=DOWNLOAD_TIMEOUT_S) as source, \
                     open(partial, "wb") as sink:
                 shutil.copyfileobj(source, sink, 1024 * 1024)

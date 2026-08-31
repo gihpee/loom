@@ -10,6 +10,7 @@ import io
 import json
 import sys
 import tarfile
+import os
 import time
 from pathlib import Path
 
@@ -484,3 +485,78 @@ def test_версию_уже_поставленную_соседом_не_лом
     assert second is not None
     assert second.path == first.path
     assert marker.exists(), "распаковку соседа снесли и сделали заново"
+
+
+# ---------------------------------------------- образ без ключа релизов
+def test_узел_без_ключа_не_качает_то_что_не_поставит(tmp_path, monkeypatch):
+    """Со стенда: образ собран без ключа, релиз опубликован — и узел качал,
+    сливал задачи, перезапускался, получал отказ и начинал сначала. Круг на
+    чужой машине и её канале, из которого сам он выйти не мог."""
+    from loom_agent.proto import agent_pb2
+    from loom_agent.update import Updater
+
+    monkeypatch.setenv("LOOM_AGENT_INCOMING", str(tmp_path / "incoming"))
+    monkeypatch.setenv("LOOM_UPDATES_DISABLED", "в образе нет ключа релизов")
+    fetched, stopped = [], []
+    updater = Updater(current_version="0.1.0", drain=lambda _t: True,
+                      stop=lambda: stopped.append(True))
+    updater._download = lambda *a, **k: fetched.append(True) or True
+    updater.on_release(agent_pb2.AgentRelease(version="0.2.0", url="http://x/a.tar.gz"))
+
+    deadline = time.time() + 5
+    while time.time() < deadline and not updater.last_refusal:
+        time.sleep(0.05)
+    assert fetched == [], "качал релиз, который заведомо не поставится"
+    assert stopped == [], "перезапустил узел ради обновления, которого не будет"
+    assert updater.status().state == "refused"
+    assert "ключа релизов" in updater.status().error, \
+        "причина должна дойти до панели — там её и будут читать"
+
+
+def test_пусковой_слой_называет_причину_сам(monkeypatch, tmp_path):
+    """Знает про ключ только он: агент об этом узнаёт из окружения."""
+    from loom_launcher.supervise import _why_updates_are_off
+
+    monkeypatch.delenv("LOOM_RELEASE_PUBKEY", raising=False)
+    monkeypatch.setattr("loom_launcher.signature.KEY_FILE", tmp_path / "нет-ключа")
+    assert "нет ключа релизов" in _why_updates_are_off()
+
+    monkeypatch.setenv("LOOM_RELEASE_PUBKEY", "aa" * 32)
+    assert _why_updates_are_off() == ""
+
+
+def test_два_агента_на_одной_машине_не_делят_файл_загрузки(tmp_path, monkeypatch):
+    """Со стенда: оба в своих контейнерах — процесс номер 7, и .part у них
+    совпадал. Кто переименовал первым, у второго файл исчезал:
+
+        No such file or directory: '.0.2.0.7.part' -> '0.2.0.tar.gz'
+    """
+    from loom_agent.update import Updater
+
+    incoming = tmp_path / "incoming"
+    monkeypatch.setenv("LOOM_AGENT_INCOMING", str(incoming))
+    monkeypatch.delenv("LOOM_UPDATES_DISABLED", raising=False)
+    monkeypatch.setattr(os, "getpid", lambda: 7)   # как в контейнере
+
+    names = set()
+    real_replace = os.replace
+
+    def watch(src, dst):
+        names.add(os.path.basename(src))
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(os, "replace", watch)
+
+    class Release:
+        version, sha256, url = "0.2.0", "", "http://x/a.tar.gz"
+        signature = b""
+
+    for _ in range(2):
+        updater = Updater(current_version="0.1.0", drain=lambda _t: True,
+                          stop=lambda: None)
+        monkeypatch.setattr(
+            "urllib.request.urlopen",
+            lambda *a, **k: __import__("io").BytesIO(b"payload"))
+        assert updater._download(Release(), incoming), updater.last_refusal
+
+    assert len(names) == 2, f"оба процесса писали в один файл: {names}"
