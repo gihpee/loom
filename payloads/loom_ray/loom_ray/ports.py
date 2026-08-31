@@ -31,6 +31,9 @@ STRIDE = int(os.environ.get("LOOM_RAY_PORT_STRIDE", "100"))
 # Сколько в конце диапазона отдать рабочим процессам Ray. Их много и они
 # приходят-уходят, поэтому им отдаётся всё, что осталось после служебных.
 FIRST_WORKER_OFFSET = 10
+# Верхняя граница окна: выше начинается эфемерный диапазон Linux, и занимать
+# оттуда — значит однажды столкнуться с чужим исходящим соединением.
+WINDOW_END = int(os.environ.get("LOOM_RAY_PORT_WINDOW_END", "32000"))
 
 
 class PortsRefused(ValueError):
@@ -65,6 +68,32 @@ class RankPorts:
     def local_only(self) -> List[int]:
         return [self.runtime_env_agent, self.dashboard_listen,
                 self.dashboard_grpc, self.metrics, self.client_server]
+
+
+def group_base(size: int, *, base: int = 0, stride: int = 0) -> int:
+    """Своё окно портов для каждого кластера, а не одно на всех.
+
+    Со стенда: кластер, оставшийся от прошлой попытки, занимал те же порты,
+    и голова нового подключалась К НЕМУ — после чего падала на несовпадении
+    имени сессии. Причина при этом называлась так, что искать её шли в свой
+    код, а не в список процессов.
+
+    Окно выбирается по идентификатору группы, поэтому все ранги считают его
+    одинаково и ни у кого ничего не спрашивают — как и всё остальное здесь.
+    Совпадение окон возможно, но редко, и брошенный кластер перестаёт быть
+    ловушкой по умолчанию.
+    """
+    base = base or BASE
+    stride = stride or STRIDE
+    group_id = os.environ.get("LOOM_GROUP_ID", "").strip()
+    width = max(1, size) * stride
+    slots = max(1, (WINDOW_END - base) // width)
+    if not group_id or slots <= 1:
+        return base
+    import hashlib
+
+    slot = int(hashlib.sha256(group_id.encode()).hexdigest()[:8], 16) % slots
+    return base + slot * width
 
 
 def ports_for(rank: int, *, base: int = 0, stride: int = 0) -> RankPorts:
@@ -109,5 +138,6 @@ def crossing_for_group(size: int, *, base: int = 0, stride: int = 0) -> dict:
     Считается здесь, а не в агенте: агент не должен знать, как Ray раскладывает
     порты, — иначе смена версии Ray станет обновлением парка.
     """
+    base = base or group_base(size, stride=stride)
     return {rank: ports_for(rank, base=base, stride=stride).crossing()
             for rank in range(size)}

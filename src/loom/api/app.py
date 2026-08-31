@@ -315,7 +315,10 @@ def create_app(*, agents=None, releases=None, keystore=None, config=None,
         if agents is None:
             return need_agents()
         ordered = sorted(agents.groups.values(), key=lambda g: g.submitted_at, reverse=True)
-        return {"groups": [g.as_dict() for g in ordered]}
+        # `finished` считает оркестратор: панели иначе пришлось бы сводить
+        # список задач с составом группы и повторять это на каждом экране.
+        return {"groups": [{**g.as_dict(), "finished": agents.group_finished(g)}
+                           for g in ordered]}
 
     @app.post("/admin/groups")
     async def admin_submit_group(request: Request,
@@ -356,6 +359,24 @@ def create_app(*, agents=None, releases=None, keystore=None, config=None,
         except AgentError as exc:
             return _error(409, str(exc))
         return record.as_dict()
+
+    @app.delete("/admin/groups/{group_id}")
+    async def admin_forget_group(group_id: str,
+                                 x_loom_admin_token: str | None = Header(default=None)):
+        """Убрать группу из списка совсем: отпустить задачи и забыть запись.
+
+        Отдельно от остановки, и намеренно: у остановленной задачи ещё лежит
+        результат, за которым придут. Забытая не нужна никому.
+        """
+        if forbidden(x_loom_admin_token):
+            return _error(403, "invalid admin token")
+        if agents is None:
+            return need_agents()
+        try:
+            record = agents.forget_group(group_id)
+        except AgentError as exc:
+            return _error(404, str(exc))
+        return {"forgotten": record.group_id, "tasks": len(record.tasks)}
 
     @app.get("/admin/groups/{group_id}/health")
     async def admin_group_health(group_id: str,

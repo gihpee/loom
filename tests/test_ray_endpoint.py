@@ -195,3 +195,71 @@ def test_узел_названный_дважды_получает_два_ран
     assert (hub.tasks[record.tasks[0]].command[:3]
             == hub.tasks[record.tasks[1]].command[:3]
             == ["python", "-m", "loom_ray.server"])
+
+
+# ------------------------------------------------------- законченные группы
+def test_законченная_группа_помечена_как_законченная(two_nodes):
+    """Иначе панель показывает её среди работающих — как и было на стенде,
+    где три мёртвых кластера висели в разделе «работают»."""
+    hub = two_nodes.hub
+    body = client(hub).post("/admin/ray", json={"node_ids": ["node-0"]}).json()
+    record = hub.groups[body["group_id"]]
+
+    listed = client(hub).get("/admin/groups").json()["groups"][0]
+    assert listed["finished"] is False
+
+    for task_id in record.tasks.values():
+        hub.tasks[task_id].state = "failed"
+    assert client(hub).get("/admin/groups").json()["groups"][0]["finished"] is True
+
+
+def test_группу_можно_убрать_совсем(two_nodes):
+    """Остановка этого не делает намеренно: у остановленной задачи ещё лежит
+    результат. Забытая не нужна никому — и без этого записи копились вечно."""
+    hub = two_nodes.hub
+    body = client(hub).post("/admin/ray", json={"node_ids": ["node-0", "node-0"]}).json()
+    group_id = body["group_id"]
+    tasks = list(hub.groups[group_id].tasks.values())
+
+    answer = client(hub).delete(f"/admin/groups/{group_id}")
+    assert answer.status_code == 200, answer.text
+    assert answer.json() == {"forgotten": group_id, "tasks": 2}
+    assert group_id not in hub.groups
+    assert all(t not in hub.tasks for t in tasks)
+
+
+def test_убрать_несуществующую_группу_нельзя(two_nodes):
+    answer = client(two_nodes.hub).delete("/admin/groups/которой-нет")
+    assert answer.status_code == 404
+    assert "которой-нет" in answer.json()["error"]["message"]
+
+
+def test_законченные_убираются_сами_через_сутки(two_nodes):
+    """Иначе через месяц работы панель показывает историю вместо состояния."""
+    import time as _time
+
+    hub = two_nodes.hub
+    body = client(hub).post("/admin/ray", json={"node_ids": ["node-0"]}).json()
+    record = hub.groups[body["group_id"]]
+    for task_id in record.tasks.values():
+        hub.tasks[task_id].state = "failed"
+
+    assert hub.prune() == 0, "свежую группу убирать рано — за результатом придут"
+    record.submitted_at = _time.time() - 25 * 3600
+    assert hub.prune() == 1
+    assert body["group_id"] not in hub.groups
+
+
+def test_работающая_группа_не_убирается_по_возрасту(two_nodes):
+    """Долгоживущий кластер — это норма, а не забытая запись."""
+    import time as _time
+
+    hub = two_nodes.hub
+    body = client(hub).post("/admin/ray", json={"node_ids": ["node-0"]}).json()
+    record = hub.groups[body["group_id"]]
+    for task_id in record.tasks.values():
+        hub.tasks[task_id].state = "running"
+    record.submitted_at = _time.time() - 400 * 3600
+
+    assert hub.prune() == 0
+    assert body["group_id"] in hub.groups

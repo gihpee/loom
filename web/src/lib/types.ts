@@ -26,6 +26,9 @@ export interface Group {
   group_id: string; label: string; size: number;
   ranks: { rank: number; task_id: string; node_id: string }[];
   submitted_at: number;
+  // Все ранги закончились. Считает оркестратор — иначе каждый экран сводил бы
+  // список задач с составом группы сам.
+  finished?: boolean;
 }
 
 export interface StageHealth {

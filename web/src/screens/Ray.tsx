@@ -61,8 +61,8 @@ function phase(s: StageHealth): string {
   return want > 1 ? `ждёт ранги (${seen}/${want})` : s.stage.status;
 }
 
-function Cluster({ group, nodes, onStop }: {
-  group: Group; nodes: Node[]; onStop: () => void;
+function Cluster({ group, nodes, onStop, onForget }: {
+  group: Group; nodes: Node[]; onStop: () => void; onForget?: () => void;
 }) {
   const [health, setHealth] = useState<GroupHealth | null>(null);
   useEffect(() => {
@@ -102,7 +102,9 @@ function Cluster({ group, nodes, onStop }: {
                  pulse={alive !== ranks.length}>
             {alive} из {ranks.length} в кластере
           </Badge>
-          <Button size="sm" kind="danger" onClick={onStop}>снять</Button>
+          {onForget
+            ? <Button size="sm" kind="ghost" onClick={onForget}>убрать</Button>
+            : <Button size="sm" kind="danger" onClick={onStop}>снять</Button>}
         </span>
       </div>
 
@@ -165,7 +167,9 @@ export function Ray() {
   const rayTasks = new Set((tasks.data?.tasks ?? [])
     .filter((t) => t.command.some((c) => c.includes(RAY)))
     .map((t) => t.group_id));
-  const live = (groups.data?.groups ?? []).filter((g) => rayTasks.has(g.group_id));
+  const mine = (groups.data?.groups ?? []).filter((g) => rayTasks.has(g.group_id));
+  const live = mine.filter((g) => !g.finished);
+  const over = mine.filter((g) => g.finished);
 
   const pick = (file: File) => {
     const reader = new FileReader();
@@ -279,6 +283,25 @@ export function Ray() {
           </div>
         )}
       </section>
+
+      {over.length > 0 && (
+        <section>
+          <h2>Закончились</h2>
+          <div style={{ display: "grid", gap: 12 }}>
+            {over.map((g) => (
+              <Cluster key={g.group_id} group={g} nodes={nodes.data?.nodes ?? []}
+                       onStop={() => undefined}
+                       onForget={() => action.run(
+                         () => send(`/admin/groups/${g.group_id}`, "DELETE"),
+                         "убран")} />
+            ))}
+          </div>
+          <p className="sub">
+            Задачи остановлены, результат ещё лежит на узле — «убрать» отпускает
+            его и забывает запись. Само это случится через сутки.
+          </p>
+        </section>
+      )}
 
       <section>
         <h2>Как писать задачу</h2>

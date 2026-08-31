@@ -81,3 +81,42 @@ def test_доля_процессора_берётся_из_окружения(mo
     assert _own_cpus() == 0
     monkeypatch.setenv("LOOM_TASK_CPUS", "не число")
     assert _own_cpus() == 0
+
+
+def test_у_каждого_кластера_своё_окно(monkeypatch):
+    """Со стенда: кластер прошлой попытки занимал те же порты, и голова нового
+    подключалась К НЕМУ — после чего падала на несовпадении имени сессии."""
+    from loom_ray.ports import group_base
+
+    monkeypatch.setenv("LOOM_GROUP_ID", "group-первая")
+    первое = group_base(2)
+    monkeypatch.setenv("LOOM_GROUP_ID", "group-вторая")
+    второе = group_base(2)
+    assert первое != второе, "две группы делят порты — брошенная поймает новую"
+
+
+def test_окно_одинаково_у_всех_рангов(monkeypatch):
+    """Ранги не спрашивают его друг у друга — они его вычисляют."""
+    from loom_ray.ports import group_base
+
+    monkeypatch.setenv("LOOM_GROUP_ID", "group-одна")
+    assert group_base(2) == group_base(2)
+
+
+def test_без_группы_окно_прежнее(monkeypatch):
+    """Одиночная задача и тесты не должны зависеть от переменной, которой у
+    них нет."""
+    from loom_ray.ports import BASE, group_base
+
+    monkeypatch.delenv("LOOM_GROUP_ID", raising=False)
+    assert group_base(2) == BASE
+
+
+def test_окно_не_залезает_в_эфемерный_диапазон(monkeypatch):
+    """Иначе однажды столкнёмся с чужим исходящим соединением."""
+    from loom_ray.ports import WINDOW_END, group_base, ports_for
+
+    for i in range(50):
+        monkeypatch.setenv("LOOM_GROUP_ID", f"group-{i}")
+        base = group_base(4)
+        assert ports_for(3, base=base).worker_last < WINDOW_END, f"группа {i}"

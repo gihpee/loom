@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import os
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -41,6 +42,9 @@ FLUSH_INTERVAL_S = 2.0
 # только то, что держит; между отправкой задачи и первым докладом о ней есть
 # промежуток, и в нём задача ещё не пропала, а просто не доехала.
 ADOPTION_GRACE_S = 90.0
+# Сколько законченная группа лежит в списке, прежде чем её уберут сами.
+# Дольше, чем узел держит каталог задачи (час), чтобы результат успели забрать.
+KEEP_FINISHED_S = float(os.environ.get("LOOM_KEEP_FINISHED_S", str(24 * 3600)))
 
 
 class AgentError(RuntimeError):
@@ -290,6 +294,7 @@ class AgentHub:
         # никуда: так работают тесты и так работал весь хаб раньше.
         self.store = store
         self._dirty = False
+        self._sweeps = 0
         self.sessions: Dict[str, AgentSession] = {}
         self.tasks: Dict[str, TaskRecord] = {}
         self.groups: Dict[str, GroupRecord] = {}
@@ -362,6 +367,11 @@ class AgentHub:
         try:
             while True:
                 await asyncio.sleep(FLUSH_INTERVAL_S)
+                self._sweeps += 1
+                # Уборка редко: она ходит по всем группам, а меняется в ней
+                # что-то раз в сутки.
+                if self._sweeps % int(300 / FLUSH_INTERVAL_S) == 0:
+                    self.prune()
                 self.flush()
         except asyncio.CancelledError:
             self.flush()
@@ -712,6 +722,59 @@ class AgentHub:
             except AgentError:
                 continue
         return record
+
+    def group_finished(self, record: GroupRecord) -> bool:
+        """Кончилась ли группа целиком. Пустая — да: держать нечего."""
+        return all(
+            (self.tasks.get(task_id) or TaskRecord(task_id=task_id, node_id="",
+                                                   state="gone")).finished
+            for task_id in record.tasks.values()
+        )
+
+    def forget_group(self, group_id: str) -> GroupRecord:
+        """Убрать группу совсем: отпустить задачи и забыть запись.
+
+        Остановка этого не делает намеренно — у остановленной задачи ещё
+        лежит результат, за которым придут. А вот забытая группа не нужна
+        никому, и без этого записи копились бы вечно, теперь ещё и в снимке
+        состояния.
+        """
+        record = self.groups.get(group_id)
+        if record is None:
+            raise AgentError(f"нет группы {group_id!r}")
+        for task_id in record.tasks.values():
+            try:
+                self.release(task_id)
+            except AgentError:
+                # Узел отключился — отпускать некому, но запись убрать всё
+                # равно надо: иначе она остаётся навсегда именно в том случае,
+                # когда мешает больше всего.
+                self.tasks.pop(task_id, None)
+        self.groups.pop(group_id, None)
+        self._ready_groups.discard(group_id)
+        self._touch()
+        return record
+
+    def prune(self, older_than_s: float = KEEP_FINISHED_S) -> int:
+        """Убрать законченные группы, за которыми давно не приходили.
+
+        Иначе список растёт монотонно: остановленная группа остаётся в нём
+        навсегда, и через месяц работы панель показывает историю вместо
+        состояния.
+        """
+        deadline = time.time() - max(60.0, older_than_s)
+        stale = [
+            group_id for group_id, record in self.groups.items()
+            if record.submitted_at < deadline and self.group_finished(record)
+        ]
+        for group_id in stale:
+            try:
+                self.forget_group(group_id)
+            except AgentError:
+                continue
+        if stale:
+            logger.info("убрано законченных групп: %d", len(stale))
+        return len(stale)
 
     def announce_release(self) -> int:
         """Сказать подключённым узлам, что версия сменилась.

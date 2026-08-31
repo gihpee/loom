@@ -18,7 +18,7 @@ import threading
 import time
 from typing import List, Optional
 
-from loom_ray.ports import RankPorts, head_address, ports_for
+from loom_ray.ports import RankPorts, group_base, head_address, ports_for
 
 logger = logging.getLogger("loom_ray.cluster")
 
@@ -115,6 +115,9 @@ def _own_cpus() -> int:
 def start_node(rank: int, size: int, *, gpus: Optional[int] = None,
                base: int = 0, stride: int = 0, temp_dir: str = "") -> str:
     """Поднять узел Ray для этого ранга. Возвращает адрес головы."""
+    # Окно группы, а не общее для всех: брошенный кластер занимает СВОИ порты,
+    # и новый его больше не встречает.
+    base = base or group_base(size, stride=stride)
     ports = ports_for(rank, base=base, stride=stride)
     argv = [sys.executable, "-m", "ray.scripts.scripts", "start"]
     if rank == 0:
@@ -135,10 +138,26 @@ def start_node(rank: int, size: int, *, gpus: Optional[int] = None,
     if temp_dir:
         argv += ["--temp-dir", temp_dir]
 
+    if rank == 0 and _occupied(ports.gcs):
+        # Иначе Ray подключится к чужому кластеру и упадёт на несовпадении
+        # имени сессии — сообщении, из которого причина не следует вовсе, и
+        # искать её пойдут в своём коде, а не в списке процессов.
+        raise ClusterRefused(
+            f"порт {ports.gcs} уже занят: похоже, там живёт кластер прошлой "
+            "попытки. Снимите старую группу — или, если это чужой процесс, "
+            "сдвиньте окно через LOOM_RAY_PORT_BASE")
+
     logger.info("ранг %d/%d: %s", rank, size,
                 "поднимаю голову" if rank == 0 else f"подключаюсь к {address}")
     _run_start(argv, rank=rank, retries=0 if rank == 0 else JOIN_ATTEMPTS)
     return address
+
+
+def _occupied(port: int) -> bool:
+    """Слушает ли кто-то этот порт прямо сейчас."""
+    with socket.socket() as probe:
+        probe.settimeout(1.0)
+        return probe.connect_ex(("127.0.0.1", port)) == 0
 
 
 def _run_start(argv: List[str], *, rank: int, retries: int) -> None:
