@@ -46,9 +46,13 @@ services:
     network_mode: host
     environment:
       LOOM_RELAY_PORT: 47200
-      # Empty is fine: the relay works out its own address and writes it where
-      # the orchestrator reads it. Set only if it guesses wrong.
-      LOOM_RELAY_PUBLIC_HOST: ${LOOM_RELAY_PUBLIC_HOST:-}
+      # По умолчанию — тот же адрес, что у оркестратора: реле стоит на этой же
+      # машине и снаружи видно по нему же. Порт отбрасывается, нужен только хост.
+      #
+      # Пустое значение НЕ безобидно, что бы тут раньше ни было написано:
+      # объявлять адрес нечем, файл для оркестратора не пишется, узлы получают
+      # «0 relay», и реле работает вхолостую, ничем этого не выдавая.
+      LOOM_RELAY_PUBLIC_HOST: ${LOOM_RELAY_PUBLIC_HOST:-${LOOM_PUBLIC_ADDR:-}}
     volumes:
       # The identity too: its peer id is inside every multiaddr a node holds,
       # so regenerating it on restart invalidates them all at once.

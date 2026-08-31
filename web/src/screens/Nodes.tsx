@@ -8,7 +8,12 @@ import {
 function linkBadge(n: Node) {
   if (!n.peer_id) return <Badge tone="dim">нет p2p</Badge>;
   if (n.symmetric_nat) return <Badge tone="warn">symmetric NAT</Badge>;
-  return n.reachable ? <Badge tone="ok">direct</Badge> : <Badge tone="warn">relay</Badge>;
+  // Только про входящие соединения — и ни слова про реле, которого может и не
+  // быть. Прежняя надпись «relay» читалась как «идёт через реле» и спорила с
+  // логом узла, где в это же время стоит «0 relay».
+  return n.reachable
+    ? <Badge tone="ok">принимает</Badge>
+    : <Badge tone="warn">за NAT</Badge>;
 }
 
 export function Nodes() {
@@ -74,7 +79,7 @@ export function Nodes() {
             <thead>
               <tr>
                 <th>узел</th><th>железо</th><th>GPU</th><th>VRAM</th>
-                <th>состояние</th><th>канал</th><th>агент</th><th />
+                <th>состояние</th><th>снаружи</th><th>агент</th><th />
               </tr>
             </thead>
             <tbody>

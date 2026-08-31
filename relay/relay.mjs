@@ -47,12 +47,21 @@ const PORT = Number(process.env.LOOM_RELAY_PORT || 47200)
 // pasting THAT back in is the natural mistake, and it used to end in a crash
 // deep inside the address parser ("Protocol 201.34.135.177 was unknown"),
 // naming the value and not the setting. Both forms are accepted now.
+// Принимает и мультиадрес, и host:port, и голый хост. Последние два — потому
+// что естественный источник этого значения LOOM_PUBLIC_ADDR у оркестратора, а
+// он с портом: реле стоит на той же машине и снаружи виден по тому же адресу.
 function announceHost (raw) {
   const value = (raw || '').trim()
-  if (!value.startsWith('/')) return value
-  const parts = value.split('/')
-  const at = parts.findIndex(p => ['ip4', 'ip6', 'dns', 'dns4', 'dns6'].includes(p))
-  return at >= 0 ? (parts[at + 1] || '') : ''
+  if (!value) return ''
+  if (value.startsWith('/')) {
+    const parts = value.split('/')
+    const at = parts.findIndex(p => ['ip4', 'ip6', 'dns', 'dns4', 'dns6'].includes(p))
+    return at >= 0 ? (parts[at + 1] || '') : ''
+  }
+  if (value.startsWith('[')) return value.slice(1, value.indexOf(']'))   // [::1]:port
+  const colons = value.split(':').length - 1
+  if (colons === 1) return value.split(':')[0]      // host:port
+  return value                                       // голый хост или IPv6
 }
 
 const RAW_HOST = process.env.LOOM_RELAY_PUBLIC_HOST || ''
@@ -64,6 +73,19 @@ if (RAW_HOST && !PUBLIC_HOST) {
   console.error(`LOOM_RELAY_PUBLIC_HOST=${RAW_HOST} has no host in it. ` +
                 'Set it to the address workers reach this machine at, e.g. 203.0.113.7')
   process.exit(2)
+}
+if (!PUBLIC_HOST) {
+  // Громко, потому что молча это выглядит как работающее реле. Оно поднимется,
+  // напечатает свои адреса, и единственным следом останется «0 relay» в логе
+  // узла — строчка, которую никто не связывает с этим контейнером.
+  console.error('')
+  console.error('LOOM_RELAY_PUBLIC_HOST не задан, и адрес объявлять нечем.')
+  console.error('Реле поднимется и НЕ БУДЕТ ИСПОЛЬЗОВАНО: узлы получат «0 relay»,')
+  console.error('а пары за симметричным NAT не свяжутся вовсе.')
+  console.error('')
+  console.error('  LOOM_RELAY_PUBLIC_HOST=<адрес, по которому машина видна снаружи>')
+  console.error('  # обычно тот же, что LOOM_PUBLIC_ADDR у оркестратора')
+  console.error('')
 }
 // A name needs /dns4, an address needs /ip4 — announcing a hostname under
 // /ip4 fails the same way, one layer down.
