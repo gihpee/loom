@@ -1,0 +1,2 @@
+[console_scripts]
+loom-ray = loom_ray.server:main

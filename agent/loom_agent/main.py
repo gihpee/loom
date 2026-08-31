@@ -104,6 +104,9 @@ class Agent:
         self.commands = TaskCommands(
             registry=self.tasks, send=self.client.send,
             node_id=self.node_id, links=self.peers.links,
+            # Отдельно от links: та возит сообщения и про узел ничего не знает,
+            # а байтовый туннель открывается на самом узле.
+            peers=self.peers,
         )
         self.updater = Updater(
             current_version=__version__,

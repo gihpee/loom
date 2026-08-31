@@ -145,6 +145,10 @@ class Task:
             "TMPDIR": self.directory.inner_work,
             "LOOM_TASK_ID": self.spec.task_id,
             "LOOM_TASK_OUT": self.directory.inner_out,
+            # Каталог, путь к которому заведомо короткий. Нужен всему, что
+            # кладёт unix-сокеты рядом с собой: путь такого сокета не может
+            # быть длиннее 103 байт, а каталог задачи уже почти весь лимит.
+            "LOOM_TASK_TMP": self.directory.inner_scratch,
         }
         if self.spec.serve_port:
             env["LOOM_SERVE_PORT"] = str(self.spec.serve_port)

@@ -288,6 +288,9 @@ class PeerNode:
         self.bootstraps = list(bootstraps or [])
         self.relay_servers = list(relay_servers or [])
         self._lattica = None
+        # Наша сторона байтовых туннелей. Заводится всегда, но пока никто не
+        # разрешил ни одного порта, она отказывает на всё.
+        self.tunnels = _tunnel_endpoint()
         self._handler = None
         self._lock = threading.RLock()
         self._stubs: Dict[str, object] = {}
@@ -315,7 +318,7 @@ class PeerNode:
                 return self.identity()
             self._on_message = on_message
             self._lattica = self._build()
-            self._handler = _make_handler(self._lattica, self._deliver)
+            self._handler = _make_handler(self._lattica, self._deliver, self.tunnels)
             self._lattica.register_service(self._handler)
             joined = self._await_join()
             identity = self.identity()
@@ -616,6 +619,11 @@ class PeerNode:
             raise P2PUnavailable("the p2p node is not running")
         return self._stub_for(peer_id).stage_forward(message)
 
+    def stub_for(self, peer_id: str):
+        """Стаб соседа. Публичный: им пользуется не только пересылка
+        сообщений, но и байтовый туннель."""
+        return self._stub_for(peer_id)
+
     def _stub_for(self, peer_id: str):
         with self._lock:
             stub = self._stubs.get(peer_id)
@@ -637,7 +645,13 @@ class PeerNode:
         return {"ok": True}
 
 
-def _make_handler(lattica, deliver: Callable[[dict], dict]):
+def _tunnel_endpoint():
+    from loom_agent.p2p.tunnel import Endpoint
+
+    return Endpoint()
+
+
+def _make_handler(lattica, deliver: Callable[[dict], dict], endpoint=None):
     """Build the RPC service this node exposes to its peers.
 
     Defined here rather than at module scope because the decorators need the
@@ -659,7 +673,9 @@ def _make_handler(lattica, deliver: Callable[[dict], dict]):
     import queue
     import threading
 
-    from lattica import ConnectionHandler, rpc_method
+    import base64
+
+    from lattica import ConnectionHandler, rpc_method, rpc_stream_iter
 
     inbox: "queue.Queue[dict]" = queue.Queue(maxsize=INBOX_DEPTH)
 
@@ -687,5 +703,38 @@ def _make_handler(lattica, deliver: Callable[[dict], dict]):
                 logger.error("the direct inbox is full; refusing the message")
                 return {"ok": False, "error": "inbox full"}
             return {"ok": True}
+
+        # --------------------------------------------------- байтовый туннель
+        # Для чужого софта, который ходит к соседям по адресу и порту, а не по
+        # рангу — прежде всего Ray. Направления разведены, потому что полного
+        # дуплекса транспорт не даёт: см. p2p/tunnel.py.
+        @rpc_method
+        def tunnel_connect(self, message):
+            if endpoint is None:
+                return {"ok": False, "error": "на этом узле туннели выключены"}
+            return endpoint.connect(str(message.get("conn") or ""),
+                                    int(message.get("port") or 0))
+
+        @rpc_stream_iter
+        def tunnel_open(self, message):
+            if endpoint is None:
+                return
+            yield from endpoint.read(str(message.get("conn") or ""))
+
+        @rpc_method
+        def tunnel_write(self, message):
+            if endpoint is None:
+                return {"ok": False, "error": "на этом узле туннели выключены"}
+            try:
+                data = base64.b64decode(message.get("data") or "")
+            except (ValueError, TypeError) as exc:
+                return {"ok": False, "error": f"порция не декодируется: {exc}"}
+            return endpoint.write(str(message.get("conn") or ""), data)
+
+        @rpc_method
+        def tunnel_close(self, message):
+            if endpoint is None:
+                return {"ok": True}
+            return endpoint.close(str(message.get("conn") or ""))
 
     return LoomStage(lattica)

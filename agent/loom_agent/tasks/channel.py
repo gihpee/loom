@@ -39,8 +39,13 @@ class TaskChannel:
     """The loopback endpoint tasks send through."""
 
     def __init__(self, *, on_send: Callable[[str, int, bytes, str], None],
-                 on_ready: Optional[Callable[[str, int], None]] = None) -> None:
+                 on_ready: Optional[Callable[[str, int], None]] = None,
+                 on_forward: Optional[Callable[[str, dict], dict]] = None) -> None:
         self.on_send = on_send
+        # Задача просит сделать порты соседей достижимыми у себя на локалхосте.
+        # Просит она, а не мы: раскладку портов определяет её софт, и знать её
+        # агенту значит обновлять агента при смене версии этого софта.
+        self.on_forward = on_forward or (lambda _task, _body: {"listening": 0})
         # A task saying which port it actually bound. Authoritative: the agent
         # can only suggest one, and between suggesting and the task binding it
         # another process on the same machine may have taken it — which is not
@@ -70,6 +75,30 @@ class TaskChannel:
                         return
                     channel.on_ready(self.headers.get(TASK_HEADER, ""), port)
                     self._answer(200, b"")
+                    return
+                if self.path == "/forward":
+                    length = int(self.headers.get("Content-Length") or 0)
+                    try:
+                        import json as _json
+
+                        body = _json.loads(self.rfile.read(length) or b"{}")
+                    except ValueError:
+                        self._answer(400, b"not json")
+                        return
+                    try:
+                        answer = channel.on_forward(
+                            self.headers.get(TASK_HEADER, ""), body)
+                    except Exception as exc:
+                        # Задача обязана узнать причину: без проброса её соседи
+                        # просто не найдутся, и выглядеть это будет как
+                        # зависание, а не как отказ.
+                        logger.warning("проброс для %s не вышел: %s",
+                                       self.headers.get(TASK_HEADER, ""), exc)
+                        self._answer(502, str(exc).encode())
+                        return
+                    import json as _json
+
+                    self._answer(200, _json.dumps(answer).encode())
                     return
                 if self.path != "/send":
                     self._answer(404, b"no such endpoint")

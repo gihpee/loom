@@ -10,6 +10,7 @@ of the transport, which is the thing being built.
 
 from __future__ import annotations
 
+import base64
 import json
 import socket
 import sys
@@ -242,3 +243,59 @@ def test_готовность_спрашивается_один_раз(two_nodes
     two_nodes.hub._ready_groups.add(group.group_id)
     two_nodes.hub.groups[group.group_id].label = "cached"
     assert two_nodes.call(two_nodes.hub.serving("cached")) is not None
+
+
+GROUP_INPUT_ECHO = (
+    "import os, pathlib;"
+    "src = pathlib.Path('shared.txt').read_text();"
+    "out = pathlib.Path(os.environ['LOOM_TASK_OUT']) / 'seen.txt';"
+    "out.write_text(src + ' rank=' + os.environ['LOOM_RANK'])"
+)
+
+
+def test_код_группы_доезжает_до_каждого_ранга(two_nodes):
+    """Фаза 2: конвейер моделей завозил свой код на узлы через `inputs`, а
+    общий API групп этого не умел — код клиента на группу было не доставить
+    иначе как запечь в образ.
+
+    Одна программа на всех, разное ей передаётся через per_rank: узел, впервые
+    видящий эту работу, получает её вместе с задачей, и реестр пакетов
+    посередине для этого не нужен.
+    """
+    from fastapi.testclient import TestClient
+
+    from loom.api.app import create_app
+    from test_agent_gateway import _Settings
+
+    client = TestClient(create_app(agents=two_nodes.hub, config=_Settings()))
+    submitted = client.post("/admin/groups", json={
+        "size": 2,
+        "command": [sys.executable, "-c", GROUP_INPUT_ECHO],
+        "node_ids": ["node-0", "node-1"],
+        "inputs": {"shared.txt": base64.b64encode("общий код".encode()).decode()},
+        "timeout_s": 120,
+    }).json()
+    assert "group_id" in submitted, submitted
+
+    for rank in submitted["ranks"]:
+        record = two_nodes.wait_state(rank["task_id"], "done", "failed")
+        assert record.state == "done", record.error
+        answer = client.get(f"/admin/tasks/{rank['task_id']}/results/seen.txt")
+        assert answer.status_code == 200, answer.text
+        assert answer.content.decode() == f"общий код rank={rank['rank']}"
+
+
+def test_испорченный_base64_называет_свой_файл(two_nodes):
+    """«Неверный base64» ничего не стоит, когда файлов десяток."""
+    from fastapi.testclient import TestClient
+
+    from loom.api.app import create_app
+    from test_agent_gateway import _Settings
+
+    client = TestClient(create_app(agents=two_nodes.hub, config=_Settings()))
+    answer = client.post("/admin/groups", json={
+        "size": 1, "command": ["true"], "node_ids": ["node-0"],
+        "inputs": {"beper.bin": "не base64 ни разу!!"},
+    })
+    assert answer.status_code == 400
+    assert "beper.bin" in answer.json()["error"]["message"]

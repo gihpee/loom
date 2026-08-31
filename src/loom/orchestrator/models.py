@@ -142,42 +142,19 @@ def split_layers(num_layers: int, stages: int,
 def stage_payload() -> Dict[str, bytes]:
     """Файлы стадии, которые уедут в задачу как её вход.
 
-    Пакет, а не пакетный индекс: узел, который эту модель никогда не
-    обслуживал, получает код вместе с задачей, и между нами нет реестра,
-    который надо поднимать, авторизовывать и держать живым.
-
-    Мест поиска два, и оба нужны. В контейнере нагрузка лежит там, куда её
-    положил Dockerfile; в рабочем дереве — рядом с исходниками. Считать путь
-    от `__file__` в одиночку нельзя: установленный пакет живёт в
-    site-packages, где никакого `payloads/` рядом нет и не будет.
+    Механизм общий для всех нагрузок — см. orchestrator/payloads.py; здесь
+    только имя и то, во что превращается его отсутствие для вызывающего.
     """
-    from pathlib import Path
+    from loom.orchestrator.payloads import PayloadMissing, collect
 
-    tried = []
-    for candidate in _payload_dirs():
-        tried.append(candidate)
-        if (candidate / "server.py").is_file():
-            files = {f"loom_stage/{path.name}": path.read_bytes()
-                     for path in sorted(candidate.glob("*.py"))}
-            if files:
-                return files
-    raise ModelError(
-        "рядом с оркестратором нет кода стадии, и узлу нечего было бы "
-        "запускать. Искали в: " + ", ".join(str(p) for p in tried) +
-        ". В образе он кладётся Dockerfile'ом; путь можно задать через "
-        "LOOM_PAYLOADS_DIR"
-    )
+    try:
+        return collect("loom_stage", human="кода стадии", dirs=_payload_dirs())
+    except PayloadMissing as exc:
+        raise ModelError(str(exc)) from None
 
 
 def _payload_dirs():
     """Где может лежать код стадии, в порядке доверия."""
-    from pathlib import Path
+    from loom.orchestrator.payloads import payload_dirs
 
-    explicit = os.environ.get("LOOM_PAYLOADS_DIR", "").strip()
-    if explicit:
-        yield Path(explicit) / "loom_stage" / "loom_stage"
-        yield Path(explicit) / "loom_stage"
-    here = Path(__file__).resolve()
-    # /app/payloads/... в образе и <репозиторий>/payloads/... в разработке.
-    for base in (Path("/app"), *here.parents[:5]):
-        yield base / "payloads" / "loom_stage" / "loom_stage"
+    return payload_dirs("loom_stage")

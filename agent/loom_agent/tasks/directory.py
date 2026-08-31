@@ -15,6 +15,7 @@ and nothing else.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 import shutil
@@ -27,6 +28,23 @@ from loom_agent.tasks.limits import Isolation
 from loom_agent.transport.files import Inbox, Outbox
 
 logger = logging.getLogger("loom_agent.tasks.directory")
+
+
+def _scratch_name(task_id: str) -> str:
+    """Короткое имя каталога, путь к которому обязан быть коротким.
+
+    Unix-сокет не может лежать глубже 103 байт пути — это предел ядра, а не
+    соглашение. Каталог задачи с полным task_id в имени съедает почти весь
+    лимит: `/var/lib/loom/tasks/group-abcdef0123-r0/work` — уже 48 байт, а
+    софту, который кладёт сокеты рядом с собой, остаётся 41.
+
+    Так падает Ray (плазма-сокет), так падают многие СУБД и IPC-библиотеки, и
+    сообщение при этом называет длину пути, а не то, что каталог задачи просто
+    глубоко лежит.
+
+    Имя детерминированное, чтобы уборка нашла его, ничего не запоминая.
+    """
+    return "loom-" + hashlib.sha256(task_id.encode()).hexdigest()[:8]
 
 
 @dataclass(frozen=True)
@@ -57,9 +75,24 @@ class TaskDirectory:
     def inner_out(self) -> str:
         return "/out" if self.rootfs else str(self.out)
 
+    @property
+    def scratch(self) -> Path:
+        """Короткий каталог задачи на диске агента.
+
+        Внутри образа — его же /tmp, чтобы путь остался коротким и после
+        chroot: снаружи он длинный, а видит задача одно и то же имя.
+        """
+        base = self.rootfs if self.rootfs else Path("/")
+        return base / "tmp" / _scratch_name(self.root.name)
+
+    @property
+    def inner_scratch(self) -> str:
+        """Как его увидит сама задача — одинаково с образом и без."""
+        return f"/tmp/{_scratch_name(self.root.name)}"
+
     def with_rootfs(self, rootfs: Path, isolation: "Isolation") -> "TaskDirectory":
         moved = TaskDirectory(root=self.root, rootfs=rootfs)
-        for path in (moved.work, moved.out):
+        for path in (moved.work, moved.out, moved.scratch):
             path.mkdir(parents=True, exist_ok=True)
             if isolation.uid is not None and isolation.gid is not None:
                 os.chown(path, isolation.uid, isolation.gid)
@@ -75,12 +108,16 @@ class TaskDirectory:
         container — can read it.
         """
         directory = cls(base / task_id)
-        if directory.root.exists():
+        if directory.root.exists() or directory.scratch.exists():
             # A leftover from a crash. Its contents belong to a task that is
             # gone; reusing them would leak one tenant's files to the next.
+            #
+            # Короткий каталог сюда же, и не только ради утечки: в нём остаются
+            # unix-сокеты, а bind() по занятому пути отказывает — задача падала
+            # бы на «адрес занят» из-за предшественника, которого уже нет.
             logger.warning("removing a leftover directory for task %s", task_id)
             directory.remove()
-        for path in (directory.root, directory.work, directory.out):
+        for path in (directory.root, directory.work, directory.out, directory.scratch):
             path.mkdir(parents=True, exist_ok=True)
             if isolation.uid is not None and isolation.gid is not None:
                 os.chown(path, isolation.uid, isolation.gid)
@@ -102,6 +139,10 @@ class TaskDirectory:
         removal can fail, and a warning is the honest outcome — pretending it
         worked would hide a disk filling up.
         """
+        # Короткий каталог лежит вне root (в этом и был смысл), так что
+        # rmtree по root его не заденет и убрать его надо отдельно. Первым:
+        # иначе ранний выход по FileNotFoundError оставил бы его навсегда.
+        shutil.rmtree(self.scratch, ignore_errors=True)
         try:
             shutil.rmtree(self.root, ignore_errors=False)
         except FileNotFoundError:
@@ -111,11 +152,17 @@ class TaskDirectory:
                            exc_info=True)
 
     def size_bytes(self) -> int:
+        # Вместе с коротким каталогом: он вне root, и без этого задача обходила
+        # бы свою дисковую квоту, просто записав туда.
+        roots = [self.root]
+        if self.rootfs is None:
+            roots.append(self.scratch)
         total = 0
-        for current, _dirs, files in os.walk(self.root):
-            for name in files:
-                try:
-                    total += (Path(current) / name).stat().st_size
-                except OSError:
-                    continue
+        for base in roots:
+            for current, _dirs, files in os.walk(base):
+                for name in files:
+                    try:
+                        total += (Path(current) / name).stat().st_size
+                    except OSError:
+                        continue
         return total

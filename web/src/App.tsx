@@ -6,14 +6,15 @@ import { Keys } from "./screens/Keys";
 import { Models } from "./screens/Models";
 import { Nodes } from "./screens/Nodes";
 import { Overview } from "./screens/Overview";
+import { Ray } from "./screens/Ray";
 import { Release } from "./screens/Release";
 import { Tasks } from "./screens/Tasks";
 
-const SCREENS = ["Overview", "Nodes", "Models", "Tasks", "Keys", "Release"] as const;
+const SCREENS = ["Overview", "Nodes", "Models", "Ray", "Tasks", "Keys", "Release"] as const;
 type Screen = (typeof SCREENS)[number];
 
 const TITLE: Record<Screen, string> = {
-  Overview: "Обзор", Nodes: "Узлы", Models: "Модели",
+  Overview: "Обзор", Nodes: "Узлы", Models: "Модели", Ray: "Ray",
   Tasks: "Задачи", Keys: "Ключи", Release: "Обновление",
 };
 
@@ -43,7 +44,7 @@ function Shell() {
 
   const view = {
     Overview: <Overview go={go} />, Nodes: <Nodes />, Models: <Models />,
-    Tasks: <Tasks />, Keys: <Keys />, Release: <Release />,
+    Ray: <Ray />, Tasks: <Tasks />, Keys: <Keys />, Release: <Release />,
   }[screen];
 
   return (

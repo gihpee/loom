@@ -31,7 +31,13 @@ export interface Group {
 export interface StageHealth {
   rank: number; task_id: string; node_id: string;
   state: string; error: string; seconds: number; ready: boolean;
-  stage: { status: string; layers: [number, number] | null } | null;
+  // Ответ самой нагрузки, как она его отдала. У стадии инференса свои поля,
+  // у ранга Ray свои — оркестратор его не переписывает и о нём не судит.
+  stage: {
+    status: string;
+    layers?: [number, number] | null;   // стадия инференса
+    nodes?: number; size?: number; error?: string;   // ранг Ray
+  } | null;
 }
 
 export interface GroupHealth {

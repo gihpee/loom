@@ -24,6 +24,7 @@ from typing import Callable, Dict, List, Optional
 
 from loom_agent.proto import agent_pb2
 from loom_agent.tasks import channel as channel_mod
+from loom_agent.tasks.forward import Forwarder
 from loom_agent.tasks.groups import GroupTable, group_from_proto
 from loom_agent.tasks.registry import TaskRegistry
 from loom_agent.tasks.runner import Task
@@ -42,17 +43,25 @@ _CLOSED = object()
 
 class TaskCommands:
     def __init__(self, *, registry: TaskRegistry, send: Callable[[agent_pb2.AgentMessage], None],
-                 node_id: str = "", links=None) -> None:
+                 node_id: str = "", links=None, peers=None) -> None:
         self.registry = registry
         self.send = send
         self.node_id = node_id
+        # Слой p2p целиком: из него берётся сам узел, на котором открываются
+        # байтовые туннели. links — только про пересылку сообщений.
+        self.peers = peers
         # The direct path to peers, when this node has one. None means every
         # message between nodes goes through the orchestrator — correct, and
         # two wide-area crossings instead of one.
         self.links = links
         self.groups = GroupTable()
+        # Порты соседей, притворяющиеся местными. Нужны только тем задачам,
+        # которые ходят по адресам, а не по рангам, — и они об этом просят.
+        self.forward = Forwarder(stub_for=self._stub_for,
+                                 allow_local=self._allow_inbound)
         self.channel = channel_mod.TaskChannel(on_send=self._from_task,
-                                              on_ready=self._task_ready)
+                                              on_ready=self._task_ready,
+                                              on_forward=self._task_forward)
         self.registry.channel_url = self.channel.url if self.channel.port else ""
         self._inputs: Dict[str, "queue.Queue"] = {}
         self._lock = threading.RLock()
@@ -64,9 +73,10 @@ class TaskCommands:
 
     def shutdown(self) -> None:
         """Close the loopback endpoint. Not `stop` — that is the StopTask handler."""
+        self.forward.close_all()
         self.channel.stop()
 
-    # ------------------------------------------------------- from the stream
+    # ------------------------------------------------------- from the stream ПОТОК СТРИМА ЗАДАЧ (GRPC)
     def run(self, command: agent_pb2.RunTask) -> None:
         try:
             spec = _spec_of(command)
@@ -113,6 +123,7 @@ class TaskCommands:
             self._ack(command.command_id, False, str(exc))
 
     def release(self, command: agent_pb2.ReleaseTask) -> None:
+        self.forward.close(command.task_id)
         self.groups.leave(command.task_id)
         self._close_input(command.task_id)
         self.registry.release(command.task_id)
@@ -156,6 +167,9 @@ class TaskCommands:
         # The finished state carries the manifest, so whoever asked knows what
         # there is to collect without having to ask again.
         self.send(agent_pb2.AgentMessage(task_state=_state_of(task, with_results=True)))
+        # Слушатели живут ровно столько, сколько задача: оставить их — значит
+        # держать чужие порты занятыми на машине владельца.
+        self.forward.close(spec.task_id)
         self.groups.leave(spec.task_id)
 
     def _deliver(self, task_id: str, expected: List[agent_pb2.InputFile]):
@@ -233,6 +247,58 @@ class TaskCommands:
             )
             return
         self.send(agent_pb2.AgentMessage(task_message=message))
+
+    def _task_forward(self, task_id: str, body: dict) -> dict:
+        """Задача прислала свою раскладку портов и просит сделать её рабочей.
+
+        Разложить порты — дело задачи: их выбирает её софт. Дело агента —
+        только выяснить, кто из соседей на этой же машине (таким проброс не
+        нужен и вреден: их сервер уже слушает эти порты), а кто нет.
+        """
+        group = self.groups.of(task_id)
+        if group is None:
+            raise TaskRefused(
+                f"задача {task_id} не в группе, и соседей у неё нет")
+        try:
+            ports = {int(rank): [int(p) for p in plist]
+                     for rank, plist in (body.get("ports") or {}).items()}
+        except (TypeError, ValueError) as exc:
+            raise TaskRefused(f"раскладка портов не читается: {exc}") from None
+        if not ports:
+            raise TaskRefused("в раскладке нет ни одного порта")
+
+        remote: Dict[int, str] = {}
+        for rank, member in group.members.items():
+            if rank == group.rank:
+                continue
+            if self.groups.local_task(group.group_id, rank) is not None:
+                continue        # сосед на этой же машине — проброс не нужен
+            if not member.peer_id:
+                raise TaskRefused(
+                    f"у ранга {rank} на узле {member.node_id} нет прямого канала; "
+                    "без него соседи друг друга не найдут")
+            remote[rank] = member.peer_id
+        return self.forward.open(task_id, mine=ports.get(group.rank, []),
+                                 remote=remote, ports=ports)
+
+    def _allow_inbound(self, ports: List[int]) -> None:
+        """Открыть НАШИ порты соседям. По умолчанию закрыто всё: иначе через
+        туннель достаётся любой порт этой машины."""
+        endpoint = getattr(self._peer_node(), "tunnels", None)
+        if endpoint is None:
+            return
+        allowed = set(ports)
+        previous = endpoint.allow
+        endpoint.allow = lambda port: port in allowed or previous(port)
+
+    def _stub_for(self, peer_id: str):
+        node = self._peer_node()
+        if node is None:
+            raise TaskRefused("на этом узле нет прямого канала до соседей")
+        return node.stub_for(peer_id)
+
+    def _peer_node(self):
+        return getattr(self.peers, "node", None) if self.peers is not None else None
 
     def _task_ready(self, task_id: str, port: int) -> None:
         task = self.registry.get(task_id)

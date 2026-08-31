@@ -1,0 +1,6 @@
+Metadata-Version: 2.4
+Name: loom-ray
+Version: 0.1.0
+Summary: One rank of a Ray cluster, run as a Loom task
+Requires-Python: >=3.10
+Requires-Dist: ray>=2.9

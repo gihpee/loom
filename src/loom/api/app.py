@@ -24,6 +24,9 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from loom.logging_config import get_logger
 from loom.orchestrator.agents import AgentError
 from loom.orchestrator.models import ModelError, describe, split_layers, stage_payload
+from loom.orchestrator.connectivity import prefer_meshy, verdict
+from loom.orchestrator.payloads import PayloadMissing, ray_payload
+from loom.orchestrator.rendezvous import relay_addrs
 from loom.orchestrator.releases import ReleaseError
 
 logger = get_logger(__name__)
@@ -32,6 +35,21 @@ logger = get_logger(__name__)
 def _error(status: int, message: str, kind: str = "invalid_request_error") -> JSONResponse:
     return JSONResponse(status_code=status,
                         content={"error": {"message": message, "type": kind}})
+
+
+def _inputs_of(raw: dict) -> dict:
+    """Файлы, которые едут вместе с задачей. Base64, потому что тело — JSON.
+
+    Имя файла в ошибке: «неверный base64» ничего не стоит, когда файлов
+    десяток, а испорчен один.
+    """
+    decoded: dict = {}
+    for name, data in (raw.get("inputs") or {}).items():
+        try:
+            decoded[name] = base64.b64decode(data)
+        except (ValueError, TypeError) as exc:
+            raise ValueError(f"{name!r}: {exc}") from None
+    return decoded
 
 
 def create_app(*, agents=None, releases=None, keystore=None, config=None,
@@ -205,9 +223,8 @@ def create_app(*, agents=None, releases=None, keystore=None, config=None,
         if isinstance(command, str):
             command = command.split()
         try:
-            inputs = {name: base64.b64decode(data)
-                      for name, data in (raw.get("inputs") or {}).items()}
-        except (ValueError, TypeError) as exc:
+            inputs = _inputs_of(raw)
+        except ValueError as exc:
             return _error(400, f"'inputs' must be base64 per file: {exc}")
         try:
             record = agents.submit(
@@ -304,12 +321,21 @@ def create_app(*, agents=None, releases=None, keystore=None, config=None,
 
         All-or-nothing: a pipeline missing a stage does not run slower, it does
         not run, so a group that cannot be placed whole is not placed at all.
+
+        `inputs` едут каждому рангу — как и одиночной задаче, base64 на файл.
+        Одна программа на всех, разное ей передаётся через `per_rank`: узел,
+        впервые видящий эту работу, получает её код вместе с задачей, и никакой
+        реестр пакетов посередине для этого не нужен.
         """
         if forbidden(x_loom_admin_token):
             return _error(403, "invalid admin token")
         if agents is None:
             return need_agents()
         raw = await request.json()
+        try:
+            inputs = _inputs_of(raw)
+        except ValueError as exc:
+            return _error(400, f"'inputs' must be base64 per file: {exc}")
         try:
             record = agents.submit_group(
                 size=int(raw.get("size") or 1),
@@ -322,6 +348,7 @@ def create_app(*, agents=None, releases=None, keystore=None, config=None,
                 node_ids=list(raw.get("node_ids") or []) or None,
                 per_rank=raw.get("per_rank") or None,
                 label=(raw.get("label") or "").strip(),
+                inputs=inputs,
             )
         except AgentError as exc:
             return _error(409, str(exc))
@@ -482,6 +509,102 @@ def create_app(*, agents=None, releases=None, keystore=None, config=None,
                        "start_layer": s, "end_layer": e}
                       for i, (s, e) in enumerate(ranges)],
         }
+
+    @app.post("/admin/ray")
+    async def admin_ray(request: Request,
+                        x_loom_admin_token: str | None = Header(default=None)):
+        """Собрать Ray-кластер на нескольких узлах.
+
+        То же самое, что модель, только жилец другой: обычная группа, обычное
+        окружение, обычные входные файлы. Агент не отличает эту задачу от
+        стадии инференса и про Ray ничего не знает — см. docs/RAY.md.
+
+        `script` (base64) — точка входа клиента. Её запускает ранг 0, когда
+        кластер уже собран; без неё кластер просто стоит и ждёт.
+        """
+        if forbidden(x_loom_admin_token):
+            return _error(403, "invalid admin token")
+        if agents is None:
+            return need_agents()
+        raw = await request.json()
+
+        available = [n for n in agents.node_list() if n["accepts_tasks"]]
+        if not available:
+            return _error(409, "ни один подключённый узел не берёт задачи")
+        named = list(raw.get("node_ids") or [])
+        by_id = {n["node_id"]: n for n in available}
+        if named:
+            missing = [n for n in named if n not in by_id]
+            if missing:
+                return _error(409, f"эти узлы не подключены или не берут работу: {missing}")
+            picked = [by_id[n] for n in named]
+        else:
+            size = int(raw.get("size") or 1)
+            if size > len(available):
+                return _error(409,
+                              f"просят {size} узлов, а работу берут {len(available)}")
+            # Сначала те, кто легче сходится с соседями: Ray гоняет через этот
+            # путь весь свой обмен, а не восемь килобайт на токен, как стадия.
+            picked = prefer_meshy(available)[:size]
+        chosen = [n["node_id"] for n in picked]
+
+        # Собраться группа обязана ДО того, как займёт карты. Единственный
+        # безнадёжный случай — прямого линка нет и реле не развёрнуто: тогда
+        # ранги не найдут друг друга, и снаружи это выглядит зависанием.
+        relay_available = bool(relay_addrs())
+        path = verdict(picked, relay_available=relay_available)
+        if not path["ok"]:
+            return _error(409, path["why"])
+
+        try:
+            payload = ray_payload()
+        except PayloadMissing as exc:
+            return _error(500, str(exc))
+
+        # Точка входа клиента едет обычным входным файлом: задача стартует в
+        # своём каталоге и видит его рядом с собой.
+        script: dict = {}
+        if raw.get("script"):
+            try:
+                script = _inputs_of({"inputs": {"job.py": raw["script"]}})
+            except ValueError as exc:
+                return _error(400, f"'script' должен быть base64: {exc}")
+        entry = next(iter(script), "")
+
+        version = (raw.get("ray_version") or "").strip()
+        label = (raw.get("label") or "ray").strip()
+        # Свой ранг задача узнаёт из окружения, которое ставит агент, поэтому
+        # команда у всех одна. Отличается только нулевой: ему запускать код.
+        command = ["python", "-m", "loom_ray.server", "--size", str(len(chosen))]
+        per_rank = [
+            {"command": command + (["--script", entry] if rank == 0 and entry else [])}
+            for rank in range(len(chosen))
+        ]
+
+        try:
+            record = agents.submit_group(
+                size=len(chosen),
+                command=command,
+                per_rank=per_rank,
+                node_ids=chosen,
+                label=label,
+                serve_port=1,
+                inputs={**payload, **script},
+                environment={"kind": "python", "requirements": [
+                    f"ray=={version}" if version else "ray",
+                ]},
+                resources=raw.get("resources") or None,
+                # Скрипт кончается сам; стоящий кластер живёт, пока не снимут.
+                timeout_s=int(raw.get("timeout_s") or
+                              (6 * 3600 if entry else 30 * 24 * 3600)),
+            )
+        except AgentError as exc:
+            return _error(409, str(exc))
+        return {**record.as_dict(), "entry": entry, "nodes": chosen,
+                # Каким путём соберётся кластер. Медленный кластер должен быть
+                # объяснимым, а не загадочным.
+                "path": path["path"], "relayed_pairs": path["relayed_pairs"],
+                "warning": path["why"] if path["path"] == "relay" else ""}
 
     # ------------------------------------------------------------ releases
     @app.get("/agent/release/{version}.tar.gz")

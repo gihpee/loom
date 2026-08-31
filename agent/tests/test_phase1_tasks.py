@@ -324,3 +324,102 @@ def test_аргумент_с_пробелами_доезжает_одним_ку
     assert task.wait(timeout=30)
     assert task.state == "done", task.logs()
     assert "одна строка с пробелами" in task.logs()
+
+
+# ------------------------------------------------- короткий каталог для сокетов
+# Предел ядра на путь unix-сокета. Не соглашение — bind() отказывает.
+SOCKET_PATH_LIMIT = 103
+
+
+def test_задаче_дают_каталог_под_короткий_путь(registry):
+    task = registry.submit(spec(
+        "t20", [sys.executable, "-c",
+                "import os; print(os.environ['LOOM_TASK_TMP'])"]))
+    assert task.wait(timeout=30)
+    assert task.logs().strip() == task.directory.inner_scratch
+    assert task.directory.scratch.is_dir(), "каталог обещан переменной, но не создан"
+
+
+def test_в_нём_помещается_unix_сокет(registry):
+    """Ровно то, из-за чего он существует.
+
+    Каталог задачи с полным task_id уже съедает почти весь лимит: Ray кладёт
+    плазма-сокет в `<tmp>/ray/session_<дата>_<время>_<мкс>_<pid>/sockets/`, и
+    на реальном узле это не влезало на 5–7 байт. Диагностируется отвратительно:
+    ошибка называет длину пути, а не то, что каталог задачи глубоко лежит.
+    """
+    program = (
+        "import os, socket;"
+        "p = os.path.join(os.environ['LOOM_TASK_TMP'],"
+        " 'ray', 'session_2026-08-31_11-53-53_288216_84711', 'sockets');"
+        "os.makedirs(p, exist_ok=True);"
+        "s = socket.socket(socket.AF_UNIX);"
+        "s.bind(os.path.join(p, 'plasma_store'));"
+        "print('связался, длина пути', len(os.path.join(p, 'plasma_store')))"
+    )
+    task = registry.submit(spec("t21", [sys.executable, "-c", program]))
+    assert task.wait(timeout=30)
+    assert task.state == "done", task.logs()
+    assert "связался" in task.logs()
+
+
+def test_длинный_путь_задачи_в_лимит_НЕ_влезает(registry):
+    """Обратная сторона: без короткого каталога это не работает.
+
+    Тест на причину, а не на симптом — если каталоги задач когда-нибудь станут
+    короче и проблема исчезнет, он об этом скажет."""
+    task = registry.submit(spec("t22", [sys.executable, "-c", "pass"]))
+    assert task.wait(timeout=30)
+    tail = "/ray/session_2026-08-31_11-53-53_288216_84711/sockets/plasma_store"
+    assert len(str(task.directory.work) + tail) > SOCKET_PATH_LIMIT
+    assert len(task.directory.inner_scratch + tail) <= SOCKET_PATH_LIMIT
+
+
+def test_короткий_каталог_считается_в_дисковую_квоту(registry):
+    """Иначе квота обходится записью не туда."""
+    program = (
+        "import os;"
+        "open(os.path.join(os.environ['LOOM_TASK_TMP'], 'big'), 'wb')"
+        ".write(b'x' * (6 * 1024 * 1024));"
+        "import time; time.sleep(30)"
+    )
+    task = registry.submit(spec(
+        "t23", [sys.executable, "-c", program],
+        resources={"disk_bytes": 1024 * 1024}, timeout_s=30,
+    ))
+    assert task.wait(timeout=40)
+    assert task.state == "cancelled"
+    assert "disk quota" in task.error
+
+
+def test_короткий_каталог_убирается_вместе_с_задачей(registry):
+    task = registry.submit(spec("t24", [sys.executable, "-c", "pass"]))
+    assert task.wait(timeout=30)
+    scratch = task.directory.scratch
+    assert scratch.is_dir()
+    registry.release("t24")
+    assert not scratch.exists(), "остался бы копиться в /tmp навсегда"
+
+
+def test_сокет_предшественника_не_мешает_следующей_задаче(registry):
+    """Тот же id после падения агента: в коротком каталоге остаётся unix-сокет,
+    а bind() по занятому пути отказывает. Задача падала бы на «адрес занят»
+    из-за предшественника, которого давно нет."""
+    bind = (
+        "import os, socket;"
+        "s = socket.socket(socket.AF_UNIX);"
+        "s.bind(os.path.join(os.environ['LOOM_TASK_TMP'], 'sock'));"
+        "print('связался')"
+    )
+    first = registry.submit(spec("t25", [sys.executable, "-c", bind]))
+    assert first.wait(timeout=30)
+    assert first.state == "done", first.logs()
+    assert (first.directory.scratch / "sock").exists(), "сокет должен был остаться"
+
+    # Агент забыл задачу, но каталог остался: так выглядит падение.
+    registry._tasks.pop("t25", None)
+    registry._release_devices("t25")
+
+    second = registry.submit(spec("t25", [sys.executable, "-c", bind]))
+    assert second.wait(timeout=30)
+    assert second.state == "done", second.logs()
