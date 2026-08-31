@@ -65,6 +65,10 @@ class Task:
         self.started_at = 0.0
         self.finished_at = 0.0
         self._proc: Optional[subprocess.Popen] = None
+        # Группа процессов задачи, запомненная пока процесс жив: после его
+        # смерти getpgid по мёртвому pid уже не ответит, а снести потомков надо
+        # именно тогда.
+        self._group: Optional[int] = None
         self._log = bytearray()
         self._lock = threading.RLock()
         self._watchdog: Optional[MemoryWatchdog] = None
@@ -94,6 +98,7 @@ class Task:
             preexec_fn=preexec(self.isolation, self.spec.resources,
                                rootfs=rootfs, workdir="/work" if rootfs else None),
         )
+        self._group = _group_of(self._proc)
         self._watchdog = MemoryWatchdog(
             get_pid=lambda: self._proc.pid if self._proc else None,
             quota_bytes=self.spec.resources.ram_bytes,
@@ -191,7 +196,7 @@ class Task:
         proc = self._proc
         if proc is None or proc.poll() is not None:
             return
-        group = _group_of(proc)
+        group = self._group or _group_of(proc)
         if group is None:
             return
         # The whole group, not the process: a task that started children would
@@ -240,7 +245,37 @@ class Task:
         # ждать его вечно хуже, чем потерять хвост лога.
         if self._drained is not None:
             self._drained.join(timeout=10)
+        self._reap_group()
         self._finish(proc.poll())
+
+    def _reap_group(self) -> None:
+        """Снести всё, что задача оставила после себя.
+
+        `_kill` срабатывает только при снятии, а процесс может выйти и сам —
+        оставив потомков, которых от себя отвязал. Ray именно так и делает:
+        `ray start` разворачивает raylet и воркеров и завершается, а те живут
+        дальше.
+
+        На чужой машине это сотни процессов, которых никто не ждёт. Следующая
+        задача упирается в них лимитом потоков ещё до собственного старта, и
+        выглядит это как её поломка:
+
+            RuntimeError: can't start new thread
+
+        Группа своя: задача делает setsid, так что агент сюда попасть не может.
+        """
+        if self._group is None:
+            return
+        _signal_group(self._group, signal.SIGTERM)
+        # Короткая пауза на добровольный выход, потом наверняка. Ждать долго
+        # незачем: задача уже кончилась, и это уборка, а не остановка.
+        for _ in range(20):
+            if not _group_alive(self._group):
+                return
+            time.sleep(0.1)
+        logger.info("task %s left processes behind; killing its group",
+                    self.spec.task_id)
+        _signal_group(self._group, signal.SIGKILL)
 
     def _finish(self, code: Optional[int]) -> None:
         if self._watchdog is not None:
@@ -296,6 +331,16 @@ def _group_of(proc: subprocess.Popen) -> Optional[int]:
         return os.getpgid(proc.pid)
     except (ProcessLookupError, PermissionError):
         return None
+
+
+def _group_alive(group: int) -> bool:
+    """Остался ли в группе хоть кто-то. Сигнал 0 ничего не шлёт, только
+    проверяет, что адресат существует."""
+    try:
+        os.killpg(group, 0)
+        return True
+    except (ProcessLookupError, PermissionError):
+        return False
 
 
 def _signal_group(group: int, sig: int) -> None:

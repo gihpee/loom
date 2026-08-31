@@ -511,3 +511,48 @@ def test_потолок_остаётся_конечным(monkeypatch):
         monkeypatch.delenv("LOOM_TASK_MAX_PROCESSES", raising=False)
         importlib.reload(limits)
     assert 1024 <= limits.MAX_PROCESSES < 1_000_000, "потолок должен остаться конечным"
+
+
+def test_потомки_не_переживают_задачу_вышедшую_самостоятельно(registry, tmp_path):
+    """Со стенда: `ray start` разворачивает демонов и выходит сам. Агент
+    сносил группу процессов только при СНЯТИИ, так что после самостоятельного
+    выхода сотни процессов Ray оставались жить на чужой машине. Следующая
+    задача упиралась в них лимитом потоков ещё до старта:
+
+        RuntimeError: can't start new thread
+    """
+    marker = tmp_path / "потомок-жив"
+    program = (
+        "import subprocess, sys, os;"
+        f"subprocess.Popen([sys.executable, '-c', "
+        f"\"import time, pathlib;\\npathlib.Path({str(marker)!r}).touch()\\n"
+        f"time.sleep(120)\"]);"
+        "print('запустил потомка и выхожу')"
+    )
+    task = registry.submit(spec("t28", [sys.executable, "-c", program]))
+    assert task.wait(timeout=30)
+    assert task.state == "done", task.logs()
+
+    deadline = time.time() + 15
+    while time.time() < deadline and not marker.exists():
+        time.sleep(0.2)
+    assert marker.exists(), "потомок даже не стартовал — тест ничего не проверяет"
+
+    # Группа снесена вместе с задачей: живых в ней не осталось.
+    from loom_agent.tasks.runner import _group_alive
+
+    assert task._group is not None
+    deadline = time.time() + 15
+    while time.time() < deadline and _group_alive(task._group):
+        time.sleep(0.2)
+    assert not _group_alive(task._group), "потомок пережил задачу"
+
+
+def test_обычная_задача_завершается_как_прежде(registry):
+    """Уборка не должна портить нормальный путь: код возврата и состояние
+    остаются теми же, что и были."""
+    task = registry.submit(spec("t29", [sys.executable, "-c", "print('готово')"]))
+    assert task.wait(timeout=30)
+    assert task.state == "done"
+    assert task.exit_code == 0
+    assert "готово" in task.logs()

@@ -172,35 +172,57 @@ def wait_for_group(size: int, *, timeout_s: float = 0.0) -> int:
         f"{timeout_s or JOIN_WAIT_S:.0f}с")
 
 
-def alive_nodes(timeout_s: float = 30.0) -> int:
-    """Сколько узлов сейчас живо. Ноль означает и «нет узлов», и «Ray ещё не
-    поднялся» — для /health разница неважна, оба значат «не готов».
+# Подключение к Ray делается один раз и переиспользуется. Раньше на каждый
+# опрос заводился поток, а опрос идёт раз в секунду до пятнадцати минут — и
+# это ровно то, что добивало узел, уже занятый чужими процессами.
+_CONNECTED = threading.Event()
+_BROKEN = threading.Event()
+
+
+def _connect(timeout_s: float) -> bool:
+    """Подключиться к своему же узлу Ray. Один раз за жизнь процесса.
 
     С потолком по времени: `ray.init` своего таймаута не имеет и против
-    умершей головы висит молча. Один такой вызов из цикла ожидания подвешивал
-    весь ранг — он оставался «running» и не отвечал ничего, что выглядело
-    хуже любой ошибки.
+    умершей головы висит молча. Один такой вызов подвешивал весь ранг — он
+    оставался «running» и не отвечал ничего, что хуже любой ошибки.
     """
-    answer: List[int] = []
+    if _CONNECTED.is_set():
+        return True
+    if _BROKEN.is_set():
+        return False
 
-    def ask() -> None:
+    def dial() -> None:
         try:
             import ray
 
             if not ray.is_initialized():
                 ray.init(address="auto", log_to_driver=False,
                          ignore_reinit_error=True, configure_logging=False)
-            answer.append(sum(1 for node in ray.nodes() if node.get("Alive")))
-        except Exception:
-            answer.append(0)
+            _CONNECTED.set()
+        except Exception as exc:
+            logger.warning("к Ray не подключиться: %s", exc)
+            _BROKEN.set()
 
-    worker = threading.Thread(target=ask, name="ray-nodes", daemon=True)
+    worker = threading.Thread(target=dial, name="ray-connect", daemon=True)
     worker.start()
     worker.join(timeout_s)
-    if not answer:
-        logger.warning("Ray не ответил за %.0fс, считаем что узлов нет", timeout_s)
+    if not _CONNECTED.is_set() and not _BROKEN.is_set():
+        logger.warning("Ray не ответил за %.0fс; больше не ждём", timeout_s)
+        _BROKEN.set()
+    return _CONNECTED.is_set()
+
+
+def alive_nodes(timeout_s: float = 30.0) -> int:
+    """Сколько узлов сейчас живо. Ноль означает и «нет узлов», и «Ray ещё не
+    поднялся» — для /health разница неважна, оба значат «не готов»."""
+    if not _connect(timeout_s):
         return 0
-    return answer[0]
+    try:
+        import ray
+
+        return sum(1 for node in ray.nodes() if node.get("Alive"))
+    except Exception:
+        return 0
 
 
 def stop_node() -> None:
