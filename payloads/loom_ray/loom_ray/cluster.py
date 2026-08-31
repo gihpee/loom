@@ -27,6 +27,10 @@ logger = logging.getLogger("loom_ray.cluster")
 HEAD_WAIT_S = float(os.environ.get("LOOM_RAY_HEAD_WAIT_S", "900"))
 # Сколько голова ждёт остальных, прежде чем считать это провалом.
 JOIN_WAIT_S = float(os.environ.get("LOOM_RAY_JOIN_WAIT_S", "900"))
+# Сколько раз ранг пробует присоединиться и сколько ждёт между попытками.
+# Голова занимает свой порт задолго до того, как становится готова принимать.
+JOIN_ATTEMPTS = int(os.environ.get("LOOM_RAY_JOIN_ATTEMPTS", "5"))
+JOIN_RETRY_S = float(os.environ.get("LOOM_RAY_JOIN_RETRY_S", "15"))
 
 
 # Взводится, когда задачу снимают. Ожидания смотрят на него, иначе SIGTERM во
@@ -117,13 +121,33 @@ def start_node(rank: int, size: int, *, gpus: Optional[int] = None,
 
     logger.info("ранг %d/%d: %s", rank, size,
                 "поднимаю голову" if rank == 0 else f"подключаюсь к {address}")
-    result = subprocess.run(argv, capture_output=True, text=True, timeout=600)
-    if result.returncode != 0:
-        detail = (result.stderr or result.stdout or "").strip().splitlines()
-        raise ClusterRefused(
-            f"ray start для ранга {rank} не отработал: "
-            + " / ".join(detail[-4:] or ["вывода не было"]))
+    _run_start(argv, rank=rank, retries=0 if rank == 0 else JOIN_ATTEMPTS)
     return address
+
+
+def _run_start(argv: List[str], *, rank: int, retries: int) -> None:
+    """Запустить `ray start`, повторяя, пока голова не примет.
+
+    Повтор нужен именно неголовным рангам. Открытый порт головы не значит, что
+    голова готова: GCS занимает его в первую секунду, а собирается ещё
+    десятки — и присоединение в этом промежутке падает по таймауту raylet'а.
+    Снаружи «занимает порт» и «готова» неотличимы, поэтому вместо угадывания
+    здесь просто пробуют ещё раз.
+    """
+    last = ""
+    for attempt in range(retries + 1):
+        if STOP.is_set():
+            raise Stopped("сборку кластера прервали")
+        result = subprocess.run(argv, capture_output=True, text=True, timeout=600)
+        if result.returncode == 0:
+            return
+        detail = (result.stderr or result.stdout or "").strip().splitlines()
+        last = " / ".join(detail[-4:] or ["вывода не было"])
+        if attempt < retries:
+            logger.warning("ранг %d: голова ещё не принимает (попытка %d из %d): %s",
+                           rank, attempt + 1, retries + 1, last[:200])
+            STOP.wait(JOIN_RETRY_S)
+    raise ClusterRefused(f"ray start для ранга {rank} не отработал: {last}")
 
 
 def wait_for_group(size: int, *, timeout_s: float = 0.0) -> int:
@@ -148,25 +172,46 @@ def wait_for_group(size: int, *, timeout_s: float = 0.0) -> int:
         f"{timeout_s or JOIN_WAIT_S:.0f}с")
 
 
-def alive_nodes() -> int:
+def alive_nodes(timeout_s: float = 30.0) -> int:
     """Сколько узлов сейчас живо. Ноль означает и «нет узлов», и «Ray ещё не
-    поднялся» — для /health разница неважна, оба значат «не готов»."""
-    try:
-        import ray
+    поднялся» — для /health разница неважна, оба значат «не готов».
 
-        if not ray.is_initialized():
-            ray.init(address="auto", log_to_driver=False,
-                     ignore_reinit_error=True, configure_logging=False)
-        return sum(1 for node in ray.nodes() if node.get("Alive"))
-    except Exception:
+    С потолком по времени: `ray.init` своего таймаута не имеет и против
+    умершей головы висит молча. Один такой вызов из цикла ожидания подвешивал
+    весь ранг — он оставался «running» и не отвечал ничего, что выглядело
+    хуже любой ошибки.
+    """
+    answer: List[int] = []
+
+    def ask() -> None:
+        try:
+            import ray
+
+            if not ray.is_initialized():
+                ray.init(address="auto", log_to_driver=False,
+                         ignore_reinit_error=True, configure_logging=False)
+            answer.append(sum(1 for node in ray.nodes() if node.get("Alive")))
+        except Exception:
+            answer.append(0)
+
+    worker = threading.Thread(target=ask, name="ray-nodes", daemon=True)
+    worker.start()
+    worker.join(timeout_s)
+    if not answer:
+        logger.warning("Ray не ответил за %.0fс, считаем что узлов нет", timeout_s)
         return 0
+    return answer[0]
 
 
 def stop_node() -> None:
-    """Убрать за собой. Группу процессов агент всё равно снесёт, но снести её
-    посреди записи — не то же самое, что дать Ray остановиться самому."""
-    try:
-        subprocess.run([sys.executable, "-m", "ray.scripts.scripts", "stop", "--force"],
-                       capture_output=True, timeout=120)
-    except Exception:
-        logger.debug("ray stop не отработал", exc_info=True)
+    """Ничего не делать — и это осознанно.
+
+    Напрашивается `ray stop --force`, и он ЛОМАЕТ соседей: команда снимает все
+    процессы Ray этого пользователя на машине, а не наши. Два ранга на одном
+    узле работают под одним uid, так что упавший ранг своей уборкой убивал
+    голову живого — тот потом стоял и ждал кластер, которого уже нет.
+
+    Убирает за нами агент: задача работает в своей группе процессов, и снятие
+    задачи сносит её целиком вместе со всем, что Ray наплодил.
+    """
+    return

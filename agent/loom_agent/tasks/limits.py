@@ -30,9 +30,27 @@ from loom_agent.tasks.spec import Resources, TaskRefused
 
 logger = logging.getLogger("loom_agent.tasks.limits")
 
-# Enough processes for a normal build or training run, far short of what it
-# takes to exhaust the machine's process table.
-MAX_PROCESSES = 512
+
+def _int(name: str, default: int) -> int:
+    try:
+        return max(1, int(os.environ.get(name, "") or default))
+    except ValueError:
+        return default
+
+# Потолок против форк-бомбы, и только против неё.
+#
+# На Linux RLIMIT_NPROC считает НЕ процессы, а потоки, и считает их на весь
+# uid — а все задачи узла работают под одним. Поэтому 512 было куда меньше,
+# чем выглядело: Ray поднимает воркер на ядро, у каждого свои потоки, и два
+# ранга на одной машине упирались в общий бюджет. Падало это так, что причина
+# не следует ни из чего:
+#
+#   RuntimeError: Resource temporarily unavailable      (EAGAIN от fork)
+#   Failed to register worker to Raylet: End of file    (у соседа умер raylet)
+#
+# Нынешнее значение всё ещё на порядки ниже kernel.threads-max, то есть от
+# исчерпания машины защищает, а нормальной работе не мешает.
+MAX_PROCESSES = _int("LOOM_TASK_MAX_PROCESSES", 8192)
 # A task should not be able to fill the owner's disk with one file.
 MAX_FILE_BYTES = 32 * 1024**3
 DEFAULT_RAM_BYTES = 4 * 1024**3

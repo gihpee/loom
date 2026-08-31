@@ -208,3 +208,68 @@ def test_ранг_переживает_негодный_номер_порта(tm
             time.sleep(1)
     finally:
         _end(alone)
+
+
+def test_упавший_ранг_не_трогает_соседей():
+    """Со стенда: `ray stop --force` снимает ВСЕ процессы Ray этого
+    пользователя на машине, а не только свои. Упавший ранг своей уборкой убивал
+    голову живого соседа — тот потом стоял и ждал кластер, которого уже нет.
+
+    Убирает за нами агент: задача работает в своей группе процессов.
+    """
+    import subprocess as sp
+
+    from loom_ray import cluster
+
+    ran = []
+    original = sp.run
+    try:
+        sp.run = lambda *a, **k: ran.append(a) or original(
+            [sys.executable, "-c", "pass"], capture_output=True)
+        cluster.stop_node()
+    finally:
+        sp.run = original
+    assert ran == [], "уборка запустила внешнюю команду — она снесёт и соседей"
+
+
+def test_ранг_повторяет_попытку_пока_голова_не_готова(monkeypatch):
+    """Открытый порт головы не значит, что голова готова: GCS занимает его в
+    первую секунду, а собирается ещё десятки. Присоединение в этом промежутке
+    падает по таймауту raylet'а, и отличить это снаружи нельзя — поэтому
+    пробуют ещё раз, а не гадают."""
+    import subprocess as sp
+
+    from loom_ray import cluster
+
+    monkeypatch.setattr(cluster, "JOIN_RETRY_S", 0.01)
+    attempts = []
+
+    class Result:
+        def __init__(self, code):
+            self.returncode, self.stdout, self.stderr = code, "", "raylet timed out"
+
+    def flaky(*_a, **_k):
+        attempts.append(1)
+        return Result(1 if len(attempts) < 3 else 0)
+
+    monkeypatch.setattr(sp, "run", flaky)
+    cluster._run_start(["ray", "start"], rank=1, retries=4)
+    assert len(attempts) == 3, "должен был повторять, пока голова не примет"
+
+
+def test_голова_не_повторяет(monkeypatch):
+    """Ей ждать некого: если она не поднялась, повтор ничего не меняет, а
+    время до внятной ошибки растёт кратно."""
+    import subprocess as sp
+
+    from loom_ray import cluster
+
+    attempts = []
+
+    class Result:
+        returncode, stdout, stderr = 1, "", "порт занят"
+
+    monkeypatch.setattr(sp, "run", lambda *_a, **_k: attempts.append(1) or Result())
+    with pytest.raises(cluster.ClusterRefused, match="ранга 0"):
+        cluster._run_start(["ray", "start", "--head"], rank=0, retries=0)
+    assert len(attempts) == 1

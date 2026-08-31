@@ -467,3 +467,47 @@ def test_служащая_задача_получает_рабочий_порт(
     assert task.wait(timeout=30)
     assert task.state == "done", task.logs()
     assert "занял" in task.logs()
+
+
+# ------------------------------------------------------------ потолок потоков
+def test_задаче_хватает_потоков_на_настоящую_нагрузку(registry):
+    """Со стенда: два ранга Ray на одной машине падали на
+
+        RuntimeError: Resource temporarily unavailable
+
+    — это EAGAIN от fork. RLIMIT_NPROC на Linux считает ПОТОКИ, а не процессы,
+    и считает их на весь uid, под которым работают все задачи узла. Прежние
+    512 выглядели просторно и таковыми не были: Ray поднимает воркер на ядро,
+    у каждого свои потоки.
+
+    Оговорка: на macOS этот лимит считает процессы, так что здесь тест ловит
+    регрессию только на Linux — то есть там, где узлы и работают.
+    """
+    program = (
+        "import threading, time;"
+        "stop = threading.Event();"
+        "ts = [threading.Thread(target=stop.wait, daemon=True) for _ in range(600)];"
+        "[t.start() for t in ts];"
+        "print('потоков', threading.active_count());"
+        "stop.set()"
+    )
+    task = registry.submit(spec("t27", [sys.executable, "-c", program]))
+    assert task.wait(timeout=60)
+    assert task.state == "done", task.logs()
+    assert "потоков" in task.logs()
+
+
+def test_потолок_остаётся_конечным(monkeypatch):
+    """Защита от форк-бомбы никуда не девается — она просто перестала мешать."""
+    import importlib
+
+    import loom_agent.tasks.limits as limits
+
+    monkeypatch.setenv("LOOM_TASK_MAX_PROCESSES", "77")
+    importlib.reload(limits)
+    try:
+        assert limits.MAX_PROCESSES == 77
+    finally:
+        monkeypatch.delenv("LOOM_TASK_MAX_PROCESSES", raising=False)
+        importlib.reload(limits)
+    assert 1024 <= limits.MAX_PROCESSES < 1_000_000, "потолок должен остаться конечным"
