@@ -230,7 +230,10 @@ def create_app(*, agents=None, releases=None, keystore=None, config=None,
             record = agents.submit(
                 command=list(command),
                 environment=raw.get("environment") or None,
-                resources=raw.get("resources") or None,
+                # Доля процессора названа явно: Ray пред-запускает воркер на
+                # каждое «своё» ядро, и без этого два ранга на одной машине
+                # заводят вдвое больше процессов, чем она стоит.
+                resources=raw.get("resources") or {"cpus": raw.get("cpus") or 8},
                 env=raw.get("env") or None,
                 timeout_s=int(raw.get("timeout_s") or 3600),
                 inputs=inputs,

@@ -556,3 +556,29 @@ def test_обычная_задача_завершается_как_прежде(
     assert task.state == "done"
     assert task.exit_code == 0
     assert "готово" in task.logs()
+
+
+def test_задаче_говорят_её_долю_процессора(registry):
+    """Со стенда: Ray считал своими все ядра машины и пред-запускал воркер на
+    каждое. Два ранга на одном узле заводили вдвое больше процессов, чем она
+    стоит, и упирались в лимит потоков раньше, чем начинали работать."""
+    task = registry.submit(spec(
+        "t30", [sys.executable, "-c", "import os; print(os.environ['LOOM_TASK_CPUS'])"],
+        resources={"cpus": 4},
+    ))
+    assert task.wait(timeout=30)
+    assert task.state == "done", task.logs()
+    assert task.logs().strip() == "4.0"
+
+
+def test_лимиты_задачи_попадают_в_лог(registry, caplog):
+    """Иначе «сколько потоков разрешено» выясняется обратным ходом — по тому,
+    на чём упал чужой софт."""
+    import logging as _logging
+
+    with caplog.at_level(_logging.INFO, logger="loom_agent.tasks.runner"):
+        task = registry.submit(spec("t31", [sys.executable, "-c", "pass"]))
+        assert task.wait(timeout=30)
+    said = [r.getMessage() for r in caplog.records if "limits:" in r.getMessage()]
+    assert said, "агент не сказал, с какими лимитами пошла задача"
+    assert "потоков" in said[0] and "ядер видно" in said[0]

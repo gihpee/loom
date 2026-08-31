@@ -93,7 +93,23 @@ def _common_flags(ports: RankPorts, gpus: Optional[int]) -> List[str]:
     ]
     if gpus is not None:
         flags += ["--num-gpus", str(gpus)]
+    # Сколько воркеров поднимать. Без этого Ray считает своими ВСЕ ядра машины
+    # и пред-запускает воркер на каждое — а ядра на узле делятся, и два ранга
+    # на одной машине заводят вдвое больше процессов, чем она стоит. Каждый со
+    # своими потоками, и упирается это в лимит задолго до пользы.
+    cpus = _own_cpus()
+    if cpus:
+        flags += ["--num-cpus", str(cpus)]
     return flags
+
+
+def _own_cpus() -> int:
+    """Своя доля процессора, как её назвал агент. Ноль — «решай сам»."""
+    try:
+        share = float(os.environ.get("LOOM_TASK_CPUS", "") or 0)
+    except ValueError:
+        return 0
+    return max(1, int(share)) if share > 0 else 0
 
 
 def start_node(rank: int, size: int, *, gpus: Optional[int] = None,

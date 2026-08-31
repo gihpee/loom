@@ -99,6 +99,7 @@ class Task:
                                rootfs=rootfs, workdir="/work" if rootfs else None),
         )
         self._group = _group_of(self._proc)
+        _report_limits(self.spec.task_id)
         self._watchdog = MemoryWatchdog(
             get_pid=lambda: self._proc.pid if self._proc else None,
             quota_bytes=self.spec.resources.ram_bytes,
@@ -154,6 +155,10 @@ class Task:
             # кладёт unix-сокеты рядом с собой: путь такого сокета не может
             # быть длиннее 103 байт, а каталог задачи уже почти весь лимит.
             "LOOM_TASK_TMP": self.directory.inner_scratch,
+            # Сколько процессора задаче выделено. Без этого всё, что смотрит
+            # на os.cpu_count(), считает машину своей целиком — а на узле она
+            # делится, и два таких соседа выедают её вдвоём.
+            "LOOM_TASK_CPUS": str(self.spec.resources.cpus),
         }
         if self.spec.serve_port:
             env["LOOM_SERVE_PORT"] = str(self.spec.serve_port)
@@ -331,6 +336,27 @@ def _group_of(proc: subprocess.Popen) -> Optional[int]:
         return os.getpgid(proc.pid)
     except (ProcessLookupError, PermissionError):
         return None
+
+
+def _report_limits(task_id: str) -> None:
+    """Сказать вслух, с какими лимитами задача пошла работать.
+
+    Агент ставит их молча и зажимает по жёсткому пределу контейнера, который
+    может оказаться каким угодно. Из-за этого «сколько потоков разрешено» до
+    сих пор выяснялось обратным ходом — по тому, на чём падал Ray. Одна строка
+    в логе стоит дешевле любого такого расследования.
+    """
+    try:
+        import resource as _r
+
+        nproc = _r.getrlimit(_r.RLIMIT_NPROC)
+        nofile = _r.getrlimit(_r.RLIMIT_NOFILE)
+    except Exception:
+        return
+    shown = lambda v: "без предела" if v == _r.RLIM_INFINITY else v  # noqa: E731
+    logger.info("task %s limits: потоков %s (потолок %s), файлов %s, ядер видно %s",
+                task_id, shown(nproc[0]), shown(nproc[1]), shown(nofile[0]),
+                os.cpu_count())
 
 
 def _group_alive(group: int) -> bool:

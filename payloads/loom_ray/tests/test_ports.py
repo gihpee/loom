@@ -66,3 +66,18 @@ def test_карта_проброса_покрывает_всю_группу():
     карта = crossing_for_group(4)
     assert sorted(карта) == [0, 1, 2, 3]
     assert all(карта[r] for r in карта)
+
+
+def test_доля_процессора_берётся_из_окружения(monkeypatch):
+    """Её называет агент. Ноль означает «решай сам» — так ведёт себя Ray без
+    флага, и это правильный ответ, когда доля неизвестна."""
+    from loom_ray.cluster import _own_cpus
+
+    monkeypatch.setenv("LOOM_TASK_CPUS", "8.0")
+    assert _own_cpus() == 8
+    monkeypatch.setenv("LOOM_TASK_CPUS", "0.5")
+    assert _own_cpus() == 1, "меньше одного ядра Ray не поймёт"
+    monkeypatch.delenv("LOOM_TASK_CPUS", raising=False)
+    assert _own_cpus() == 0
+    monkeypatch.setenv("LOOM_TASK_CPUS", "не число")
+    assert _own_cpus() == 0
