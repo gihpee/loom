@@ -31,6 +31,23 @@ server {
         proxy_read_timeout 900s;
     }
 
+    # Канал до Ray-кластера, за которым приходит loom-connect. Здесь важен не
+    # proxy_pass, а три строчки про upgrade: без них nginx закрывает
+    # рукопожатие WebSocket, и клиент видит обрыв без всякой причины.
+    location /connect/ {
+        proxy_pass http://${LOOM_API_HOST}:${LOOM_HTTP_PORT};
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_set_header X-Loom-Admin-Token $http_x_loom_admin_token;
+        # Ray Client держит соединение открытым и подолгу молчит: между двумя
+        # вызовами из ноутбука может пройти час, и рвать его нельзя.
+        proxy_read_timeout 86400s;
+        proxy_send_timeout 86400s;
+        proxy_buffering off;
+    }
+
     location /v1/ {
         proxy_pass http://${LOOM_API_HOST}:${LOOM_HTTP_PORT};
         proxy_set_header Host $host;

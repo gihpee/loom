@@ -36,6 +36,17 @@ with open(os.path.join(os.environ["LOOM_TASK_OUT"], "answer.txt"), "w") as f:
     f.write(str(sum(answers)))
 `;
 
+/** Команда, которую оператор выполняет у себя, чтобы дотянуться до кластера.
+ *
+ *  Адрес берётся из адресной строки: панель и API живут на одном origin, так
+ *  что то, по чему открыт браузер, и есть то, по чему достучится клиент.
+ *
+ *  Токен НЕ подставляется намеренно. Он даёт право исполнять код на чужих
+ *  машинах, а эта команда попадёт и в скриншот, и в историю чата. */
+function connectCommand(group: Group): string {
+  return `loom-connect ${location.host} ${group.group_id} --token <ваш токен>`;
+}
+
 /** Как этот узел даётся соседям.
  *
  *  Данных о конкретной ПАРЕ у нас нет: узлы докладывают о себе, а не друг о
@@ -64,6 +75,7 @@ function phase(s: StageHealth): string {
 function Cluster({ group, nodes, onStop, onForget }: {
   group: Group; nodes: Node[]; onStop: () => void; onForget?: () => void;
 }) {
+  const toast = useToast();
   const [health, setHealth] = useState<GroupHealth | null>(null);
   useEffect(() => {
     // Готовность спрашивается у самих рангов, а не выводится из состояния
@@ -107,6 +119,23 @@ function Cluster({ group, nodes, onStop, onForget }: {
             : <Button size="sm" kind="danger" onClick={onStop}>снять</Button>}
         </span>
       </div>
+
+      {group.finished ? null : (
+        <div style={{ display: "grid", gap: 8 }}>
+          <pre className="block pickable" style={{ margin: 0 }}>{connectCommand(group)}</pre>
+          <div style={{ display: "flex", gap: 8, alignItems: "center",
+                        flexWrap: "wrap" }}>
+            <Button size="sm" onClick={() => {
+              navigator.clipboard.writeText(connectCommand(group));
+              toast("ok", "скопировано");
+            }}>скопировать</Button>
+            <span className="sub" style={{ margin: 0 }}>
+              локальный порт до кластера; дальше{" "}
+              <code>ray.init("ray://127.0.0.1:10001")</code> у себя
+            </span>
+          </div>
+        </div>
+      )}
 
       {relayed && (
         <div className="sub" style={{ margin: 0, color: "var(--warn)" }}>

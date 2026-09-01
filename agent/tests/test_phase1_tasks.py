@@ -510,7 +510,9 @@ def test_потолок_остаётся_конечным(monkeypatch):
     finally:
         monkeypatch.delenv("LOOM_TASK_MAX_PROCESSES", raising=False)
         importlib.reload(limits)
-    assert 1024 <= limits.MAX_PROCESSES < 1_000_000, "потолок должен остаться конечным"
+    # Конечный, но с запасом: смысл в защите от форк-бомбы, а не в нормировании
+    # потоков. Ниже kernel.threads-max он остаётся на порядок.
+    assert 8192 <= limits.MAX_PROCESSES < 1_000_000, "потолок должен остаться конечным"
 
 
 def test_потомки_не_переживают_задачу_вышедшую_самостоятельно(registry, tmp_path):

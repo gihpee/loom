@@ -36,7 +36,8 @@ logger = logging.getLogger("loom_ray.server")
 AGENT_URL = os.environ.get("LOOM_AGENT_URL", "")
 TASK_ID = os.environ.get("LOOM_TASK_ID", "")
 
-STATE: dict = {"ready": False, "phase": "starting", "nodes": 0, "size": 0, "error": ""}
+STATE: dict = {"ready": False, "phase": "starting", "nodes": 0, "size": 0,
+               "error": "", "client_port": 0}
 _STOP = threading.Event()
 
 
@@ -60,6 +61,11 @@ class Handler(BaseHTTPRequestHandler):
             "nodes": STATE["nodes"],
             "size": STATE["size"],
             "error": STATE["error"],
+            # Порт клиентского входа. Спрашивает его оркестратор, когда до
+            # кластера приходит loom-connect: раскладку портов определяет
+            # версия Ray, и знать её оркестратору значит обновлять его вместе
+            # с ней. Ноль означает «внешнего входа нет».
+            "client_port": STATE["client_port"],
         })
 
     def _json(self, code: int, body: dict) -> None:
@@ -179,6 +185,10 @@ def main(argv=None) -> int:
             logger.info("агент слушает %d чужих портов для рангов %s",
                         bridged["listening"], bridged.get("ranks"))
         STATE["phase"] = "поднимаю ray"
+        # Порт клиентского входа — до старта: оркестратор спрашивает его у
+        # /health, и знать его надо раньше, чем кластер соберётся.
+        if args.rank == 0:
+            STATE["client_port"] = cluster.client_port(args.size)
         address = cluster.start_node(args.rank, args.size, gpus=args.gpus,
                                      temp_dir=temp_dir)
         STATE["phase"] = "жду остальные ранги"

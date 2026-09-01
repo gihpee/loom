@@ -262,6 +262,53 @@ class AgentNode:
         }
 
 
+class Tunnel:
+    """Одно соединение снаружи внутрь. Байты в обе стороны и ничего больше.
+
+    Держит очередь входящих, а не колбэк: читающая сторона — веб-сокет, и ей
+    удобнее забирать по мере готовности, чем принимать в чужом потоке.
+    """
+
+    def __init__(self, *, hub, conn_id: str, session, inbox: asyncio.Queue,
+                 node_id: str = "") -> None:
+        self.hub = hub
+        self.conn_id = conn_id
+        self.session = session
+        self.inbox = inbox
+        self.node_id = node_id
+        self.closed = False
+
+    def send(self, data: bytes) -> None:
+        if self.closed:
+            return
+        self.session.send(agent_pb2.ServerMessage(
+            tunnel_chunk=agent_pb2.TunnelChunk(conn_id=self.conn_id, data=data)))
+
+    async def recv(self) -> bytes:
+        """Следующий кусок, или пусто, когда канал кончился."""
+        chunk = await self.inbox.get()
+        if chunk.error:
+            logger.info("канал %s закрыт узлом: %s", self.conn_id, chunk.error)
+            self.error = chunk.error
+            return b""
+        if chunk.last:
+            return b""
+        return chunk.data
+
+    def close(self) -> None:
+        if self.closed:
+            return
+        self.closed = True
+        self.hub._tunnels.pop(self.conn_id, None)
+        try:
+            self.session.send(agent_pb2.ServerMessage(
+                tunnel_chunk=agent_pb2.TunnelChunk(conn_id=self.conn_id, last=True)))
+        except Exception:
+            logger.debug("закрытие канала %s не ушло", self.conn_id, exc_info=True)
+
+    error = ""
+
+
 class AgentSession:
     """One connected node, and the only way to say anything to it."""
 
@@ -313,6 +360,8 @@ class AgentHub:
         # Очередь, а не future: ответ может прийти частями, и собрать его
         # целиком — частный случай, а не наоборот.
         self._serving: Dict[str, asyncio.Queue] = {}
+        # Открытые байтовые каналы наружу: conn_id -> очередь входящих кусков.
+        self._tunnels: Dict[str, asyncio.Queue] = {}
 
     # ------------------------------------------------------------ хранение
     def _touch(self) -> None:
@@ -815,6 +864,28 @@ class AgentHub:
             signature=release.signature,
         )
 
+    # ---------------------------------------------------- байтовый канал
+    def open_tunnel(self, task_id: str, port: int) -> "Tunnel":
+        """Соединение с портом задачи, поверх стрима, который узел открыл сам.
+
+        Ничего не ждёт: узел ответит либо байтами, либо закрытием с причиной, и
+        оба ответа придут в очередь этого канала.
+        """
+        record, session = self._locate(task_id)
+        conn_id = f"c-{uuid.uuid4().hex[:12]}"
+        inbox: asyncio.Queue = asyncio.Queue()
+        self._tunnels[conn_id] = inbox
+        session.send(agent_pb2.ServerMessage(tunnel_open=agent_pb2.TunnelOpen(
+            conn_id=conn_id, task_id=task_id, port=int(port))))
+        return Tunnel(hub=self, conn_id=conn_id, session=session, inbox=inbox,
+                      node_id=record.node_id)
+
+    def on_tunnel_chunk(self, chunk: agent_pb2.TunnelChunk) -> None:
+        inbox = self._tunnels.get(chunk.conn_id)
+        if inbox is None:
+            return
+        inbox.put_nowait(chunk)
+
     def route(self, message: agent_pb2.TaskMessage) -> None:
         """Carry a message between two members that have no direct link.
 
@@ -1092,6 +1163,8 @@ class AgentGatewayServicer(agent_pb2_grpc.AgentGatewayServicer):
                     self.hub.route(message.task_message)
                 elif kind == "task_response":
                     self.hub.on_task_response(message.task_response)
+                elif kind == "tunnel_chunk":
+                    self.hub.on_tunnel_chunk(message.tunnel_chunk)
                 elif kind == "ack" and not message.ack.ok:
                     logger.warning("node %s refused %s: %s", session.node.node_id,
                                    message.ack.command_id, message.ack.error)

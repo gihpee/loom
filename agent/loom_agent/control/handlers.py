@@ -42,6 +42,10 @@ class CommandHandlers:
             self.tasks.on_task_message(message.task_message)
         elif kind == "task_request":
             self.tasks.task_request(message.task_request)
+        elif kind == "tunnel_open":
+            self.tasks.tunnel_open(message.tunnel_open)
+        elif kind == "tunnel_chunk":
+            self.tasks.tunnel_chunk(message.tunnel_chunk)
         elif kind == "release":
             self.on_release(message.release)
         elif kind == "probe":

@@ -263,3 +263,25 @@ def test_работающая_группа_не_убирается_по_возр
 
     assert hub.prune() == 0
     assert body["group_id"] in hub.groups
+
+
+def test_кластер_ставит_ray_с_клиентским_входом(two_nodes, monkeypatch):
+    """Серверная часть Ray Client лежит в extra `client`. Без него
+    `--ray-client-server-port` не игнорируется, а роняет `ray start` целиком —
+    то есть кластер не поднимется вовсе."""
+    hub = two_nodes.hub
+    asked = {}
+    original = hub.submit_group
+
+    def watch(**kwargs):
+        asked.update(kwargs)
+        return original(**kwargs)
+
+    monkeypatch.setattr(hub, "submit_group", watch)
+    answer = client(hub).post("/admin/ray", json={"node_ids": ["node-0"]})
+    assert answer.status_code == 200, answer.text
+    assert asked["environment"]["requirements"] == ["ray[client]"]
+
+    client(hub).post("/admin/ray", json={"node_ids": ["node-1"],
+                                         "ray_version": "2.58.0"})
+    assert asked["environment"]["requirements"] == ["ray[client]==2.58.0"]

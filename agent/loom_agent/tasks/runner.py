@@ -341,22 +341,29 @@ def _group_of(proc: subprocess.Popen) -> Optional[int]:
 def _report_limits(task_id: str) -> None:
     """Сказать вслух, с какими лимитами задача пошла работать.
 
-    Агент ставит их молча и зажимает по жёсткому пределу контейнера, который
-    может оказаться каким угодно. Из-за этого «сколько потоков разрешено» до
-    сих пор выяснялось обратным ходом — по тому, на чём падал Ray. Одна строка
-    в логе стоит дешевле любого такого расследования.
+    Считается ровно так же, как в `limits._set`: агент не поднимает жёсткий
+    предел (для этого нужен CAP_SYS_RESOURCE, которого у контейнера по
+    умолчанию нет), а зажимается по нему. Поэтому важен не наш запрос и не
+    мягкий предел агента, а ЧТО получится у задачи — первая версия этой
+    строки печатала второе и вводила в заблуждение ровно там, где заводилась
+    ради ясности.
     """
     try:
         import resource as _r
 
-        nproc = _r.getrlimit(_r.RLIMIT_NPROC)
-        nofile = _r.getrlimit(_r.RLIMIT_NOFILE)
+        from loom_agent.tasks.limits import MAX_PROCESSES
+
+        soft, hard = _r.getrlimit(_r.RLIMIT_NPROC)
+        effective = MAX_PROCESSES if hard == _r.RLIM_INFINITY else min(MAX_PROCESSES, hard)
+        files = _r.getrlimit(_r.RLIMIT_NOFILE)[0]
     except Exception:
         return
     shown = lambda v: "без предела" if v == _r.RLIM_INFINITY else v  # noqa: E731
-    logger.info("task %s limits: потоков %s (потолок %s), файлов %s, ядер видно %s",
-                task_id, shown(nproc[0]), shown(nproc[1]), shown(nofile[0]),
-                os.cpu_count())
+    logger.info(
+        "task %s limits: задаче достанется потоков %s (просили %s, жёсткий предел "
+        "%s, у агента сейчас %s), файлов %s, ядер видно %s",
+        task_id, shown(effective), MAX_PROCESSES, shown(hard), shown(soft),
+        shown(files), os.cpu_count())
 
 
 def _group_alive(group: int) -> bool:

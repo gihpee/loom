@@ -121,15 +121,20 @@ def start_node(rank: int, size: int, *, gpus: Optional[int] = None,
     ports = ports_for(rank, base=base, stride=stride)
     argv = [sys.executable, "-m", "ray.scripts.scripts", "start"]
     if rank == 0:
-        # Без --ray-client-server-port: он требует ray[client], которого в
-        # минимальной установке нет, и ray start отказывается стартовать
-        # вовсе. Порт под него в раскладке зарезервирован — понадобится, когда
-        # появится клиентский вход (docs/RAY.md).
         # --include-dashboard только здесь: Ray отвергает его у неголовных
         # рангов целиком, а не игнорирует. Смотреть на дашборд всё равно
         # неоткуда — у узла нет входящих портов.
         argv += ["--head", "--port", str(ports.gcs),
                  "--include-dashboard", "false"]
+        # Клиентский вход — только если установлен ray[client]. Флаг без него
+        # не игнорируется, а роняет `ray start` целиком, так что спрашиваем
+        # заранее и молча обходимся без него: кластер полезен и так, просто
+        # подключиться снаружи будет нечем.
+        if client_server_available():
+            argv += ["--ray-client-server-port", str(ports.client_server)]
+        else:
+            logger.info("ray[client] не установлен: внешнего входа у кластера "
+                        "не будет (добавьте ray[client] в требования)")
         address = head_address(base, stride)
     else:
         address = wait_for_head(base, stride)
@@ -151,6 +156,29 @@ def start_node(rank: int, size: int, *, gpus: Optional[int] = None,
                 "поднимаю голову" if rank == 0 else f"подключаюсь к {address}")
     _run_start(argv, rank=rank, retries=0 if rank == 0 else JOIN_ATTEMPTS)
     return address
+
+
+def client_server_available() -> bool:
+    """Есть ли в этой установке серверная часть Ray Client.
+
+    Проверяем импортом, а не версией: `--ray-client-server-port` при её
+    отсутствии не игнорируется, а роняет `ray start` — и падает это сообщением
+    про аргумент, из которого не следует, что не хватает пакета.
+    """
+    from importlib.util import find_spec
+
+    try:
+        return find_spec("ray.util.client.server.proxier") is not None
+    except (ImportError, ValueError):
+        return False
+
+
+def client_port(size: int, *, base: int = 0, stride: int = 0) -> int:
+    """Порт, на котором кластер принимает клиентов. Ноль — не принимает."""
+    if not client_server_available():
+        return 0
+    base = base or group_base(size, stride=stride)
+    return ports_for(0, base=base, stride=stride).client_server
 
 
 def _occupied(port: int) -> bool:

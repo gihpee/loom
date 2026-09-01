@@ -24,6 +24,7 @@ from typing import Callable, Dict, List, Optional
 
 from loom_agent.proto import agent_pb2
 from loom_agent.tasks import channel as channel_mod
+from loom_agent.p2p.tunnel import Endpoint
 from loom_agent.tasks.forward import Forwarder
 from loom_agent.tasks.groups import GroupTable, group_from_proto
 from loom_agent.tasks.registry import TaskRegistry
@@ -55,6 +56,13 @@ class TaskCommands:
         # two wide-area crossings instead of one.
         self.links = links
         self.groups = GroupTable()
+        # Порты, которые задачи разрешили открывать снаружи. Один список на
+        # оба канала — и на прямой между узлами, и на тот, что идёт через
+        # оркестратор: разрешение выдаёт задача, а кто им воспользуется, её
+        # не касается.
+        self.allowed_ports: set = set()
+        # Наша сторона канала по управляющему стриму.
+        self.tunnels = Endpoint(allow=lambda port: port in self.allowed_ports)
         # Порты соседей, притворяющиеся местными. Нужны только тем задачам,
         # которые ходят по адресам, а не по рангам, — и они об этом просят.
         self.forward = Forwarder(stub_for=self._stub_for,
@@ -73,6 +81,7 @@ class TaskCommands:
 
     def shutdown(self) -> None:
         """Close the loopback endpoint. Not `stop` — that is the StopTask handler."""
+        self.tunnels.close_all()
         self.forward.close_all()
         self.channel.stop()
 
@@ -248,6 +257,51 @@ class TaskCommands:
             return
         self.send(agent_pb2.AgentMessage(task_message=message))
 
+    # ------------------------------------------------ байтовый канал наружу
+    def tunnel_open(self, command: agent_pb2.TunnelOpen) -> None:
+        """Оркестратор просит соединение с портом задачи.
+
+        Разрешение даёт сама задача (`/forward`), а не оркестратор: иначе канал
+        наружу означал бы доступ к чему угодно, что слушает на этой машине.
+        """
+        task = self.registry.get(command.task_id)
+        if task is None or task.finished:
+            self._tunnel_failed(command.conn_id,
+                                f"задачи {command.task_id!r} тут нет или она кончилась")
+            return
+        answer = self.tunnels.connect(command.conn_id, int(command.port))
+        if not answer.get("ok"):
+            self._tunnel_failed(command.conn_id, answer.get("error", ""))
+            return
+        # Чтение — на своей нити: стрим не должен ждать чужой сокет.
+        threading.Thread(target=self._tunnel_pump, args=(command.conn_id,),
+                         name=f"tunnel-{command.conn_id}", daemon=True).start()
+
+    def tunnel_chunk(self, chunk: agent_pb2.TunnelChunk) -> None:
+        """Кусок снаружи внутрь, или закрытие."""
+        if chunk.last:
+            self.tunnels.close(chunk.conn_id)
+            return
+        if chunk.data:
+            self.tunnels.write(chunk.conn_id, chunk.data)
+
+    def _tunnel_pump(self, conn_id: str) -> None:
+        try:
+            for piece in self.tunnels.read(conn_id):
+                self.send(agent_pb2.AgentMessage(tunnel_chunk=agent_pb2.TunnelChunk(
+                    conn_id=conn_id, data=piece)))
+        except Exception as exc:
+            logger.debug("канал %s оборвался: %s", conn_id, exc)
+        self.send(agent_pb2.AgentMessage(
+            tunnel_chunk=agent_pb2.TunnelChunk(conn_id=conn_id, last=True)))
+
+    def _tunnel_failed(self, conn_id: str, error: str) -> None:
+        # Отказ обязан дойти: иначе на том конце висит соединение, и клиент
+        # ищет причину у себя.
+        logger.warning("канал %s не открылся: %s", conn_id, error)
+        self.send(agent_pb2.AgentMessage(tunnel_chunk=agent_pb2.TunnelChunk(
+            conn_id=conn_id, last=True, error=error or "канал не открылся")))
+
     def _task_forward(self, task_id: str, body: dict) -> dict:
         """Задача прислала свою раскладку портов и просит сделать её рабочей.
 
@@ -282,14 +336,12 @@ class TaskCommands:
                                  remote=remote, ports=ports)
 
     def _allow_inbound(self, ports: List[int]) -> None:
-        """Открыть НАШИ порты соседям. По умолчанию закрыто всё: иначе через
-        туннель достаётся любой порт этой машины."""
+        """Открыть НАШИ порты снаружи. По умолчанию закрыто всё: иначе через
+        любой из каналов достаётся любой порт этой машины."""
+        self.allowed_ports.update(ports)
         endpoint = getattr(self._peer_node(), "tunnels", None)
-        if endpoint is None:
-            return
-        allowed = set(ports)
-        previous = endpoint.allow
-        endpoint.allow = lambda port: port in allowed or previous(port)
+        if endpoint is not None:
+            endpoint.allow = lambda port: port in self.allowed_ports
 
     def _stub_for(self, peer_id: str):
         node = self._peer_node()

@@ -13,12 +13,13 @@ not, because it is signed and a node has no admin token to present.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import os
 from pathlib import Path
 
-from fastapi import FastAPI, Header, Request
+from fastapi import FastAPI, Header, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from loom.logging_config import get_logger
@@ -614,8 +615,11 @@ def create_app(*, agents=None, releases=None, keystore=None, config=None,
                 label=label,
                 serve_port=1,
                 inputs={**payload, **script},
+                # ray[client], а не просто ray: серверная часть клиентского
+                # входа лежит в этом extra, и без него `--ray-client-server-port`
+                # не игнорируется, а роняет `ray start` целиком.
                 environment={"kind": "python", "requirements": [
-                    f"ray=={version}" if version else "ray",
+                    f"ray[client]=={version}" if version else "ray[client]",
                 ]},
                 resources=raw.get("resources") or None,
                 # Скрипт кончается сам; стоящий кластер живёт, пока не снимут.
@@ -629,6 +633,89 @@ def create_app(*, agents=None, releases=None, keystore=None, config=None,
                 # объяснимым, а не загадочным.
                 "path": path["path"], "relayed_pairs": path["relayed_pairs"],
                 "warning": path["why"] if path["path"] == "relay" else ""}
+
+    @app.websocket("/connect/{group_id}")
+    async def connect_to_cluster(socket: WebSocket, group_id: str):
+        """Байтовый канал до кластера — то, за чем приходит loom-connect.
+
+        Публичного адреса у кластера нет и не будет: у узла нет входящих
+        портов. Наружу смотрит только оркестратор, и он доносит байты по
+        стриму, который узел открыл сам.
+
+        Порт спрашивается у самой задачи, а не вычисляется здесь: раскладку
+        портов определяет версия Ray, и знать её оркестратору значит обновлять
+        оркестратор вместе с ней.
+        """
+        token = socket.headers.get("x-loom-admin-token", "")
+        if forbidden(token):
+            # 1008 — «политика»: клиент увидит причину, а не молчаливый обрыв.
+            await socket.close(code=1008, reason="invalid admin token")
+            return
+        if agents is None:
+            await socket.close(code=1011, reason="this orchestrator runs no agents")
+            return
+        record = agents.groups.get(group_id)
+        if record is None:
+            await socket.close(code=1008, reason=f"нет группы {group_id!r}")
+            return
+        head = record.tasks.get(0, "")
+        try:
+            status, _headers, body = await agents.request(head, path="/health",
+                                                          timeout_s=15)
+            port = int(json.loads(body).get("client_port") or 0) if status == 200 else 0
+        except (AgentError, ValueError, TypeError):
+            port = 0
+        if not port:
+            await socket.close(
+                code=1011,
+                reason="кластер не назвал порт для подключения: он ещё "
+                       "собирается или поднят без ray[client]")
+            return
+
+        try:
+            tunnel = agents.open_tunnel(head, port)
+        except AgentError as exc:
+            await socket.close(code=1011, reason=str(exc)[:120])
+            return
+        await socket.accept()
+        await _pipe(socket, tunnel)
+
+    async def _pipe(socket: WebSocket, tunnel) -> None:
+        """Возить байты, пока жива любая из сторон.
+
+        Две задачи, а не одна: чтение веб-сокета и чтение канала блокируются
+        независимо, и объединять их значит ставить одно в зависимость от
+        другого.
+        """
+        async def outbound() -> None:
+            try:
+                while True:
+                    tunnel.send(await socket.receive_bytes())
+            except (WebSocketDisconnect, RuntimeError, KeyError):
+                return
+
+        async def inbound() -> None:
+            try:
+                while True:
+                    piece = await tunnel.recv()
+                    if not piece:
+                        return
+                    await socket.send_bytes(piece)
+            except (WebSocketDisconnect, RuntimeError):
+                return
+
+        tasks = [asyncio.create_task(outbound()), asyncio.create_task(inbound())]
+        try:
+            await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            tunnel.close()
+            try:
+                await socket.close()
+            except RuntimeError:
+                pass
 
     # ------------------------------------------------------------ releases
     @app.get("/agent/release/{version}.tar.gz")

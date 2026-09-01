@@ -11,6 +11,7 @@ import json
 import sys
 import tarfile
 import os
+import subprocess
 import time
 from pathlib import Path
 
@@ -560,3 +561,52 @@ def test_два_агента_на_одной_машине_не_делят_фай
         assert updater._download(Release(), incoming), updater.last_refusal
 
     assert len(names) == 2, f"оба процесса писали в один файл: {names}"
+
+
+# --------------------------------------------- payload обязан побеждать образ
+def _tree(root: Path, name: str, says: str) -> Path:
+    """Каталог с пакетом loom_agent, который печатает, откуда он взялся."""
+    pkg = root / name / "loom_agent"
+    pkg.mkdir(parents=True)
+    (pkg / "__init__.py").write_text("")
+    (pkg / "main.py").write_text(f"print({says!r})\n")
+    return root / name
+
+
+def test_код_релиза_побеждает_код_образа(tmp_path):
+    """Ошибка, стоившая нескольких дней: релизы применялись только на бумаге.
+
+    `python -m` кладёт ТЕКУЩИЙ каталог первым в sys.path, впереди PYTHONPATH.
+    Рабочим каталогом образа был /app, где лежит скопированный для сборки
+    loom_agent — и payload проигрывал образу всегда. Панель при этом показывала
+    новую версию, узлы отчитывались об обновлении, ошибок не было нигде.
+    """
+    from loom_launcher.supervise import AGENT_CWD, AGENT_FLAGS
+
+    образ = _tree(tmp_path, "app", "из образа")
+    payload = _tree(tmp_path, "payload", "из релиза")
+
+    answer = subprocess.run(
+        [sys.executable, *AGENT_FLAGS, "-m", "loom_agent.main"],
+        cwd=AGENT_CWD, capture_output=True, text=True,
+        env={**os.environ, "PYTHONPATH": str(payload)},
+    )
+    assert answer.stdout.strip() == "из релиза", answer.stderr
+
+    # А без этих мер выигрывал бы образ — тест на саму причину, не на симптом.
+    было = subprocess.run(
+        [sys.executable, "-m", "loom_agent.main"],
+        cwd=str(образ), capture_output=True, text=True,
+        env={**os.environ, "PYTHONPATH": str(payload)},
+    )
+    assert было.stdout.strip() == "из образа", (
+        "правило sys.path изменилось — проверку можно упростить")
+
+
+def test_агент_запускается_вне_каталога_с_исходниками():
+    """Прямая проверка самой меры: рабочий каталог не должен содержать
+    loom_agent, иначе он затенит payload."""
+    from loom_launcher.supervise import AGENT_CWD
+
+    assert not (Path(AGENT_CWD) / "loom_agent").exists(), (
+        f"в {AGENT_CWD} лежит loom_agent — он затенит любой релиз")

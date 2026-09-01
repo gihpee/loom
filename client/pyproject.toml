@@ -1,0 +1,18 @@
+[project]
+name = "loom-connect"
+version = "0.1.0"
+description = "Локальный порт до Ray-кластера в Loom: клиент подключается к 127.0.0.1, а кластер живёт на машине, до которой нельзя дозвониться"
+requires-python = ">=3.10"
+# Одна зависимость, и это намеренно: утилита ставится клиенту, у которого нет
+# ни репозитория, ни Docker, ни чего-либо ещё из Loom.
+dependencies = ["websockets>=13"]
+
+[project.scripts]
+loom-connect = "loom_connect.main:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["loom_connect*"]

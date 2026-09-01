@@ -42,6 +42,19 @@ FAILURES_BEFORE_ROLLBACK = 3
 # место. Обычный ноль от этого не отличить, а считать плановую остановку
 # падением значит подвести исправную версию под откат.
 UPDATE_EXIT_CODE = 70
+# Откуда запускать агента и с какими флагами.
+#
+# `-P` и каталог вне /app — против одной и той же ошибки, и она стоила нам
+# нескольких дней. `python -m` кладёт ТЕКУЩИЙ каталог первым в sys.path,
+# впереди PYTHONPATH. Рабочий каталог образа — /app, а там лежит loom_agent,
+# скопированный для сборки. Значит payload проигрывал образу всегда: лаунчер
+# его ставил, версию объявлял, а исполнялся код из образа.
+#
+# Хуже всего то, как это выглядело: панель показывала новую версию, узлы
+# отчитывались, что обновились, и ни одной ошибки нигде. Просто ничего не
+# менялось.
+AGENT_CWD = "/"
+AGENT_FLAGS = ["-P"]
 
 
 def _why_updates_are_off() -> str:
@@ -131,8 +144,8 @@ class Supervisor:
     def _run_once(self) -> Optional[int]:
         env = dict(os.environ)
         if self.payload.path is not None:
-            # The payload's own directory wins over anything installed in the
-            # image, so an update actually takes effect.
+            # Payload впереди всего, что стоит в образе, — чтобы обновление
+            # действительно применялось. Одного этого мало: см. AGENT_CWD.
             existing = env.get("PYTHONPATH", "")
             env["PYTHONPATH"] = f"{self.payload.path}{os.pathsep}{existing}" if existing else str(self.payload.path)
         env["LOOM_AGENT_VERSION"] = self.payload.version
@@ -146,8 +159,9 @@ class Supervisor:
         blocked = _why_updates_are_off()
         if blocked:
             env["LOOM_UPDATES_DISABLED"] = blocked
-        argv = [sys.executable, "-m", "loom_agent.main", *self.agent_args]
-        self._proc = subprocess.Popen(argv, env=env, start_new_session=True)
+        argv = [sys.executable, *AGENT_FLAGS, "-m", "loom_agent.main", *self.agent_args]
+        self._proc = subprocess.Popen(argv, env=env, cwd=AGENT_CWD,
+                                      start_new_session=True)
         try:
             return self._proc.wait()
         except KeyboardInterrupt:
