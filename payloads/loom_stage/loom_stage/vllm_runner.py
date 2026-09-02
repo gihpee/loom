@@ -102,21 +102,22 @@ def coordinator_for(start_layer: int, end_layer: int, num_layers: int):
 
 
 def _kv_spec_of(runner):
-    """Спросить у модели, какой ей нужен KV-кэш.
+    """Спросить, какой нужен KV-кэш. У кого именно — зависит от версии.
 
-    Спрашивать приходится с оговоркой: vLLM оборачивает модель в
-    cudagraph-обёртку, и та НЕ пропускает `get_kv_cache_spec` — обращение
-    падает с «not exists in the runnable of cudagraph wrapper».
+    Мест два, и они менялись между версиями vLLM: метод бывает на самом
+    исполнителе и бывает на модели, спрятанной под cudagraph-обёрткой (та не
+    пропускает его наружу и падает с «not exists in the runnable of cudagraph
+    wrapper»).
 
-    У первоисточника здесь запасной путь: посчитать форму кэша по конфигу
-    модели — число голов, размер головы. Мы так не делаем. Неверная форма
-    кэша не падает, она портит внимание: ответы остаются связными и
-    становятся неправильными, и найти это можно только по качеству.
+    У первоисточника здесь запасной путь: посчитать форму кэша по конфигу —
+    число голов, размер головы. Мы так не делаем. Неверная форма кэша не
+    падает, она портит внимание: ответы остаются связными и становятся
+    неправильными, и найти это можно только по качеству.
 
-    Поэтому обёртку снимают, а не обходят.
+    Поэтому спрашиваем везде, где он бывает, а не угадываем.
     """
     tried = []
-    for name, candidate in _unwrap(runner):
+    for name, candidate in _candidates(runner):
         tried.append(name)
         ask = getattr(candidate, "get_kv_cache_spec", None)
         if ask is None:
@@ -126,13 +127,15 @@ def _kv_spec_of(runner):
         except AttributeError:
             continue      # ещё одна обёртка, идём глубже
     raise RunnerRefused(
-        "ни один слой обёрток не рассказал про KV-кэш (смотрели: "
-        + ", ".join(tried) + "). Угадывать его форму нельзя: неверная не "
-        "падает, а портит внимание")
+        "никто не рассказал про KV-кэш (смотрели: " + ", ".join(tried) + "). "
+        "Похоже на это: " + _hints(runner) + ". Угадывать форму нельзя: "
+        "неверная не падает, а портит внимание")
 
 
-def _unwrap(runner):
-    """Модель и всё, во что её завернули, от внешнего к настоящему."""
+def _candidates(runner):
+    """Кого спрашивать, от самого вероятного к самому глубокому."""
+    # Сам исполнитель — в свежих версиях метод переехал сюда.
+    yield "runner", runner
     get_model = getattr(runner, "get_model", None)
     if callable(get_model):
         try:
@@ -145,6 +148,23 @@ def _unwrap(runner):
         yield f"model{'.runnable' * seen}", model
         model = getattr(model, "runnable", None) or getattr(model, "module", None)
         seen += 1
+
+
+def _hints(runner) -> str:
+    """Что похожее нашлось поблизости.
+
+    Чтобы следующий отказ называл, куда метод переехал, а не отправлял читать
+    исходники vLLM. Этот приём здесь окупился уже дважды.
+    """
+    found = []
+    for name, candidate in _candidates(runner):
+        for attribute in dir(candidate):
+            if "kv_cache" in attribute and callable(
+                    getattr(candidate, attribute, None)):
+                found.append(f"{name}.{attribute}")
+        if len(found) > 8:
+            break
+    return ", ".join(found[:8]) or "ничего похожего"
 
 
 def stage_runner_class(start_layer: int, end_layer: int, num_layers: int):

@@ -125,6 +125,28 @@ class Model:
         return self.spec
 
 
+def test_исполнитель_спрашивается_первым():
+    """В свежих версиях vLLM метод переехал с модели на исполнитель — и
+    искать его надо там, где он есть сейчас, а не там, где был."""
+    from loom_stage.vllm_runner import _kv_spec_of
+
+    runner = Model("с исполнителя")
+    runner.model = Wrapper(Model("с модели"))
+    assert _kv_spec_of(runner) == "с исполнителя"
+
+
+def test_отказ_подсказывает_куда_метод_переехал():
+    """Чтобы не отправлять читать исходники vLLM: приём окупился дважды."""
+    from loom_stage.vllm_runner import _kv_spec_of
+
+    class Похожий:
+        def get_kv_cache_spec_v2(self):
+            return None
+
+    with pytest.raises(RunnerRefused, match="get_kv_cache_spec_v2"):
+        _kv_spec_of(Похожий())
+
+
 def test_обёртка_снимается_а_не_обходится():
     """У первоисточника тут запасной путь — посчитать форму кэша по конфигу.
     Мы так не делаем: неверная форма не падает, она портит внимание."""
