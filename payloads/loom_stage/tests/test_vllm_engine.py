@@ -72,6 +72,8 @@ def test_несовпадение_числа_слоёв_отвергается(m
     monkeypatch.setattr(vllm_engine, "_count_layers", lambda _r: 36)
     monkeypatch.setattr(vllm_engine, "stage_runner_class",
                         lambda *_a: _FakeRunner)
+    # Конфиг vLLM держится открытым на всю жизнь процесса — тут его нет.
+    monkeypatch.setattr(vllm_engine, "_hold_config", lambda _c: None)
 
     # Именно атрибут модуля, а не запись в sys.modules: `from loom_stage
     # import vllm_patch` берёт атрибут пакета, и подмена через sys.modules
@@ -244,3 +246,58 @@ def test_тензоры_переживают_дорогу_через_файл(tm
     for name, original in tensors.items():
         assert torch.equal(restored[name], original), name
         assert restored[name].dtype == original.dtype, "dtype не должен расширяться"
+
+
+# ---------------------------------------------------- текущий конфиг vLLM
+def test_конфиг_держится_открытым(monkeypatch):
+    """Со стенда: загрузка прошла, а раскладка кэша упала на
+
+        AssertionError: Current vLLM config is not set
+
+    из бэкенда внимания — места, которое к конфигу отношения не имеет. Части
+    движка спрашивают «текущий конфиг» сами, без аргументов, и вне контекста
+    это падает где угодно.
+    """
+    import contextlib
+
+    открыт = []
+
+    @contextlib.contextmanager
+    def set_current(config):
+        открыт.append(config)
+        try:
+            yield
+        finally:
+            открыт.remove(config)
+
+    module = types.ModuleType("vllm.config")
+    module.set_current_vllm_config = set_current
+    monkeypatch.setitem(sys.modules, "vllm", types.ModuleType("vllm"))
+    monkeypatch.setitem(sys.modules, "vllm.config", module)
+    monkeypatch.setattr(vllm_engine, "_CONFIG", None)
+
+    vllm_engine._hold_config("конфиг")
+    assert открыт == ["конфиг"], "контекст не установлен"
+
+    # Второй вызов ничего не меняет: стадия в процессе одна.
+    vllm_engine._hold_config("другой")
+    assert открыт == ["конфиг"]
+
+    vllm_engine.shutdown()
+    assert открыт == [], "контекст не закрылся на уборке"
+
+
+def test_уборка_без_конфига_молчит(monkeypatch):
+    monkeypatch.setattr(vllm_engine, "_CONFIG", None)
+    for name in list(sys.modules):
+        if name.startswith("vllm"):
+            monkeypatch.delitem(sys.modules, name, raising=False)
+    real = __import__
+
+    def guarded(name, *args, **kwargs):
+        if name.startswith("vllm"):
+            raise ImportError(name)
+        return real(name, *args, **kwargs)
+
+    monkeypatch.setattr("builtins.__import__", guarded)
+    vllm_engine.shutdown()

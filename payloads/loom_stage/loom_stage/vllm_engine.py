@@ -33,6 +33,19 @@ from loom_stage.vllm_runner import (RunnerRefused, layer_range, replace_pipeline
 
 logger = logging.getLogger("loom_stage.vllm_engine")
 
+# Конфиг vLLM, установленный на всю жизнь процесса.
+#
+# У него есть глобальный «текущий конфиг», и части движка спрашивают его сами,
+# без всяких аргументов: бэкенды внимания, CustomOp'ы. Вне контекста это падает
+#     AssertionError: Current vLLM config is not set
+# из места, которое к конфигу отношения не имеет — например, из раскладки
+# KV-кэша.
+#
+# Держим открытым, а не оборачиваем каждый вызов: стадия в процессе одна и
+# живёт столько же, сколько процесс, а забыть обернуть один вызов из десяти —
+# ровно тот способ получить это исключение через неделю.
+_CONFIG = None
+
 # Сколько памяти карты отдать под веса и KV-кэш, когда квоты не назвали.
 # Не 0.9, как у vLLM по умолчанию: узел чужой, и на нём живёт не только эта
 # задача — рядом может стоять вторая стадия того же кластера.
@@ -173,6 +186,7 @@ def load_shard(model_path: str, *, start_layer: int, end_layer: int,
                            max_sequences=max_sequences,
                            max_batched_tokens=max_batched_tokens)
 
+    _hold_config(config)
     runner = stage_runner_class(start_layer, end_layer, num_model_layers)(
         vllm_config=config, device=config.device_config.device)
     with layer_range(start_layer, end_layer):
@@ -247,6 +261,19 @@ def _logits_from(runner, answer):
         "в этой версии vLLM они лежат где-то ещё")
 
 
+def _hold_config(config) -> None:
+    """Установить текущий конфиг vLLM и не отпускать."""
+    global _CONFIG
+    import contextlib
+
+    from vllm.config import set_current_vllm_config
+
+    if _CONFIG is not None:
+        return
+    _CONFIG = contextlib.ExitStack()
+    _CONFIG.enter_context(set_current_vllm_config(config))
+
+
 def shutdown() -> None:
     """Разобрать распределённое окружение.
 
@@ -259,6 +286,13 @@ def shutdown() -> None:
     остальное. Падать на уборке — худшее, что можно сделать с процессом,
     который и так уходит.
     """
+    global _CONFIG
+    if _CONFIG is not None:
+        try:
+            _CONFIG.close()
+        except Exception:
+            logger.debug("контекст конфига не закрылся", exc_info=True)
+        _CONFIG = None
     try:
         from vllm.distributed import parallel_state
 
