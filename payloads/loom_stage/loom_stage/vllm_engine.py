@@ -92,6 +92,27 @@ def require_cuda() -> None:
             "батчить, но считает везде")
 
 
+def _config_with(kind, **options):
+    """Собрать конфиг vLLM, отбросив поля, которых в этой версии нет.
+
+    Поля конфигов переезжают между версиями, и лишний аргумент роняет всё
+    поднятие целиком — сообщением про имя, а не про то, что версия другая.
+    Отброшенное называется вслух: молча потерянный `enforce_eager` вернул бы
+    захват графов и падение внутри него.
+    """
+    import dataclasses
+
+    try:
+        known = {field.name for field in dataclasses.fields(kind)}
+    except TypeError:
+        return kind(**options)
+    dropped = sorted(set(options) - known)
+    if dropped:
+        logger.warning("%s не знает про %s — эта версия vLLM устроена иначе",
+                       kind.__name__, ", ".join(dropped))
+    return kind(**{name: value for name, value in options.items() if name in known})
+
+
 def _build_config(model_path: str, *, dtype: str, max_model_len: int,
                   utilisation: float, block_size: int, max_sequences: int,
                   max_batched_tokens: int):
@@ -101,10 +122,24 @@ def _build_config(model_path: str, *, dtype: str, max_model_len: int,
     from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, ModelConfig,
                              ParallelConfig, SchedulerConfig, VllmConfig)
 
-    model = ModelConfig(
+    # Без torch.compile и без захвата CUDA-графов.
+    #
+    # Штатный движок перед захватом делает прогревочные прогоны и компилирует
+    # всё заранее. Мы правим исполнителем напрямую, прогрева не делаем — и
+    # первый же настоящий шаг запускает компиляцию ВНУТРИ захвата графа, где
+    # нельзя даже прочитать состояние генератора:
+    #
+    #   RuntimeError: Cannot call CUDAGeneratorImpl::current_seed during
+    #   CUDA graph capture
+    #
+    # Захват тут и не нужен: он рассчитан на формы батчей, которые выбирает
+    # сам vLLM, а у нас их выбирает первая стадия. Плата — eager вместо
+    # скомпилированного, то есть медленнее на шаг; вернуть это можно, добавив
+    # честный прогрев, но сначала конвейер должен просто заработать.
+    model = _config_with(ModelConfig,
         model=model_path, tokenizer=model_path, tokenizer_mode="auto",
         trust_remote_code=True, dtype=dtype, seed=0,
-        max_model_len=max_model_len, max_logprobs=1,
+        max_model_len=max_model_len, max_logprobs=1, enforce_eager=True,
     )
     return VllmConfig(
         model_config=model,

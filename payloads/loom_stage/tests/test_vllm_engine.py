@@ -301,3 +301,41 @@ def test_уборка_без_конфига_молчит(monkeypatch):
 
     monkeypatch.setattr("builtins.__import__", guarded)
     vllm_engine.shutdown()
+
+
+# ------------------------------------------------- поля конфигов и версии
+def test_неизвестное_поле_отбрасывается_и_называется(caplog):
+    """Поля конфигов vLLM переезжают между версиями, и лишний аргумент роняет
+    всё поднятие — сообщением про имя, а не про то, что версия другая."""
+    import dataclasses
+    import logging
+
+    @dataclasses.dataclass
+    class Старый:
+        model: str = ""
+
+    with caplog.at_level(logging.WARNING, logger="loom_stage.vllm_engine"):
+        made = vllm_engine._config_with(Старый, model="м", enforce_eager=True)
+    assert made.model == "м"
+    assert any("enforce_eager" in r.getMessage() for r in caplog.records), (
+        "молча потерянный enforce_eager вернёт захват графов и падение в нём")
+
+
+def test_известные_поля_доходят():
+    import dataclasses
+
+    @dataclasses.dataclass
+    class Новый:
+        model: str = ""
+        enforce_eager: bool = False
+
+    made = vllm_engine._config_with(Новый, model="м", enforce_eager=True)
+    assert made.enforce_eager is True
+
+
+def test_не_датакласс_собирается_как_есть():
+    class Обычный:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    assert vllm_engine._config_with(Обычный, a=1).kwargs == {"a": 1}
