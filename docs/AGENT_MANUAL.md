@@ -20,7 +20,7 @@ python scripts/sign_release.py keygen --out agent-release.key
 ```
 
 Кладёт приватную половину в `agent-release.key`, публичную — в
-`agent/loom_launcher/release_key.pub`.
+`agent/looma_launcher/release_key.pub`.
 
 **Приватную половину надо сохранить в надёжном месте.** Потеряется — обновлять
 парк будет нечем: подписать новый релиз никто не сможет, а узлы принимают
@@ -40,7 +40,7 @@ python scripts/sign_release.py keygen --out agent-release.key
 обновление.
 
 Приватная половина в репозиторий не попадает никогда. У каждого, кто поднимает
-свой Loom, пара своя.
+свой Looma, пара своя.
 
 ---
 
@@ -51,7 +51,7 @@ scripts/build_agent.sh              # для этой машины, локаль
 scripts/build_agent.sh --push       # amd64 + arm64, в реестр
 ```
 
-Имя меняется через `LOOM_AGENT_IMAGE` и `LOOM_AGENT_TAG`.
+Имя меняется через `LOOMA_AGENT_IMAGE` и `LOOMA_AGENT_TAG`.
 
 Что внутри: агент, пусковой слой, p2p-стек и NVML. Ни torch, ни vLLM, ни
 CUDA-тулкита — всё, что нужно задаче, разворачивается в её каталоге при
@@ -71,7 +71,7 @@ CUDA-тулкита — всё, что нужно задаче, разворач
 
 ```bash
 curl -s http://<оркестратор>:8000/admin/keys -X POST \
-  -H "X-Loom-Admin-Token: $LOOM_ADMIN_TOKEN" \
+  -H "X-Looma-Admin-Token: $LOOMA_ADMIN_TOKEN" \
   -H 'Content-Type: application/json' -d '{"label":"машина Миши"}'
 ```
 
@@ -80,8 +80,8 @@ curl -s http://<оркестратор>:8000/admin/keys -X POST \
 
 ```bash
 docker run -d --gpus all --restart unless-stopped --network host \
-  -v loom-data:/var/lib/loom \
-  gihpee/loomagent --key loom_...
+  -v looma-data:/var/lib/looma \
+  gihpee/looma-agent --key looma_...
 ```
 
 ### Что в этой команде не косметика
@@ -91,7 +91,7 @@ docker run -d --gpus all --restart unless-stopped --network host \
 позиции не работает никогда — узел останется рабочим, но все сообщения к
 соседям пойдут через оркестратор, вдвое длиннее.
 
-**`-v loom-data:/var/lib/loom`.** Здесь каталоги задач, кэш окружений и
+**`-v looma-data:/var/lib/looma`.** Здесь каталоги задач, кэш окружений и
 нагрузки агента. Без тома кэш пересобирается после каждого перезапуска, а
 обновление агента рестарт не переживает — узел откатится к версии из образа.
 
@@ -113,7 +113,7 @@ docker run -d --gpus all --restart unless-stopped --network host \
 
 ```
 hardware: device=cuda gpu=NVIDIA GeForce RTX 4090 x2 vram_free=47.3GB ... (nvml)
-tasks will run as loom-task on 2 GPU(s)
+tasks will run as looma-task on 2 GPU(s)
 registered as <имя узла>
 ```
 
@@ -123,7 +123,7 @@ registered as <имя узла>
 this node will REFUSE every task until it can run them as a separate user
 ```
 
-— агент запущен не от root либо в образе нет пользователя `loom-task`. Узел
+— агент запущен не от root либо в образе нет пользователя `looma-task`. Узел
 **виден и здоров на вид**, но не возьмёт ни одной задачи. Так задумано:
 запускать чужой код от пользователя агента — значит отдать ему ключ узла и
 файлы соседних задач.
@@ -161,11 +161,11 @@ python scripts/sign_release.py sign --key agent-release.key --version 0.3.0
 
 Печатает версию, sha256, подпись и готовый `curl` для публикации.
 
-Скрипт пакует `agent/loom_agent` **из текущего рабочего дерева** — не из
+Скрипт пакует `agent/looma_agent` **из текущего рабочего дерева** — не из
 реестра, не из ветки по имени. Что в нём лежит, то и уедет на все машины
 парка, поэтому подписывать стоит с чистого дерева на нужном коммите.
 
-В архив попадает только агент. Пусковой слой (`agent/loom_launcher`) в него
+В архив попадает только агент. Пусковой слой (`agent/looma_launcher`) в него
 намеренно не входит: он живёт в образе и по сети не обновляется — сломанный
 запускатель, приехавший таким путём, нельзя было бы починить, прислав ещё
 один. Подписывается
@@ -238,7 +238,7 @@ python scripts/sign_release.py sign --key agent-release.key --version 0.3.0
 Проверить, что ключ в образе есть:
 
 ```bash
-docker exec <контейнер> cat /app/loom_launcher/release_key.pub
+docker exec <контейнер> cat /app/looma_launcher/release_key.pub
 ```
 
 Пусто или ошибка — узел отвергнет любое обновление, и в его логе будет

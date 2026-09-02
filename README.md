@@ -1,4 +1,4 @@
-# Loom
+# Looma
 
 Распределённые вычисления и инференс на машинах, до которых **нельзя
 дозвониться**: домашний компьютер за роутером провайдера подключается одной
@@ -19,10 +19,10 @@
 ## Из чего состоит
 
 ```
-src/loom/            оркестратор: кому какую работу, кто чем занят, кому какой релиз
+src/looma/            оркестратор: кому какую работу, кто чем занят, кому какой релиз
 web/                 панель оператора (React), отдельный образ за nginx
 agent/               то, что ставится на чужую машину. Тонкое: агент и больше ничего
-payloads/loom_stage/ стадия модели. Ставится в задачу, когда просят инференс
+payloads/looma_stage/ стадия модели. Ставится в задачу, когда просят инференс
 relay/               circuit-relay для узлов, до которых не дозвониться напрямую
 ```
 
@@ -43,7 +43,7 @@ bash scripts/init_env.sh && docker compose up -d --build
 
 ```bash
 docker run -d --gpus all --restart unless-stopped --network host \
-  -v loom-data:/var/lib/loom gihpee/loomagent --key loom_...
+  -v looma-data:/var/lib/looma gihpee/looma-agent --key looma_...
 ```
 
 `--network host` не косметика: без него p2p-порт остаётся внутри контейнера и
@@ -65,7 +65,7 @@ curl localhost:8000/v1/chat/completions -H 'Content-Type: application/json' \
 uv sync
 uv run pytest tests -q                      # оркестратор и интеграция
 cd agent && uv run pytest tests -q          # узел
-cd payloads/loom_stage && uv run pytest tests -q
+cd payloads/looma_stage && uv run pytest tests -q
 ```
 
 Панель оператора — React в `web/`, отдельный сервис в compose. Править вживую:
@@ -75,7 +75,7 @@ cd web && npm run dev        # проксирует /admin и /v1 в :8000
 ```
 
 Протокол между оркестратором и узлами — один файл,
-[src/loom/proto/agent.proto](src/loom/proto/agent.proto). После правки:
+[src/looma/proto/agent.proto](src/looma/proto/agent.proto). После правки:
 
 ```bash
 uv run --with grpcio-tools python scripts/gen_proto.py

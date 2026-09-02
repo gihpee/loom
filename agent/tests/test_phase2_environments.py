@@ -14,11 +14,11 @@ import time
 
 import pytest
 
-from loom_agent.tasks.env import EnvironmentCache
-from loom_agent.tasks.env import cache as cache_mod
-from loom_agent.tasks.env import python as python_env
-from loom_agent.tasks.env.base import read_marker, write_marker
-from loom_agent.tasks.spec import EnvSpec, TaskRefused
+from looma_agent.tasks.env import EnvironmentCache
+from looma_agent.tasks.env import cache as cache_mod
+from looma_agent.tasks.env import python as python_env
+from looma_agent.tasks.env.base import read_marker, write_marker
+from looma_agent.tasks.spec import EnvSpec, TaskRefused
 
 
 @pytest.fixture
@@ -34,7 +34,7 @@ def plant(cache: EnvironmentCache, name: str, size_bytes: int, *, used_at: float
     if used_at is not None:
         import os
 
-        os.utime(path / ".loom-env.json", (used_at, used_at))
+        os.utime(path / ".looma-env.json", (used_at, used_at))
     return path
 
 
@@ -220,10 +220,10 @@ def test_no_environment_costs_nothing(cache):
 # ------------------------------------------------- the task actually uses it
 @pytest.fixture
 def registry(tmp_path, monkeypatch):
-    from loom_agent.tasks.limits import resolve_isolation
-    from loom_agent.tasks.registry import TaskRegistry
+    from looma_agent.tasks.limits import resolve_isolation
+    from looma_agent.tasks.registry import TaskRegistry
 
-    monkeypatch.setenv("LOOM_ALLOW_UNPRIVILEGED_TASKS", "1")
+    monkeypatch.setenv("LOOMA_ALLOW_UNPRIVILEGED_TASKS", "1")
     reg = TaskRegistry(
         root=tmp_path / "tasks",
         isolation=resolve_isolation(),
@@ -236,7 +236,7 @@ def registry(tmp_path, monkeypatch):
 
 
 def submit(registry, task_id, command, **kwargs):
-    from loom_agent.tasks.spec import TaskSpec
+    from looma_agent.tasks.spec import TaskSpec
 
     raw = {"task_id": task_id, "command": command}
     raw.update(kwargs)
@@ -328,7 +328,7 @@ def test_два_агента_на_общем_томе_не_ломают_сбор
 
 def cache_ready(cache, spec):
     ready = cache._ready(spec.fingerprint())
-    return ready is not None and (ready.path / ".loom-env.json").is_file()
+    return ready is not None and (ready.path / ".looma-env.json").is_file()
 
 
 def test_каталоги_сборки_не_совпадают_у_разных_процессов(tmp_path, monkeypatch):
@@ -382,9 +382,9 @@ def test_индекс_torch_заменяет_а_не_дополняет():
     """
     from unittest import mock
 
-    from loom_agent.tasks.env.python import _torch_index
+    from looma_agent.tasks.env.python import _torch_index
 
-    with mock.patch("loom_agent.hwinfo.cuda_driver_version", return_value=(12, 4)):
+    with mock.patch("looma_agent.hwinfo.cuda_driver_version", return_value=(12, 4)):
         flags = _torch_index(["torch"])
     assert flags[0] == "--index-url", \
         "--extra-index-url не гарантирует сборку: pip выберет версию повыше"
@@ -396,9 +396,9 @@ def test_способ_сборки_входит_в_имя_окружения():
     по-старому: имя обещало cu124, а внутри лежал torch с PyPI."""
     from unittest import mock
 
-    from loom_agent.tasks.env.python import RECIPE, wheel_variant
+    from looma_agent.tasks.env.python import RECIPE, wheel_variant
 
-    with mock.patch("loom_agent.hwinfo.cuda_driver_version", return_value=(12, 4)):
+    with mock.patch("looma_agent.hwinfo.cuda_driver_version", return_value=(12, 4)):
         assert wheel_variant(["torch"]) == f"cu124-r{RECIPE}"
 
 
@@ -412,11 +412,11 @@ def test_колесо_torch_выбирается_под_драйвер_узла(
     """
     from unittest import mock
 
-    from loom_agent.tasks.env.python import _torch_index
+    from looma_agent.tasks.env.python import _torch_index
 
-    with mock.patch("loom_agent.hwinfo.cuda_driver_version", return_value=(12, 4)):
+    with mock.patch("looma_agent.hwinfo.cuda_driver_version", return_value=(12, 4)):
         assert _torch_index(["torch"])[-1].endswith("/cu124")
-    with mock.patch("loom_agent.hwinfo.cuda_driver_version", return_value=(12, 8)):
+    with mock.patch("looma_agent.hwinfo.cuda_driver_version", return_value=(12, 8)):
         assert _torch_index(["torch"])[-1].endswith("/cu128")
 
 
@@ -424,14 +424,14 @@ def test_без_карты_берутся_cpu_колёса():
     """Гигабайты CUDA на машине без NVIDIA — трафик владельца впустую."""
     from unittest import mock
 
-    from loom_agent.tasks.env.python import _torch_index
+    from looma_agent.tasks.env.python import _torch_index
 
-    with mock.patch("loom_agent.hwinfo.cuda_driver_version", return_value=None):
+    with mock.patch("looma_agent.hwinfo.cuda_driver_version", return_value=None):
         assert _torch_index(["torch"])[-1].endswith("/cpu")
 
 
 def test_окружение_без_torch_не_трогает_индекс():
-    from loom_agent.tasks.env.python import _torch_index
+    from looma_agent.tasks.env.python import _torch_index
 
     assert _torch_index(["numpy", "pillow"]) == []
     assert _torch_index(["torchmetrics"]) == [], "torchmetrics — это не torch"
@@ -444,9 +444,9 @@ def test_смена_драйвера_даёт_новое_окружение(tmp_
 
     cache = EnvironmentCache(tmp_path / "envs")
     spec = EnvSpec(kind="python", requirements=("torch",))
-    with mock.patch("loom_agent.hwinfo.cuda_driver_version", return_value=(12, 4)):
+    with mock.patch("looma_agent.hwinfo.cuda_driver_version", return_value=(12, 4)):
         old = cache._key(spec)
-    with mock.patch("loom_agent.hwinfo.cuda_driver_version", return_value=(12, 8)):
+    with mock.patch("looma_agent.hwinfo.cuda_driver_version", return_value=(12, 8)):
         new = cache._key(spec)
     assert old != new
     assert "cu124" in old and "cu128" in new

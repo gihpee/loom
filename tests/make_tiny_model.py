@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-TINY_MODEL_DIR = Path("/tmp/loom-tiny-llama")
+TINY_MODEL_DIR = Path("/tmp/looma-tiny-llama")
 
 # The head stage applies the chat template, so the fixture must have one —
 # without it tests only ever exercised the plain-concatenation fallback and

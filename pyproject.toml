@@ -1,7 +1,7 @@
 [project]
-name = "loom"
+name = "looma"
 version = "0.2.0"
-description = "Loom orchestrator — distributed compute and inference on machines nobody can dial"
+description = "Looma orchestrator — distributed compute and inference on machines nobody can dial"
 requires-python = ">=3.11"
 dependencies = [
     "grpcio>=1.60",
@@ -41,7 +41,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/loom"]
+packages = ["src/looma"]
 
 [tool.pytest.ini_options]
 markers = ["slow: runs a real model; minutes, not seconds"]

@@ -85,7 +85,7 @@ identify:
 multiaddr: ни `/ip4/…`, ни порта, ни peer id. Просто адрес или имя.
 
 ```
-LOOM_P2P_RELAY_PUBLIC_HOST=201.34.135.177
+LOOMA_P2P_RELAY_PUBLIC_HOST=201.34.135.177
 ```
 
 (Multiaddr сюда тоже можно — релей вытащит из него хост и скажет об этом в
@@ -120,9 +120,9 @@ address published for the orchestrator: /data/relay/address
 адресом rendezvous. На воркерах настраивать нечего — только перезапустить,
 чтобы они переподключились.
 
-Ручные варианты, когда они нужны: `LOOM_P2P_RELAY` в окружении оркестратора
+Ручные варианты, когда они нужны: `LOOMA_P2P_RELAY` в окружении оркестратора
 (если релей стоит на другой машине — заданное значение всегда сильнее файла),
-или `LOOM_P2P_RELAY` в окружении самого воркера.
+или `LOOMA_P2P_RELAY` в окружении самого воркера.
 
 ---
 
@@ -330,13 +330,13 @@ TCP. QUIC-адрес в одиночку оставил бы воркер без
 проверка, поднимающая голый узел с одним только релеем:
 
 ```bash
-python3 -m loom_agent.p2p.doctor /ip4/<хост>/tcp/47200/p2p/12D3KooW...
+python3 -m looma_agent.p2p.doctor /ip4/<хост>/tcp/47200/p2p/12D3KooW...
 ```
 
 В контейнере воркера:
 
 ```bash
-docker exec -it <контейнер> python3 -m loom_agent.p2p.doctor $LOOM_P2P_RELAY
+docker exec -it <контейнер> python3 -m looma_agent.p2p.doctor $LOOMA_P2P_RELAY
 ```
 
 Ответ один из трёх:
@@ -352,7 +352,7 @@ docker exec -it <контейнер> python3 -m loom_agent.p2p.doctor $LOOM_P2P_
 docker compose logs orchestrator | grep -i relay
 ```
 
-`workers will be given 1 relay(s): …` — адрес роздан. `LOOM_P2P_RELAY is not
+`workers will be given 1 relay(s): …` — адрес роздан. `LOOMA_P2P_RELAY is not
 set` — оркестратор его не видит, и дальше искать нечего.
 
 На воркере:

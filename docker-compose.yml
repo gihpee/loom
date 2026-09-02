@@ -1,4 +1,4 @@
-# Loom: an orchestrator and, optionally, a relay. Nothing else runs here —
+# Looma: an orchestrator and, optionally, a relay. Nothing else runs here —
 # every machine that computes is somebody else's, and joins with one command
 # (docs/DEPLOYMENT.md).
 
@@ -13,11 +13,11 @@ services:
     network_mode: host
     env_file: .env
     environment:
-      LOOM_DATA_DIR: /data
+      LOOMA_DATA_DIR: /data
     volumes:
       # Join keys, published agent releases, and the address the relay writes
       # for us. All of it must outlive the container.
-      - loom-data:/data
+      - looma-data:/data
 
   # Панель оператора. Отдельный образ, потому что это отдельная сборка: node
   # нужен ей и больше никому. Host-сеть, чтобы проксировать в оркестратор по
@@ -29,9 +29,9 @@ services:
     restart: unless-stopped
     network_mode: host
     environment:
-      LOOM_WEB_PORT: ${LOOM_WEB_PORT:-8080}
-      LOOM_HTTP_PORT: ${LOOM_HTTP_PORT:-8000}
-      LOOM_API_HOST: 127.0.0.1
+      LOOMA_WEB_PORT: ${LOOMA_WEB_PORT:-8080}
+      LOOMA_HTTP_PORT: ${LOOMA_HTTP_PORT:-8000}
+      LOOMA_API_HOST: 127.0.0.1
     depends_on:
       - orchestrator
 
@@ -45,18 +45,18 @@ services:
     restart: unless-stopped
     network_mode: host
     environment:
-      LOOM_RELAY_PORT: 47200
+      LOOMA_RELAY_PORT: 47200
       # По умолчанию — тот же адрес, что у оркестратора: реле стоит на этой же
       # машине и снаружи видно по нему же. Порт отбрасывается, нужен только хост.
       #
       # Пустое значение НЕ безобидно, что бы тут раньше ни было написано:
       # объявлять адрес нечем, файл для оркестратора не пишется, узлы получают
       # «0 relay», и реле работает вхолостую, ничем этого не выдавая.
-      LOOM_RELAY_PUBLIC_HOST: ${LOOM_RELAY_PUBLIC_HOST:-${LOOM_PUBLIC_ADDR:-}}
+      LOOMA_RELAY_PUBLIC_HOST: ${LOOMA_RELAY_PUBLIC_HOST:-${LOOMA_PUBLIC_ADDR:-}}
     volumes:
       # The identity too: its peer id is inside every multiaddr a node holds,
       # so regenerating it on restart invalidates them all at once.
-      - loom-data:/data
+      - looma-data:/data
 
 volumes:
-  loom-data:
+  looma-data:

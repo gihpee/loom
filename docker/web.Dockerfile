@@ -17,6 +17,6 @@ COPY --from=build /web/dist /usr/share/nginx/html
 COPY web/nginx/default.conf.template /etc/nginx/templates/default.conf.template
 # 127.0.0.1 верно при host-сети, которой compose и пользуется. Вынесено
 # переменной, чтобы образ годился и при обычной сети docker.
-ENV LOOM_WEB_PORT=8080 \
-    LOOM_HTTP_PORT=8000 \
-    LOOM_API_HOST=127.0.0.1
+ENV LOOMA_WEB_PORT=8080 \
+    LOOMA_HTTP_PORT=8000 \
+    LOOMA_API_HOST=127.0.0.1

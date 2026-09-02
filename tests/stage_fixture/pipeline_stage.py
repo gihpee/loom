@@ -21,11 +21,11 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 WARMUP_S = float(os.environ.get("STAGE_WARMUP_S", "0"))
 STARTED = time.monotonic()
 
-RANK = int(os.environ.get("LOOM_RANK", "0"))
-SIZE = int(os.environ.get("LOOM_GROUP_SIZE", "1"))
-PORT = int(os.environ.get("LOOM_SERVE_PORT", "0"))
-AGENT = os.environ.get("LOOM_AGENT_URL", "")
-TASK = os.environ.get("LOOM_TASK_ID", "")
+RANK = int(os.environ.get("LOOMA_RANK", "0"))
+SIZE = int(os.environ.get("LOOMA_GROUP_SIZE", "1"))
+PORT = int(os.environ.get("LOOMA_SERVE_PORT", "0"))
+AGENT = os.environ.get("LOOMA_AGENT_URL", "")
+TASK = os.environ.get("LOOMA_TASK_ID", "")
 
 answers: "dict[str, str]" = {}
 arrived = threading.Event()
@@ -35,7 +35,7 @@ def send_on(to_rank: int, body: dict) -> None:
     request = urllib.request.Request(
         f"{AGENT}/send", data=json.dumps(body).encode(), method="POST",
         headers={"Content-Type": "application/json",
-                 "X-Loom-Task": TASK, "X-Loom-To-Rank": str(to_rank)},
+                 "X-Looma-Task": TASK, "X-Looma-To-Rank": str(to_rank)},
     )
     urllib.request.urlopen(request, timeout=30).close()
 
@@ -50,7 +50,7 @@ class Handler(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length") or 0)
         payload = json.loads(self.rfile.read(length) or b"{}")
         self._ok(b"")
-        if self.path == "/loom/message":
+        if self.path == "/looma/message":
             self._on_message(payload)
         elif self.path == "/ask":
             # Rank 0 only: start the pass and wait for it to come back round.
@@ -109,7 +109,7 @@ def announce(port: int) -> None:
     """
     request = urllib.request.Request(
         f"{AGENT}/ready", data=json.dumps({"port": port}).encode(), method="POST",
-        headers={"Content-Type": "application/json", "X-Loom-Task": TASK},
+        headers={"Content-Type": "application/json", "X-Looma-Task": TASK},
     )
     urllib.request.urlopen(request, timeout=30).close()
 

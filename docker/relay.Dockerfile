@@ -1,4 +1,4 @@
-# libp2p circuit-relay v2 server for Loom (see docs/P2P_RELAY.md).
+# libp2p circuit-relay v2 server for Looma (see docs/P2P_RELAY.md).
 #
 # Its own image and its own process because the workers' p2p stack, Lattica,
 # is a relay CLIENT only: it announces /libp2p/circuit/relay/0.2.0/stop and
@@ -19,8 +19,8 @@ COPY relay/relay.mjs ./
 
 # The identity lives in a volume: its peer id is inside every multiaddr a
 # worker holds, so regenerating it on restart invalidates them all at once.
-ENV LOOM_RELAY_KEY=/data/relay/identity.key \
-    LOOM_RELAY_PORT=47200
+ENV LOOMA_RELAY_KEY=/data/relay/identity.key \
+    LOOMA_RELAY_PORT=47200
 
 # TCP carries the reservations; UDP is QUIC, which is the transport a hole
 # punch should prefer — no handshake for a firewall to answer with an RST.

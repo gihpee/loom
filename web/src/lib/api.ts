@@ -1,6 +1,6 @@
 /** Единственный способ ходить в API: токен, разбор ошибки, отмена. */
 
-const TOKEN = "loom_token";
+const TOKEN = "looma_token";
 
 export const token = {
   get: () => localStorage.getItem(TOKEN) ?? "",
@@ -11,7 +11,7 @@ function head(json = true): Record<string, string> {
   const h: Record<string, string> = {};
   if (json) h["Content-Type"] = "application/json";
   const t = token.get();
-  if (t) h["X-Loom-Admin-Token"] = t;
+  if (t) h["X-Looma-Admin-Token"] = t;
   return h;
 }
 

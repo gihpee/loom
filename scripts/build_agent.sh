@@ -12,8 +12,8 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-IMAGE="${LOOM_AGENT_IMAGE:-gihpee/loomagent}"
-TAG="${LOOM_AGENT_TAG:-latest}"
+IMAGE="${LOOMA_AGENT_IMAGE:-gihpee/looma-agent}"
+TAG="${LOOMA_AGENT_TAG:-latest}"
 
 if [ "${1:-}" = "--push" ]; then
   docker buildx build --platform linux/amd64,linux/arm64 \

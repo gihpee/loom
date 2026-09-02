@@ -13,17 +13,17 @@ import time
 
 import pytest
 
-from loom_agent.tasks.limits import Isolation, resolve_isolation
-from loom_agent.tasks.env import EnvironmentCache
-from loom_agent.tasks.registry import TaskRegistry
-from loom_agent.tasks.spec import TaskRefused, TaskSpec
+from looma_agent.tasks.limits import Isolation, resolve_isolation
+from looma_agent.tasks.env import EnvironmentCache
+from looma_agent.tasks.registry import TaskRegistry
+from looma_agent.tasks.spec import TaskRefused, TaskSpec
 
 
 @pytest.fixture
 def isolation(monkeypatch):
     """Tests do not run as root, so they take the arrangement the operator
     would have to opt into explicitly on a real node."""
-    monkeypatch.setenv("LOOM_ALLOW_UNPRIVILEGED_TASKS", "1")
+    monkeypatch.setenv("LOOMA_ALLOW_UNPRIVILEGED_TASKS", "1")
     return resolve_isolation()
 
 
@@ -96,21 +96,21 @@ def test_the_timeout_takes_the_whole_process_tree(registry):
 
 def test_a_task_cannot_read_this_nodes_credentials(registry, monkeypatch):
     """The agent's environment holds the join key. The task's must not."""
-    monkeypatch.setenv("LOOM_JOIN_KEY", "loom_secret-do-not-leak")
-    monkeypatch.setenv("LOOM_SOMETHING_ELSE", "also-private")
+    monkeypatch.setenv("LOOMA_JOIN_KEY", "looma_secret-do-not-leak")
+    monkeypatch.setenv("LOOMA_SOMETHING_ELSE", "also-private")
     task = registry.submit(spec(
         "t5", [sys.executable, "-c", "import os; print(sorted(os.environ))"]
     ))
     assert task.wait(timeout=30)
     printed = task.logs()
-    assert "LOOM_JOIN_KEY" not in printed
-    assert "LOOM_SOMETHING_ELSE" not in printed
-    assert "LOOM_TASK_ID" in printed
+    assert "LOOMA_JOIN_KEY" not in printed
+    assert "LOOMA_SOMETHING_ELSE" not in printed
+    assert "LOOMA_TASK_ID" in printed
 
 
 def test_a_task_is_told_where_to_put_its_result(registry):
     task = registry.submit(spec(
-        "t6", [sys.executable, "-c", "import os; print(os.environ['LOOM_TASK_OUT'])"]
+        "t6", [sys.executable, "-c", "import os; print(os.environ['LOOMA_TASK_OUT'])"]
     ))
     assert task.wait(timeout=30)
     assert str(task.directory.out) in task.logs()
@@ -334,7 +334,7 @@ SOCKET_PATH_LIMIT = 103
 def test_задаче_дают_каталог_под_короткий_путь(registry):
     task = registry.submit(spec(
         "t20", [sys.executable, "-c",
-                "import os; print(os.environ['LOOM_TASK_TMP'])"]))
+                "import os; print(os.environ['LOOMA_TASK_TMP'])"]))
     assert task.wait(timeout=30)
     assert task.logs().strip() == task.directory.inner_scratch
     assert task.directory.scratch.is_dir(), "каталог обещан переменной, но не создан"
@@ -350,7 +350,7 @@ def test_в_нём_помещается_unix_сокет(registry):
     """
     program = (
         "import os, socket;"
-        "p = os.path.join(os.environ['LOOM_TASK_TMP'],"
+        "p = os.path.join(os.environ['LOOMA_TASK_TMP'],"
         " 'ray', 'session_2026-08-31_11-53-53_288216_84711', 'sockets');"
         "os.makedirs(p, exist_ok=True);"
         "s = socket.socket(socket.AF_UNIX);"
@@ -379,7 +379,7 @@ def test_короткий_каталог_считается_в_дисковую_
     """Иначе квота обходится записью не туда."""
     program = (
         "import os;"
-        "open(os.path.join(os.environ['LOOM_TASK_TMP'], 'big'), 'wb')"
+        "open(os.path.join(os.environ['LOOMA_TASK_TMP'], 'big'), 'wb')"
         ".write(b'x' * (6 * 1024 * 1024));"
         "import time; time.sleep(30)"
     )
@@ -408,7 +408,7 @@ def test_сокет_предшественника_не_мешает_следу�
     bind = (
         "import os, socket;"
         "s = socket.socket(socket.AF_UNIX);"
-        "s.bind(os.path.join(os.environ['LOOM_TASK_TMP'], 'sock'));"
+        "s.bind(os.path.join(os.environ['LOOMA_TASK_TMP'], 'sock'));"
         "print('связался')"
     )
     first = registry.submit(spec("t25", [sys.executable, "-c", bind]))
@@ -435,7 +435,7 @@ def test_задаче_не_выдают_привилегированный_по�
 
     — ошибке, которая не называет ни порт, ни того, кто его выбрал.
     """
-    from loom_agent.tasks.registry import PRIVILEGED_PORTS, _free_port
+    from looma_agent.tasks.registry import PRIVILEGED_PORTS, _free_port
 
     for hint in (1, 80, 443, 1023):
         assert _free_port(hint) >= PRIVILEGED_PORTS, f"выдал {hint}"
@@ -449,19 +449,19 @@ def test_свободный_обычный_порт_отдают_как_прос
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
         wanted = probe.getsockname()[1]
-    from loom_agent.tasks.registry import _free_port
+    from looma_agent.tasks.registry import _free_port
 
     assert _free_port(wanted) == wanted
 
 
 def test_служащая_задача_получает_рабочий_порт(registry):
-    """Сквозь весь путь: то, что попадёт в LOOM_SERVE_PORT, должно
+    """Сквозь весь путь: то, что попадёт в LOOMA_SERVE_PORT, должно
     биндиться из-под задачи."""
     program = (
         "import os, socket;"
         "s = socket.socket();"
-        "s.bind(('127.0.0.1', int(os.environ['LOOM_SERVE_PORT'])));"
-        "print('занял', os.environ['LOOM_SERVE_PORT'])"
+        "s.bind(('127.0.0.1', int(os.environ['LOOMA_SERVE_PORT'])));"
+        "print('занял', os.environ['LOOMA_SERVE_PORT'])"
     )
     task = registry.submit(spec("t26", [sys.executable, "-c", program], serve_port=1))
     assert task.wait(timeout=30)
@@ -501,14 +501,14 @@ def test_потолок_остаётся_конечным(monkeypatch):
     """Защита от форк-бомбы никуда не девается — она просто перестала мешать."""
     import importlib
 
-    import loom_agent.tasks.limits as limits
+    import looma_agent.tasks.limits as limits
 
-    monkeypatch.setenv("LOOM_TASK_MAX_PROCESSES", "77")
+    monkeypatch.setenv("LOOMA_TASK_MAX_PROCESSES", "77")
     importlib.reload(limits)
     try:
         assert limits.MAX_PROCESSES == 77
     finally:
-        monkeypatch.delenv("LOOM_TASK_MAX_PROCESSES", raising=False)
+        monkeypatch.delenv("LOOMA_TASK_MAX_PROCESSES", raising=False)
         importlib.reload(limits)
     # Конечный, но с запасом: смысл в защите от форк-бомбы, а не в нормировании
     # потоков. Ниже kernel.threads-max он остаётся на порядок.
@@ -541,7 +541,7 @@ def test_потомки_не_переживают_задачу_вышедшую_
     assert marker.exists(), "потомок даже не стартовал — тест ничего не проверяет"
 
     # Группа снесена вместе с задачей: живых в ней не осталось.
-    from loom_agent.tasks.runner import _group_alive
+    from looma_agent.tasks.runner import _group_alive
 
     assert task._group is not None
     deadline = time.time() + 15
@@ -565,7 +565,7 @@ def test_задаче_говорят_её_долю_процессора(registry
     каждое. Два ранга на одном узле заводили вдвое больше процессов, чем она
     стоит, и упирались в лимит потоков раньше, чем начинали работать."""
     task = registry.submit(spec(
-        "t30", [sys.executable, "-c", "import os; print(os.environ['LOOM_TASK_CPUS'])"],
+        "t30", [sys.executable, "-c", "import os; print(os.environ['LOOMA_TASK_CPUS'])"],
         resources={"cpus": 4},
     ))
     assert task.wait(timeout=30)
@@ -578,7 +578,7 @@ def test_лимиты_задачи_попадают_в_лог(registry, caplog):
     на чём упал чужой софт."""
     import logging as _logging
 
-    with caplog.at_level(_logging.INFO, logger="loom_agent.tasks.runner"):
+    with caplog.at_level(_logging.INFO, logger="looma_agent.tasks.runner"):
         task = registry.submit(spec("t31", [sys.executable, "-c", "pass"]))
         assert task.wait(timeout=30)
     said = [r.getMessage() for r in caplog.records if "limits:" in r.getMessage()]
@@ -596,8 +596,8 @@ def test_задача_видна_переписи_пока_собирается_
     """
     import threading
 
-    from loom_agent.tasks.env import EnvironmentCache
-    from loom_agent.tasks.registry import TaskRegistry
+    from looma_agent.tasks.env import EnvironmentCache
+    from looma_agent.tasks.registry import TaskRegistry
 
     строим = threading.Event()
     отпустить = threading.Event()

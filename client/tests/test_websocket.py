@@ -12,8 +12,8 @@ import asyncio
 import pytest
 from websockets.asyncio.server import serve
 
-from loom_connect.tunnel import Listener
-from loom_connect.websocket import TOKEN_HEADER, opener
+from looma_connect.tunnel import Listener
+from looma_connect.websocket import TOKEN_HEADER, opener
 
 
 @pytest.fixture
@@ -58,7 +58,8 @@ async def through(url: str, token: str, payload: bytes, *, want: int) -> bytes:
 @pytest.mark.asyncio
 async def test_байты_проходят_через_настоящий_websocket(echo_server):
     url, _seen = echo_server
-    assert await through(url, "fde901ffd176", b"loom", want=4) == b"loom"
+    assert await through(url, "fde901ffd176", b"looma",
+                         want=len(b"looma")) == b"looma"
 
 
 @pytest.mark.asyncio
@@ -101,7 +102,7 @@ async def test_причина_отказа_доходит_до_человека(
     server = await serve(refuse, "127.0.0.1", 0)
     port = server.sockets[0].getsockname()[1]
     try:
-        with caplog.at_level(logging.ERROR, logger="loom_connect"):
+        with caplog.at_level(logging.ERROR, logger="looma_connect"):
             await through(f"ws://127.0.0.1:{port}/connect/g", "token", b"x", want=1)
     finally:
         server.close()

@@ -117,7 +117,7 @@ pp_group.is_last_rank     строить ли lm_head
 промптами через `;`:
 
 ```bash
-python -m loom_stage.vllm_engine --weights Qwen/Qwen3-4B --start-layer 0 --end-layer 18 --num-model-layers 36 --prompt-ids '9707,1879,0;35946,1079' --dump-hidden /tmp/h.bin
+python -m looma_stage.vllm_engine --weights Qwen/Qwen3-4B --start-layer 0 --end-layer 18 --num-model-layers 36 --prompt-ids '9707,1879,0;35946,1079' --dump-hidden /tmp/h.bin
 ```
 
 Первая стадия отдаст `hidden_states` на 5 токенов (3 + 2), вторая — логиты
@@ -277,7 +277,7 @@ Qwen3-4B, 18 слоёв, bf16 → 72 КБ на токен, то есть 288 М�
 ## Веса на узле
 
 Скачивает их сама стадия, но **не в свой каталог**. Агент отдаёт задаче общий на
-узел кэш (`HF_HOME` → `/var/lib/loom/models`), и он переживает задачу.
+узел кэш (`HF_HOME` → `/var/lib/looma/models`), и он переживает задачу.
 
 До этого `HOME` указывал в каталог задачи, HuggingFace клал кэш туда же, а
 каталог живёт ровно столько же, сколько задача: одна и та же модель приезжала

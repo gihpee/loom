@@ -19,9 +19,9 @@ import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-from loom_launcher import payload as payload_mod
-from loom_launcher.signature import Manifest, Untrusted, digest_of, verify
-from loom_launcher.supervise import FAILURES_BEFORE_ROLLBACK, Supervisor
+from looma_launcher import payload as payload_mod
+from looma_launcher.signature import Manifest, Untrusted, digest_of, verify
+from looma_launcher.supervise import FAILURES_BEFORE_ROLLBACK, Supervisor
 
 
 @pytest.fixture
@@ -29,13 +29,13 @@ def release_key(monkeypatch):
     key = Ed25519PrivateKey.generate()
     public = key.public_key().public_bytes(
         serialization.Encoding.Raw, serialization.PublicFormat.Raw)
-    monkeypatch.setenv("LOOM_RELEASE_PUBKEY", public.hex())
+    monkeypatch.setenv("LOOMA_RELEASE_PUBKEY", public.hex())
     return key
 
 
 @pytest.fixture
 def root(tmp_path, monkeypatch):
-    monkeypatch.setenv("LOOM_ROOT", str(tmp_path))
+    monkeypatch.setenv("LOOMA_ROOT", str(tmp_path))
     (tmp_path / "agent" / "incoming").mkdir(parents=True)
     return tmp_path
 
@@ -45,7 +45,7 @@ def build_archive(path: Path, *, version: str = "0.2.0", agent: bool = True,
     with tarfile.open(path, "w:gz") as tar:
         if agent:
             body = f"VERSION = {version!r}\n".encode()
-            info = tarfile.TarInfo("loom_agent/main.py")
+            info = tarfile.TarInfo("looma_agent/main.py")
             info.size = len(body)
             tar.addfile(info, io.BytesIO(body))
         if extra:
@@ -79,7 +79,7 @@ def test_a_release_we_signed_is_installed(root, release_key):
     installed = payload_mod.install(manifest, installed_version="0.1.0")
     assert installed is not None
     assert installed.version == "0.2.0"
-    assert (installed.path / "loom_agent" / "main.py").is_file()
+    assert (installed.path / "looma_agent" / "main.py").is_file()
 
 
 def test_installing_leaves_nothing_in_incoming(root, release_key):
@@ -148,9 +148,9 @@ def test_an_archive_with_no_agent_in_it_is_refused(root, release_key):
 
 def test_an_image_with_no_key_installs_nothing(root, monkeypatch):
     """Updates off is a safe state. Installing unverified code is not."""
-    monkeypatch.delenv("LOOM_RELEASE_PUBKEY", raising=False)
+    monkeypatch.delenv("LOOMA_RELEASE_PUBKEY", raising=False)
     monkeypatch.setattr(
-        "loom_launcher.signature.KEY_FILE", root / "no-such-key")
+        "looma_launcher.signature.KEY_FILE", root / "no-such-key")
     with pytest.raises(Untrusted) as exc:
         verify(Manifest(version="0.2.0", sha256="ab" * 32), b"x" * 64)
     assert "no release key" in str(exc.value)
@@ -238,12 +238,12 @@ def test_a_draining_node_takes_no_new_work_but_finishes_what_it_has(tmp_path, mo
     """A task in flight is somebody's work; they already paid for the power."""
     import sys as _sys
 
-    from loom_agent.tasks.env import EnvironmentCache
-    from loom_agent.tasks.limits import resolve_isolation
-    from loom_agent.tasks.registry import TaskRegistry
-    from loom_agent.tasks.spec import TaskRefused, TaskSpec
+    from looma_agent.tasks.env import EnvironmentCache
+    from looma_agent.tasks.limits import resolve_isolation
+    from looma_agent.tasks.registry import TaskRegistry
+    from looma_agent.tasks.spec import TaskRefused, TaskSpec
 
-    monkeypatch.setenv("LOOM_ALLOW_UNPRIVILEGED_TASKS", "1")
+    monkeypatch.setenv("LOOMA_ALLOW_UNPRIVILEGED_TASKS", "1")
     registry = TaskRegistry(
         root=tmp_path / "tasks", isolation=resolve_isolation(),
         environments=EnvironmentCache(tmp_path / "envs"),
@@ -275,12 +275,12 @@ def test_a_draining_node_takes_no_new_work_but_finishes_what_it_has(tmp_path, mo
 def test_draining_gives_up_rather_than_waiting_forever(tmp_path, monkeypatch):
     import sys as _sys
 
-    from loom_agent.tasks.env import EnvironmentCache
-    from loom_agent.tasks.limits import resolve_isolation
-    from loom_agent.tasks.registry import TaskRegistry
-    from loom_agent.tasks.spec import TaskSpec
+    from looma_agent.tasks.env import EnvironmentCache
+    from looma_agent.tasks.limits import resolve_isolation
+    from looma_agent.tasks.registry import TaskRegistry
+    from looma_agent.tasks.spec import TaskSpec
 
-    monkeypatch.setenv("LOOM_ALLOW_UNPRIVILEGED_TASKS", "1")
+    monkeypatch.setenv("LOOMA_ALLOW_UNPRIVILEGED_TASKS", "1")
     registry = TaskRegistry(
         root=tmp_path / "tasks", isolation=resolve_isolation(),
         environments=EnvironmentCache(tmp_path / "envs"),
@@ -297,10 +297,10 @@ def test_draining_gives_up_rather_than_waiting_forever(tmp_path, monkeypatch):
 # --------------------------------------------------------------- convergence
 def test_an_agent_started_by_hand_does_not_pretend_to_update(monkeypatch):
     """No launcher means nothing could install it, so saying so beats fetching."""
-    from loom_agent.proto import agent_pb2
-    from loom_agent.update import Updater
+    from looma_agent.proto import agent_pb2
+    from looma_agent.update import Updater
 
-    monkeypatch.delenv("LOOM_AGENT_INCOMING", raising=False)
+    monkeypatch.delenv("LOOMA_AGENT_INCOMING", raising=False)
     stopped = []
     updater = Updater(current_version="0.1.0", drain=lambda _t: True,
                       stop=lambda: stopped.append(True))
@@ -313,8 +313,8 @@ def test_an_agent_started_by_hand_does_not_pretend_to_update(monkeypatch):
 
 
 def test_the_version_we_already_run_is_not_fetched_again(monkeypatch):
-    from loom_agent.proto import agent_pb2
-    from loom_agent.update import Updater
+    from looma_agent.proto import agent_pb2
+    from looma_agent.update import Updater
 
     fetched = []
     updater = Updater(current_version="0.2.0", drain=lambda _t: True, stop=lambda: None)
@@ -325,8 +325,8 @@ def test_the_version_we_already_run_is_not_fetched_again(monkeypatch):
 
 
 def test_a_release_named_with_no_url_is_ignored(monkeypatch):
-    from loom_agent.proto import agent_pb2
-    from loom_agent.update import Updater
+    from looma_agent.proto import agent_pb2
+    from looma_agent.update import Updater
 
     stopped = []
     updater = Updater(current_version="0.1.0", drain=lambda _t: True,
@@ -339,10 +339,10 @@ def test_a_release_named_with_no_url_is_ignored(monkeypatch):
 def test_a_download_that_fails_leaves_the_node_on_the_version_it_has(tmp_path, monkeypatch):
     """A node that cannot fetch an update is a node running an old version,
     which is a much smaller problem than a node that stops."""
-    from loom_agent.proto import agent_pb2
-    from loom_agent.update import Updater
+    from looma_agent.proto import agent_pb2
+    from looma_agent.update import Updater
 
-    monkeypatch.setenv("LOOM_AGENT_INCOMING", str(tmp_path / "incoming"))
+    monkeypatch.setenv("LOOMA_AGENT_INCOMING", str(tmp_path / "incoming"))
     stopped = []
     updater = Updater(current_version="0.1.0", drain=lambda _t: True,
                       stop=lambda: stopped.append(True))
@@ -363,7 +363,7 @@ def test_плановый_выход_ради_обновления_не_счит
     Обычный ноль от «я ушёл, чтобы уступить место» не отличить, поэтому агент
     выходит отдельным кодом.
     """
-    from loom_launcher.supervise import UPDATE_EXIT_CODE
+    from looma_launcher.supervise import UPDATE_EXIT_CODE
 
     payload_mod.switch_to(payload_mod.install(
         offer(root, release_key, version="0.2.0"), installed_version="0.1.0"))
@@ -381,8 +381,8 @@ def test_плановый_выход_ради_обновления_не_счит
 
 def test_агент_сообщает_что_ушёл_ради_обновления():
     """Код выхода — единственное, что пусковой слой видит от агента."""
-    from loom_agent.update import UPDATE_EXIT_CODE, Updater
-    from loom_launcher.supervise import UPDATE_EXIT_CODE as SEEN_BY_LAUNCHER
+    from looma_agent.update import UPDATE_EXIT_CODE, Updater
+    from looma_launcher.supervise import UPDATE_EXIT_CODE as SEEN_BY_LAUNCHER
 
     assert UPDATE_EXIT_CODE == SEEN_BY_LAUNCHER, \
         "две половины разошлись в том, что означает этот код"
@@ -395,10 +395,10 @@ def test_узел_рассказывает_почему_не_обновился(
     лог на самой машине — это ровно то место, куда оператор идти не хочет."""
     import time as _time
 
-    from loom_agent.proto import agent_pb2
-    from loom_agent.update import Updater
+    from looma_agent.proto import agent_pb2
+    from looma_agent.update import Updater
 
-    monkeypatch.delenv("LOOM_AGENT_INCOMING", raising=False)
+    monkeypatch.delenv("LOOMA_AGENT_INCOMING", raising=False)
     updater = Updater(current_version="0.1.0", drain=lambda _t: True, stop=lambda: None)
     assert updater.status().state == "idle"
 
@@ -414,8 +414,8 @@ def test_узел_рассказывает_почему_не_обновился(
 
 
 def test_релиз_без_адреса_тоже_объясняется():
-    from loom_agent.proto import agent_pb2
-    from loom_agent.update import Updater
+    from looma_agent.proto import agent_pb2
+    from looma_agent.update import Updater
 
     updater = Updater(current_version="0.1.0", drain=lambda _t: True, stop=lambda: None)
     updater.on_release(agent_pb2.AgentRelease(version="0.2.0"))
@@ -433,8 +433,8 @@ def test_два_агента_на_общем_томе_качают_релиз_к
     import threading
     from http.server import BaseHTTPRequestHandler, HTTPServer
 
-    from loom_agent.proto import agent_pb2
-    from loom_agent.update import Updater
+    from looma_agent.proto import agent_pb2
+    from looma_agent.update import Updater
 
     body = b"payload bytes" * 1000
 
@@ -460,7 +460,7 @@ def test_два_агента_на_общем_томе_качают_релиз_к
     # Два процесса-агента = два разных pid; здесь их подменяем, потому что
     # процесс один, а проверяем именно развод по имени.
     pids = iter([4242, 4243])
-    monkeypatch.setattr("loom_agent.update.os.getpid", lambda: next(pids))
+    monkeypatch.setattr("looma_agent.update.os.getpid", lambda: next(pids))
 
     try:
         assert all(u._download(release, shared) for u in updaters), \
@@ -478,7 +478,7 @@ def test_версию_уже_поставленную_соседом_не_лом
     first = payload_mod.install(offer(root, release_key, version="0.2.0"),
                                 installed_version="0.1.0")
     assert first is not None
-    marker = first.path / "loom_agent" / "already-there"
+    marker = first.path / "looma_agent" / "already-there"
     marker.write_text("сосед")
 
     second = payload_mod.install(offer(root, release_key, version="0.2.0"),
@@ -493,11 +493,11 @@ def test_узел_без_ключа_не_качает_то_что_не_пост�
     """Со стенда: образ собран без ключа, релиз опубликован — и узел качал,
     сливал задачи, перезапускался, получал отказ и начинал сначала. Круг на
     чужой машине и её канале, из которого сам он выйти не мог."""
-    from loom_agent.proto import agent_pb2
-    from loom_agent.update import Updater
+    from looma_agent.proto import agent_pb2
+    from looma_agent.update import Updater
 
-    monkeypatch.setenv("LOOM_AGENT_INCOMING", str(tmp_path / "incoming"))
-    monkeypatch.setenv("LOOM_UPDATES_DISABLED", "в образе нет ключа релизов")
+    monkeypatch.setenv("LOOMA_AGENT_INCOMING", str(tmp_path / "incoming"))
+    monkeypatch.setenv("LOOMA_UPDATES_DISABLED", "в образе нет ключа релизов")
     fetched, stopped = [], []
     updater = Updater(current_version="0.1.0", drain=lambda _t: True,
                       stop=lambda: stopped.append(True))
@@ -516,13 +516,13 @@ def test_узел_без_ключа_не_качает_то_что_не_пост�
 
 def test_пусковой_слой_называет_причину_сам(monkeypatch, tmp_path):
     """Знает про ключ только он: агент об этом узнаёт из окружения."""
-    from loom_launcher.supervise import _why_updates_are_off
+    from looma_launcher.supervise import _why_updates_are_off
 
-    monkeypatch.delenv("LOOM_RELEASE_PUBKEY", raising=False)
-    monkeypatch.setattr("loom_launcher.signature.KEY_FILE", tmp_path / "нет-ключа")
+    monkeypatch.delenv("LOOMA_RELEASE_PUBKEY", raising=False)
+    monkeypatch.setattr("looma_launcher.signature.KEY_FILE", tmp_path / "нет-ключа")
     assert "нет ключа релизов" in _why_updates_are_off()
 
-    monkeypatch.setenv("LOOM_RELEASE_PUBKEY", "aa" * 32)
+    monkeypatch.setenv("LOOMA_RELEASE_PUBKEY", "aa" * 32)
     assert _why_updates_are_off() == ""
 
 
@@ -532,11 +532,11 @@ def test_два_агента_на_одной_машине_не_делят_фай
 
         No such file or directory: '.0.2.0.7.part' -> '0.2.0.tar.gz'
     """
-    from loom_agent.update import Updater
+    from looma_agent.update import Updater
 
     incoming = tmp_path / "incoming"
-    monkeypatch.setenv("LOOM_AGENT_INCOMING", str(incoming))
-    monkeypatch.delenv("LOOM_UPDATES_DISABLED", raising=False)
+    monkeypatch.setenv("LOOMA_AGENT_INCOMING", str(incoming))
+    monkeypatch.delenv("LOOMA_UPDATES_DISABLED", raising=False)
     monkeypatch.setattr(os, "getpid", lambda: 7)   # как в контейнере
 
     names = set()
@@ -565,8 +565,8 @@ def test_два_агента_на_одной_машине_не_делят_фай
 
 # --------------------------------------------- payload обязан побеждать образ
 def _tree(root: Path, name: str, says: str) -> Path:
-    """Каталог с пакетом loom_agent, который печатает, откуда он взялся."""
-    pkg = root / name / "loom_agent"
+    """Каталог с пакетом looma_agent, который печатает, откуда он взялся."""
+    pkg = root / name / "looma_agent"
     pkg.mkdir(parents=True)
     (pkg / "__init__.py").write_text("")
     (pkg / "main.py").write_text(f"print({says!r})\n")
@@ -578,16 +578,16 @@ def test_код_релиза_побеждает_код_образа(tmp_path):
 
     `python -m` кладёт ТЕКУЩИЙ каталог первым в sys.path, впереди PYTHONPATH.
     Рабочим каталогом образа был /app, где лежит скопированный для сборки
-    loom_agent — и payload проигрывал образу всегда. Панель при этом показывала
+    looma_agent — и payload проигрывал образу всегда. Панель при этом показывала
     новую версию, узлы отчитывались об обновлении, ошибок не было нигде.
     """
-    from loom_launcher.supervise import AGENT_CWD, AGENT_FLAGS
+    from looma_launcher.supervise import AGENT_CWD, AGENT_FLAGS
 
     образ = _tree(tmp_path, "app", "из образа")
     payload = _tree(tmp_path, "payload", "из релиза")
 
     answer = subprocess.run(
-        [sys.executable, *AGENT_FLAGS, "-m", "loom_agent.main"],
+        [sys.executable, *AGENT_FLAGS, "-m", "looma_agent.main"],
         cwd=AGENT_CWD, capture_output=True, text=True,
         env={**os.environ, "PYTHONPATH": str(payload)},
     )
@@ -595,7 +595,7 @@ def test_код_релиза_побеждает_код_образа(tmp_path):
 
     # А без этих мер выигрывал бы образ — тест на саму причину, не на симптом.
     было = subprocess.run(
-        [sys.executable, "-m", "loom_agent.main"],
+        [sys.executable, "-m", "looma_agent.main"],
         cwd=str(образ), capture_output=True, text=True,
         env={**os.environ, "PYTHONPATH": str(payload)},
     )
@@ -605,8 +605,8 @@ def test_код_релиза_побеждает_код_образа(tmp_path):
 
 def test_агент_запускается_вне_каталога_с_исходниками():
     """Прямая проверка самой меры: рабочий каталог не должен содержать
-    loom_agent, иначе он затенит payload."""
-    from loom_launcher.supervise import AGENT_CWD
+    looma_agent, иначе он затенит payload."""
+    from looma_launcher.supervise import AGENT_CWD
 
-    assert not (Path(AGENT_CWD) / "loom_agent").exists(), (
-        f"в {AGENT_CWD} лежит loom_agent — он затенит любой релиз")
+    assert not (Path(AGENT_CWD) / "looma_agent").exists(), (
+        f"в {AGENT_CWD} лежит looma_agent — он затенит любой релиз")

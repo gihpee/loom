@@ -24,7 +24,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "agent"))
 from make_tiny_model import ensure_tiny_model
 from test_agent_gateway import Orchestrator
 
-PAYLOAD = str(Path(__file__).resolve().parent.parent / "payloads" / "loom_stage")
+PAYLOAD = str(Path(__file__).resolve().parent.parent / "payloads" / "looma_stage")
 
 
 @pytest.fixture(scope="module")
@@ -34,7 +34,7 @@ def tiny_model():
 
 def stage_command(model: str, start: int, end: int) -> list:
     return [
-        sys.executable, "-m", "loom_stage.server",
+        sys.executable, "-m", "looma_stage.server",
         "--model-id", "tiny", "--weights-uri", model,
         "--start-layer", str(start), "--end-layer", str(end),
         "--device", "cpu", "--dtype", "float32",
@@ -97,8 +97,8 @@ def ask(orchestrator, group, prompt: str, *, max_tokens: int = 4) -> dict:
 @pytest.mark.slow
 def test_a_model_split_over_two_nodes_answers(tmp_path, monkeypatch, tiny_model):
     """Layers 0-2 on one machine, 3-6 on another, one answer out of the pair."""
-    monkeypatch.setenv("LOOM_ALLOW_UNPRIVILEGED_TASKS", "1")
-    monkeypatch.setenv("LOOM_P2P", "0")
+    monkeypatch.setenv("LOOMA_ALLOW_UNPRIVILEGED_TASKS", "1")
+    monkeypatch.setenv("LOOMA_P2P", "0")
     orchestrator = Orchestrator().start()
     running = start_nodes(orchestrator, tmp_path, 2)
     try:
@@ -132,8 +132,8 @@ def test_a_model_split_over_two_nodes_answers(tmp_path, monkeypatch, tiny_model)
 def test_a_model_on_one_node_answers_without_touching_the_network(tmp_path, monkeypatch,
                                                                   tiny_model):
     """Both stages on one machine: the fast arrangement, and the same code."""
-    monkeypatch.setenv("LOOM_ALLOW_UNPRIVILEGED_TASKS", "1")
-    monkeypatch.setenv("LOOM_P2P", "0")
+    monkeypatch.setenv("LOOMA_ALLOW_UNPRIVILEGED_TASKS", "1")
+    monkeypatch.setenv("LOOMA_P2P", "0")
     orchestrator = Orchestrator().start()
     running = start_nodes(orchestrator, tmp_path, 1)
     try:
@@ -169,8 +169,8 @@ def test_splitting_the_model_does_not_change_the_answer(tmp_path, monkeypatch, t
     decoding is deterministic, so one stage and two must emit the same tokens
     from the same prompt — and if they do not, the split is wrong.
     """
-    monkeypatch.setenv("LOOM_ALLOW_UNPRIVILEGED_TASKS", "1")
-    monkeypatch.setenv("LOOM_P2P", "0")
+    monkeypatch.setenv("LOOMA_ALLOW_UNPRIVILEGED_TASKS", "1")
+    monkeypatch.setenv("LOOMA_P2P", "0")
     orchestrator = Orchestrator().start()
     running = start_nodes(orchestrator, tmp_path, 2)
     try:
@@ -213,8 +213,8 @@ def test_ответ_приходит_по_частям_а_не_целиком(tm
     Проверяется именно инкрементальность: одна часть на весь ответ означала бы,
     что где-то по пути его собрали и придержали.
     """
-    monkeypatch.setenv("LOOM_ALLOW_UNPRIVILEGED_TASKS", "1")
-    monkeypatch.setenv("LOOM_P2P", "0")
+    monkeypatch.setenv("LOOMA_ALLOW_UNPRIVILEGED_TASKS", "1")
+    monkeypatch.setenv("LOOMA_P2P", "0")
     orchestrator = Orchestrator().start()
     running = start_nodes(orchestrator, tmp_path, 1)
     try:
@@ -259,11 +259,11 @@ def test_состояние_стадий_видно_пока_модель_под
     """«running» — это про процесс, а не про готовность отвечать."""
     from fastapi.testclient import TestClient
 
-    from loom.api.app import create_app
+    from looma.api.app import create_app
     from test_agent_gateway import _Settings
 
-    monkeypatch.setenv("LOOM_ALLOW_UNPRIVILEGED_TASKS", "1")
-    monkeypatch.setenv("LOOM_P2P", "0")
+    monkeypatch.setenv("LOOMA_ALLOW_UNPRIVILEGED_TASKS", "1")
+    monkeypatch.setenv("LOOMA_P2P", "0")
     orchestrator = Orchestrator().start()
     running = start_nodes(orchestrator, tmp_path, 1)
     try:
@@ -298,8 +298,8 @@ def test_два_клиента_обслуживаются_одновременн
     Батч, склеившийся в одну последовательность, ответ бы дал — просто
     другой, и без этой сверки такая поломка выглядела бы как успех.
     """
-    monkeypatch.setenv("LOOM_ALLOW_UNPRIVILEGED_TASKS", "1")
-    monkeypatch.setenv("LOOM_P2P", "0")
+    monkeypatch.setenv("LOOMA_ALLOW_UNPRIVILEGED_TASKS", "1")
+    monkeypatch.setenv("LOOMA_P2P", "0")
     orchestrator = Orchestrator().start()
     running = start_nodes(orchestrator, tmp_path, 1)
     try:

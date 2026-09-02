@@ -16,11 +16,11 @@ from pathlib import Path
 
 import pytest
 
-from loom_agent.tasks.env import EnvironmentCache
-from loom_agent.tasks.limits import resolve_isolation
-from loom_agent.tasks.registry import TaskRegistry
-from loom_agent.tasks.spec import TaskSpec
-from loom_agent.transport.files import (
+from looma_agent.tasks.env import EnvironmentCache
+from looma_agent.tasks.limits import resolve_isolation
+from looma_agent.tasks.registry import TaskRegistry
+from looma_agent.tasks.spec import TaskSpec
+from looma_agent.transport.files import (
     Inbox,
     IncomingFile,
     Outbox,
@@ -246,7 +246,7 @@ def test_a_task_reads_its_input_and_its_result_comes_back(tmp_path, monkeypatch)
     file had nowhere to put it, so anything beyond a number in the logs was
     impossible.
     """
-    monkeypatch.setenv("LOOM_ALLOW_UNPRIVILEGED_TASKS", "1")
+    monkeypatch.setenv("LOOMA_ALLOW_UNPRIVILEGED_TASKS", "1")
     registry = TaskRegistry(
         root=tmp_path / "tasks",
         isolation=resolve_isolation(),
@@ -257,7 +257,7 @@ def test_a_task_reads_its_input_and_its_result_comes_back(tmp_path, monkeypatch)
     program = (
         "import os, pathlib;"
         "data = pathlib.Path('input.txt').read_text();"
-        "out = pathlib.Path(os.environ['LOOM_TASK_OUT']);"
+        "out = pathlib.Path(os.environ['LOOMA_TASK_OUT']);"
         "(out / 'answer.txt').write_text(data.upper())"
     )
     payload = b"the client's data"
@@ -281,7 +281,7 @@ def test_a_task_reads_its_input_and_its_result_comes_back(tmp_path, monkeypatch)
 
 def test_input_that_will_not_arrive_means_the_task_never_starts(tmp_path, monkeypatch):
     """A task running against input that failed to arrive is worse than none."""
-    monkeypatch.setenv("LOOM_ALLOW_UNPRIVILEGED_TASKS", "1")
+    monkeypatch.setenv("LOOMA_ALLOW_UNPRIVILEGED_TASKS", "1")
     registry = TaskRegistry(
         root=tmp_path / "tasks",
         isolation=resolve_isolation(),

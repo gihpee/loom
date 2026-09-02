@@ -12,7 +12,7 @@ import time
 
 import pytest
 
-from loom_agent.tasks.models import ModelCache
+from looma_agent.tasks.models import ModelCache
 
 
 def repository(cache: ModelCache, name: str, *, size: int, age_s: float = 0.0):
@@ -31,8 +31,8 @@ def repository(cache: ModelCache, name: str, *, size: int, age_s: float = 0.0):
 # ------------------------------------------------------------- для задачи
 def test_задача_получает_путь_к_общему_кэшу(tmp_path):
     cache = ModelCache(tmp_path / "models")
-    env = cache.env("/var/lib/loom/models")
-    assert env["HF_HOME"] == "/var/lib/loom/models"
+    env = cache.env("/var/lib/looma/models")
+    assert env["HF_HOME"] == "/var/lib/looma/models"
 
 
 def test_задаются_все_имена_переменных(tmp_path):
@@ -131,7 +131,7 @@ class _Directory:
 
 
 def задача(cache, *, rootfs=None):
-    from loom_agent.tasks.runner import Task
+    from looma_agent.tasks.runner import Task
 
     made = Task.__new__(Task)
     made.models = cache

@@ -16,9 +16,9 @@ import pytest
 from conftest import make_join_key
 from fake_orchestrator import FakeOrchestrator
 
-from loom_agent.config import parse_args
-from loom_agent.control import tasks as tasks_mod
-from loom_agent.main import Agent
+from looma_agent.config import parse_args
+from looma_agent.control import tasks as tasks_mod
+from looma_agent.main import Agent
 
 
 @pytest.fixture
@@ -31,8 +31,8 @@ def orchestrator():
 
 @pytest.fixture
 def node(orchestrator, tmp_path, monkeypatch):
-    monkeypatch.setenv("LOOM_ALLOW_UNPRIVILEGED_TASKS", "1")
-    monkeypatch.setenv("LOOM_P2P", "0")
+    monkeypatch.setenv("LOOMA_ALLOW_UNPRIVILEGED_TASKS", "1")
+    monkeypatch.setenv("LOOMA_P2P", "0")
     config = parse_args([
         "--key", make_join_key(f"127.0.0.1:{orchestrator.port}"),
         "--node-id", "node-1",
@@ -52,7 +52,7 @@ def node(orchestrator, tmp_path, monkeypatch):
 WRITE_RESULT = (
     "import os, pathlib;"
     "data = pathlib.Path('input.txt').read_text();"
-    "out = pathlib.Path(os.environ['LOOM_TASK_OUT']);"
+    "out = pathlib.Path(os.environ['LOOMA_TASK_OUT']);"
     "(out / 'answer.txt').write_text(data.upper());"
     "print('worked on', len(data), 'bytes')"
 )
@@ -101,7 +101,7 @@ def test_a_large_input_arrives_whole(orchestrator, node):
     program = (
         "import os, pathlib, hashlib;"
         "raw = pathlib.Path('blob.bin').read_bytes();"
-        "out = pathlib.Path(os.environ['LOOM_TASK_OUT']);"
+        "out = pathlib.Path(os.environ['LOOMA_TASK_OUT']);"
         "(out / 'digest.txt').write_text(hashlib.sha256(raw).hexdigest())"
     )
     orchestrator.run_task("t4", [sys.executable, "-c", program],
@@ -120,7 +120,7 @@ def test_a_large_input_arrives_whole(orchestrator, node):
 def test_several_input_files_arrive(orchestrator, node):
     program = (
         "import os, pathlib;"
-        "out = pathlib.Path(os.environ['LOOM_TASK_OUT']);"
+        "out = pathlib.Path(os.environ['LOOMA_TASK_OUT']);"
         "(out / 'joined.txt').write_text("
         "pathlib.Path('a.txt').read_text() + pathlib.Path('b/c.txt').read_text())"
     )
@@ -153,7 +153,7 @@ def test_an_environment_that_cannot_be_built_fails_the_task_with_a_reason(orches
 
 # ------------------------------------------------------------------ control
 def test_a_running_task_can_be_stopped(orchestrator, node):
-    from loom_agent.proto import agent_pb2
+    from looma_agent.proto import agent_pb2
 
     orchestrator.run_task("s1", [sys.executable, "-c", "import time; time.sleep(120)"],
                           timeout_s=300)
@@ -168,11 +168,11 @@ def test_a_running_task_can_be_stopped(orchestrator, node):
 
 
 def test_releasing_a_task_takes_its_disk_back(orchestrator, node):
-    from loom_agent.proto import agent_pb2
+    from looma_agent.proto import agent_pb2
 
     orchestrator.run_task("r1", [sys.executable, "-c",
                                  "import os, pathlib;"
-                                 "pathlib.Path(os.environ['LOOM_TASK_OUT'], 'x').write_text('y')"])
+                                 "pathlib.Path(os.environ['LOOMA_TASK_OUT'], 'x').write_text('y')"])
     assert orchestrator.wait_finished("r1").state == "done"
     directory = node.tasks.require("r1").directory.root
     orchestrator.send(agent_pb2.ServerMessage(
@@ -186,7 +186,7 @@ def test_releasing_a_task_takes_its_disk_back(orchestrator, node):
 
 
 def test_logs_can_be_fetched(orchestrator, node):
-    from loom_agent.proto import agent_pb2
+    from looma_agent.proto import agent_pb2
 
     orchestrator.run_task("l1", [sys.executable, "-c", "print('what the task said')"])
     assert orchestrator.wait_finished("l1").state == "done"
@@ -221,7 +221,7 @@ def test_input_that_stops_arriving_does_not_hold_the_node_forever(orchestrator, 
                                                                   monkeypatch):
     """A client that goes away mid-upload must give the resources back."""
     monkeypatch.setattr(tasks_mod, "INPUT_IDLE_TIMEOUT_S", 2.0)
-    from loom_agent.proto import agent_pb2
+    from looma_agent.proto import agent_pb2
 
     orchestrator.send(agent_pb2.ServerMessage(run_task=agent_pb2.RunTask(
         command_id="cmd-i1", task_id="i1", command=["true"], timeout_s=60,
@@ -235,7 +235,7 @@ def test_input_that_stops_arriving_does_not_hold_the_node_forever(orchestrator, 
 
 
 def test_an_input_name_that_escapes_the_directory_is_refused(orchestrator, node):
-    from loom_agent.proto import agent_pb2
+    from looma_agent.proto import agent_pb2
 
     orchestrator.send(agent_pb2.ServerMessage(run_task=agent_pb2.RunTask(
         command_id="cmd-i2", task_id="i2", command=["true"], timeout_s=60,
@@ -248,7 +248,7 @@ def test_an_input_name_that_escapes_the_directory_is_refused(orchestrator, node)
 
 def test_a_file_that_was_never_declared_is_not_written(orchestrator, node):
     """The agent writes what the task said it would need, and nothing else."""
-    from loom_agent.proto import agent_pb2
+    from looma_agent.proto import agent_pb2
 
     orchestrator.send(agent_pb2.ServerMessage(run_task=agent_pb2.RunTask(
         command_id="cmd-i3", task_id="i3", command=["true"], timeout_s=60,

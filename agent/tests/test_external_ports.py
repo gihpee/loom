@@ -25,8 +25,8 @@ class NoRegistry:
 
 @pytest.fixture
 def commands():
-    from loom_agent.control.tasks import TaskCommands
-    from loom_agent.tasks.groups import Group, Member
+    from looma_agent.control.tasks import TaskCommands
+    from looma_agent.tasks.groups import Group, Member
 
     made = TaskCommands(registry=NoRegistry(), send=lambda _m: None, node_id="n")
     made.groups.join("t", Group(group_id="g", rank=0,
@@ -37,7 +37,7 @@ def commands():
 def test_внешний_порт_разрешается_отдельно_от_соседских(commands):
     """Со стенда: клиентский вход Ray лежит в local_only, а не в crossing —
     соседним РАНГАМ он не нужен. Но до него должен дотянуться оркестратор,
-    когда приходит loom-connect, и разрешения на это не было ни у кого:
+    когда приходит looma-connect, и разрешения на это не было ни у кого:
 
         канал c-... не открылся: порт 21807 не открыт для соседей
 
@@ -52,7 +52,7 @@ def test_внешний_порт_разрешается_отдельно_от_с
 
 
 def test_пустая_раскладка_по_прежнему_отвергается(commands):
-    from loom_agent.tasks.spec import TaskRefused
+    from looma_agent.tasks.spec import TaskRefused
 
     with pytest.raises(TaskRefused, match="ни одного порта"):
         commands._task_forward("t", {})

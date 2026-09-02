@@ -7,7 +7,7 @@ import hashlib
 
 import pytest
 
-from loom.orchestrator.releases import ReleaseError, ReleaseStore, in_wave
+from looma.orchestrator.releases import ReleaseError, ReleaseStore, in_wave
 
 
 @pytest.fixture
@@ -160,13 +160,13 @@ def test_манифест_лежит_рядом_с_архивом(tmp_path):
     # это ровно то, что нужно тесту: подписывать своим, парк не трогать.
     if result.returncode not in (0, 3):
         pytest.skip(f"нет cryptography: {result.stderr[:80]}")
-    out = tmp_path / "loom-agent-9.9.9.tar.gz"
+    out = tmp_path / "looma-agent-9.9.9.tar.gz"
     result = subprocess.run(
         [sys.executable, str(root / "scripts" / "sign_release.py"), "sign",
          "--key", str(key), "--version", "9.9.9", "--out", str(out)],
         capture_output=True, text=True, cwd=root)
     assert result.returncode == 0, result.stderr
-    manifest = out.with_name("loom-agent-9.9.9.json")
+    manifest = out.with_name("looma-agent-9.9.9.json")
     assert manifest.is_file(), "манифест не лёг рядом с архивом"
     body = _json.loads(manifest.read_text())
     assert body["version"] == "9.9.9"
@@ -186,7 +186,7 @@ def test_keygen_не_подменяет_ключ_парка_молча(tmp_path)
     from pathlib import Path
 
     root = Path(__file__).resolve().parent.parent
-    anchor = root / "agent" / "loom_launcher" / "release_key.pub"
+    anchor = root / "agent" / "looma_launcher" / "release_key.pub"
     if not anchor.is_file():
         pytest.skip("в этом дереве ключа парка нет")
     before = anchor.read_text()

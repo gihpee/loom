@@ -10,10 +10,10 @@ import pytest
 from conftest import make_join_key
 from fake_orchestrator import FakeOrchestrator
 
-from loom_agent.config import parse_args
-from loom_agent.identity import BadJoinKey, parse_join_key
-from loom_agent.main import Agent
-from loom_agent.proto import agent_pb2
+from looma_agent.config import parse_args
+from looma_agent.identity import BadJoinKey, parse_join_key
+from looma_agent.main import Agent
+from looma_agent.proto import agent_pb2
 
 
 @pytest.fixture
@@ -45,7 +45,7 @@ def test_registers_with_detected_hardware(orchestrator, agent):
     assert orchestrator.wait_registered(), "the node never registered"
     registration = orchestrator.registrations[0]
     assert registration.node_id == "test-node"
-    assert registration.join_key.startswith("loom_")
+    assert registration.join_key.startswith("looma_")
     assert registration.agent_version
     # Hardware is detected, not declared: whatever this machine is, the field
     # must carry the source that answered rather than being left empty.
@@ -98,8 +98,8 @@ def test_join_key_carries_the_address():
     assert key.secret == "secret"
 
 
-@pytest.mark.parametrize("bad", ["", "nope", "loom_!!!!", "loom_"])
+@pytest.mark.parametrize("bad", ["", "nope", "looma_!!!!", "looma_"])
 def test_bad_join_keys_say_what_to_do(bad):
     with pytest.raises(BadJoinKey) as exc:
         parse_join_key(bad)
-    assert "loom_" in str(exc.value) or "damaged" in str(exc.value)
+    assert "looma_" in str(exc.value) or "damaged" in str(exc.value)

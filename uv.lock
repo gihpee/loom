@@ -563,7 +563,7 @@ wheels = [
 ]
 
 [[package]]
-name = "loom"
+name = "looma"
 version = "0.2.0"
 source = { editable = "." }
 dependencies = [

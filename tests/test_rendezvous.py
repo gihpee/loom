@@ -17,8 +17,8 @@ WORKER_DIR = Path(__file__).resolve().parent.parent / "worker"
 if str(WORKER_DIR) not in sys.path:
     sys.path.insert(0, str(WORKER_DIR))
 
-from loom.orchestrator.rendezvous import RendezvousNode, host_of  # noqa: E402
-from loom.orchestrator.rendezvous import lattica_available  # noqa: E402
+from looma.orchestrator.rendezvous import RendezvousNode, host_of  # noqa: E402
+from looma.orchestrator.rendezvous import lattica_available  # noqa: E402
 
 # --------------------------------------------------------------- the address
 @pytest.mark.parametrize(
@@ -50,7 +50,7 @@ def test_a_node_that_is_not_running_offers_nothing():
 
 
 def test_p2p_can_be_switched_off_on_the_orchestrator(monkeypatch):
-    monkeypatch.setenv("LOOM_P2P", "0")
+    monkeypatch.setenv("LOOMA_P2P", "0")
     node = RendezvousNode(public_host="203.0.113.7")
     assert node.start() is False
     assert node.multiaddrs() == []
@@ -107,13 +107,13 @@ def test_relay_addresses_are_configured_not_discovered(monkeypatch):
     /libp2p/circuit/relay/0.2.0/stop and never the /hop half, so the
     orchestrator's own node cannot be the relay however reachable it is.
     """
-    from loom.orchestrator.rendezvous import relay_addrs
+    from looma.orchestrator.rendezvous import relay_addrs
 
-    monkeypatch.setenv("LOOM_P2P_RELAY", "/ip4/1.2.3.4/tcp/47200/p2p/12D3KooWa, ")
+    monkeypatch.setenv("LOOMA_P2P_RELAY", "/ip4/1.2.3.4/tcp/47200/p2p/12D3KooWa, ")
     assert relay_addrs() == ["/ip4/1.2.3.4/tcp/47200/p2p/12D3KooWa"]
 
-    monkeypatch.delenv("LOOM_P2P_RELAY", raising=False)
-    monkeypatch.setenv("LOOM_P2P_RELAY_FILE", "/nonexistent/relay/address")
+    monkeypatch.delenv("LOOMA_P2P_RELAY", raising=False)
+    monkeypatch.setenv("LOOMA_P2P_RELAY_FILE", "/nonexistent/relay/address")
     assert relay_addrs() == []
 
 
@@ -129,11 +129,11 @@ def test_the_relay_hands_its_address_over_without_a_human(monkeypatch, tmp_path)
     the orchestrator reads it. Read per registration, not cached: a relay
     started after the orchestrator must still be picked up.
     """
-    from loom.orchestrator.rendezvous import relay_addrs
+    from looma.orchestrator.rendezvous import relay_addrs
 
     published = tmp_path / "relay" / "address"
-    monkeypatch.delenv("LOOM_P2P_RELAY", raising=False)
-    monkeypatch.setenv("LOOM_P2P_RELAY_FILE", str(published))
+    monkeypatch.delenv("LOOMA_P2P_RELAY", raising=False)
+    monkeypatch.setenv("LOOMA_P2P_RELAY_FILE", str(published))
 
     assert relay_addrs() == []  # no relay running yet
 
@@ -143,6 +143,6 @@ def test_the_relay_hands_its_address_over_without_a_human(monkeypatch, tmp_path)
 
     # An explicit setting still wins: someone running the relay elsewhere must
     # not be overruled by a stale file from a relay that used to be local.
-    monkeypatch.setenv("LOOM_P2P_RELAY", "/ip4/198.51.100.9/tcp/47200/p2p/12D3KooWOther")
+    monkeypatch.setenv("LOOMA_P2P_RELAY", "/ip4/198.51.100.9/tcp/47200/p2p/12D3KooWOther")
     assert relay_addrs() == ["/ip4/198.51.100.9/tcp/47200/p2p/12D3KooWOther"]
 

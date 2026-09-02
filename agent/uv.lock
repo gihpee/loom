@@ -256,7 +256,7 @@ wheels = [
 ]
 
 [[package]]
-name = "loom-agent"
+name = "looma-agent"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [

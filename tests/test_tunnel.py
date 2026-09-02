@@ -16,7 +16,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "agent"))
 
-from loom.orchestrator.agents import AgentError  # noqa: E402
+from looma.orchestrator.agents import AgentError  # noqa: E402
 
 from test_agent_gateway import Orchestrator, _Settings  # noqa: E402
 
@@ -87,8 +87,8 @@ def stand(tmp_path, monkeypatch):
     """Оркестратор и один настоящий агент."""
     from conftest_agent import start_agent
 
-    monkeypatch.setenv("LOOM_ALLOW_UNPRIVILEGED_TASKS", "1")
-    monkeypatch.setenv("LOOM_P2P", "0")
+    monkeypatch.setenv("LOOMA_ALLOW_UNPRIVILEGED_TASKS", "1")
+    monkeypatch.setenv("LOOMA_P2P", "0")
     orchestrator = Orchestrator().start()
     agent, thread = start_agent(orchestrator.port, tmp_path / "node")
     deadline = time.time() + 20
@@ -140,7 +140,7 @@ def test_байты_доходят_до_узла_и_обратно(stand):
     orchestrator, agent, echo = stand
     task_id = running_task(orchestrator, echo.port)
     allow(agent, echo.port)
-    assert through(orchestrator, task_id, echo.port, b"loom") == b"loom"
+    assert through(orchestrator, task_id, echo.port, b"looma") == b"looma"
 
 
 def test_двоичное_переживает_дорогу(stand):
@@ -195,7 +195,7 @@ async def _open(orchestrator, task_id: str, port: int):
 def app_client(hub=None):
     from fastapi.testclient import TestClient
 
-    from loom.api.app import create_app
+    from looma.api.app import create_app
 
     return TestClient(create_app(agents=hub, config=_Settings()))
 
@@ -222,7 +222,7 @@ def test_чужой_токен_не_пускает_в_канал(stand):
     with pytest.raises(WebSocketDisconnect) as caught:
         with app_client(orchestrator.hub).websocket_connect(
                 "/connect/group-any",
-                headers={"X-Loom-Admin-Token": "wrong-token"}):
+                headers={"X-Looma-Admin-Token": "wrong-token"}):
             pass
     # 1008 — «политика»: клиент увидит причину, а не молчаливый обрыв.
     assert caught.value.code == 1008
@@ -243,7 +243,7 @@ def test_причина_закрытия_влезает_в_кадр():
     """Ограничение на неё — 123 байта, а кириллица занимает по два на букву.
     Длинный текст не обрезается сам, а роняет закрытие: пропадает ровно то
     объяснение, ради которого писался."""
-    from loom.api.app import CLOSE_REASON_BYTES, _reason
+    from looma.api.app import CLOSE_REASON_BYTES, _reason
 
     длинная = "кластер не назвал порт для подключения: он ещё собирается " * 3
     # Ровно по границе тоже: многоточие само занимает три байта, и обрезка

@@ -18,19 +18,19 @@ docker compose up -d --build
 Проверить, что он определил свой адрес правильно:
 
 ```bash
-curl -s localhost:8000/admin/connect -H "X-Loom-Admin-Token: $LOOM_ADMIN_TOKEN"
+curl -s localhost:8000/admin/connect -H "X-Looma-Admin-Token: $LOOMA_ADMIN_TOKEN"
 ```
 
 `severity: "warn"` означает, что до объявленного адреса не достучаться снаружи,
-и **ни один узел не подключится**. Обычно лечится явным `LOOM_PUBLIC_ADDR` в
+и **ни один узел не подключится**. Обычно лечится явным `LOOMA_PUBLIC_ADDR` в
 `.env`: автоопределение видит адрес контейнера, а не то, что видно из мира.
 
-Порт `LOOM_GRPC_PORT` должен быть открыт наружу. Это единственный входящий порт
+Порт `LOOMA_GRPC_PORT` должен быть открыт наружу. Это единственный входящий порт
 во всей системе — у узлов их нет вовсе.
 
 Пересобирать оркестратор можно под нагрузкой: `docker compose up -d --build` не
 трогает узлы, их задачи продолжают считать, а оркестратор поднимается со своим
-состоянием из тома `loom-data` (`/data/state.json`) — развёрнутые модели и
+состоянием из тома `looma-data` (`/data/state.json`) — развёрнутые модели и
 задачи остаются на месте. Оттуда же он берёт ключи и релизы, так что
 `docker compose down -v` стирает и их: том сносят, только когда хотят начать
 с чистого листа.
@@ -43,7 +43,7 @@ curl -s localhost:8000/admin/connect -H "X-Loom-Admin-Token: $LOOM_ADMIN_TOKEN"
 
 ```bash
 curl -s localhost:8000/admin/keys -X POST \
-  -H "X-Loom-Admin-Token: $LOOM_ADMIN_TOKEN" \
+  -H "X-Looma-Admin-Token: $LOOMA_ADMIN_TOKEN" \
   -H 'Content-Type: application/json' -d '{"label":"машина Миши"}'
 ```
 
@@ -51,7 +51,7 @@ curl -s localhost:8000/admin/keys -X POST \
 
 ```bash
 docker run -d --gpus all --restart unless-stopped --network host \
-  -v loom-data:/var/lib/loom gihpee/loomagent --key loom_...
+  -v looma-data:/var/lib/looma gihpee/looma-agent --key looma_...
 ```
 
 Три вещи в ней не косметика:
@@ -61,7 +61,7 @@ docker run -d --gpus all --restart unless-stopped --network host \
 пакеты транслируются ещё раз на выходе. Пробивание NAT из такой позиции не
 работает никогда.
 
-`-v loom-data:/var/lib/loom` — сюда ложатся каталоги задач, кэш окружений и
+`-v looma-data:/var/lib/looma` — сюда ложатся каталоги задач, кэш окружений и
 нагрузки агента. Без тома всё это пересобирается заново после каждого
 перезапуска, и обновление агента не переживает рестарт.
 
@@ -78,7 +78,7 @@ docker run -d --gpus all --restart unless-stopped --network host \
 
 ```
 hardware: device=cuda gpu=NVIDIA GeForce RTX 4090 x2 vram_free=47.3GB ... (nvml)
-tasks will run as loom-task on 2 GPU(s)
+tasks will run as looma-task on 2 GPU(s)
 ```
 
 Если вместо второй строки:
@@ -87,7 +87,7 @@ tasks will run as loom-task on 2 GPU(s)
 this node will REFUSE every task until it can run them as a separate user
 ```
 
-— значит агент запущен не от root либо в образе нет пользователя `loom-task`.
+— значит агент запущен не от root либо в образе нет пользователя `looma-task`.
 Узел при этом **зарегистрируется и будет виден**, но не возьмёт ни одной
 задачи. Это намеренно: запускать чужой код от пользователя агента — значит
 отдать ему ключ узла и файлы соседних задач.
@@ -118,18 +118,18 @@ docker compose up -d relay
 
 ```bash
 curl -s localhost:8000/admin/groups -X POST \
-  -H "X-Loom-Admin-Token: $LOOM_ADMIN_TOKEN" \
+  -H "X-Looma-Admin-Token: $LOOMA_ADMIN_TOKEN" \
   -H 'Content-Type: application/json' -d '{
     "label": "qwen3-8b",
     "size": 2,
     "serve_port": 1,
     "timeout_s": 0,
-    "environment": {"kind": "python", "requirements": ["loom-stage"]},
+    "environment": {"kind": "python", "requirements": ["looma-stage"]},
     "per_rank": [
-      {"command": ["python","-m","loom_stage.server","--model-id","qwen3-8b",
+      {"command": ["python","-m","looma_stage.server","--model-id","qwen3-8b",
                    "--weights-uri","Qwen/Qwen3-8B","--start-layer","0","--end-layer","18",
                    "--device","cuda","--dtype","bfloat16"]},
-      {"command": ["python","-m","loom_stage.server","--model-id","qwen3-8b",
+      {"command": ["python","-m","looma_stage.server","--model-id","qwen3-8b",
                    "--weights-uri","Qwen/Qwen3-8B","--start-layer","18","--end-layer","36",
                    "--device","cuda","--dtype","bfloat16"]}
     ]}'

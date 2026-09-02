@@ -7,7 +7,7 @@ resolution-markers = [
 ]
 
 [[package]]
-name = "loom-connect"
+name = "looma-connect"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [

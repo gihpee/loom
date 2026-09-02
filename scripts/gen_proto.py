@@ -14,11 +14,11 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-PROTO_DIR = ROOT / "src" / "loom" / "proto"
+PROTO_DIR = ROOT / "src" / "looma" / "proto"
 PROTOS = ["agent.proto"]
 TARGETS = [
-    ROOT / "src" / "loom" / "proto_gen",        # orchestrator side
-    ROOT / "agent" / "loom_agent" / "proto",    # node side, self-contained
+    ROOT / "src" / "looma" / "proto_gen",        # orchestrator side
+    ROOT / "agent" / "looma_agent" / "proto",    # node side, self-contained
 ]
 
 

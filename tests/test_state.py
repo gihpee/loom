@@ -12,10 +12,10 @@ from pathlib import Path
 
 import pytest
 
-from loom.orchestrator.agents import (ADOPTION_GRACE_S, AgentHub, AgentNode,
+from looma.orchestrator.agents import (ADOPTION_GRACE_S, AgentHub, AgentNode,
                                       AgentSession, TaskRecord)
-from loom.orchestrator.state import FORMAT, StateStore
-from loom.proto_gen import agent_pb2
+from looma.orchestrator.state import FORMAT, StateStore
+from looma.proto_gen import agent_pb2
 
 
 def hub_with(path: Path) -> AgentHub:

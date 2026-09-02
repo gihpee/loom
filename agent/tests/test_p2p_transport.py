@@ -21,7 +21,7 @@ WORKER_DIR = Path(__file__).resolve().parent.parent / "worker"
 if str(WORKER_DIR) not in sys.path:
     sys.path.insert(0, str(WORKER_DIR))
 
-from loom_agent.p2p import LinkTable, Neighbour, PeerNode, lattica_available  # noqa: E402
+from looma_agent.p2p import LinkTable, Neighbour, PeerNode, lattica_available  # noqa: E402
 
 pytestmark = pytest.mark.skipif(
     not lattica_available(), reason="the lattica p2p stack is not installed"

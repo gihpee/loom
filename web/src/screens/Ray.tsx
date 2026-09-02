@@ -11,15 +11,15 @@ import {
  *
  *  По команде, а не по метке: метку задаёт человек, а команда — это то, что
  *  на узле действительно работает, и соврать она не может. */
-const RAY = "loom_ray.server";
+const RAY = "looma_ray.server";
 
 const TEMPLATE = `import os
 import ray
 
 # ДО импорта ray. Плазма-сокет ложится внутрь временного каталога Ray, а путь
 # unix-сокета не может быть длиннее 103 байт — каталог задачи в лимит не
-# влезает. LOOM_TASK_TMP агент даёт как раз для этого.
-os.environ.setdefault("RAY_TMPDIR", os.environ["LOOM_TASK_TMP"])
+# влезает. LOOMA_TASK_TMP агент даёт как раз для этого.
+os.environ.setdefault("RAY_TMPDIR", os.environ["LOOMA_TASK_TMP"])
 
 ray.init()          # подключится к кластеру, который уже поднял ранг 0
 
@@ -32,7 +32,7 @@ def work(n):        # имя латиницей: Ray кодирует его в 
 answers = ray.get([work.remote(i) for i in range(100)])
 
 # Результат — только то, что легло сюда. Всё остальное считается черновиком.
-with open(os.path.join(os.environ["LOOM_TASK_OUT"], "answer.txt"), "w") as f:
+with open(os.path.join(os.environ["LOOMA_TASK_OUT"], "answer.txt"), "w") as f:
     f.write(str(sum(answers)))
 `;
 
@@ -48,7 +48,7 @@ function connectCommand(group: Group): string {
   // упрётся в «WRONG_VERSION_NUMBER» — сообщение про TLS, из которого не
   // следует, что TLS тут просто нет.
   const plain = location.protocol === "http:" ? " --insecure" : "";
-  return `loom-connect ${location.host} ${group.group_id}`
+  return `looma-connect ${location.host} ${group.group_id}`
     + ` --token <ваш токен>${plain}`;
 }
 

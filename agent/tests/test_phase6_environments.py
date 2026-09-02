@@ -18,10 +18,10 @@ from pathlib import Path
 
 import pytest
 
-from loom_agent.tasks.env import EnvironmentCache
-from loom_agent.tasks.env.archive import BadArchive, apply_layer, extract
-from loom_agent.tasks.env.oci import PullFailed, parse_reference, platform_pair, pull
-from loom_agent.tasks.spec import EnvSpec, TaskRefused
+from looma_agent.tasks.env import EnvironmentCache
+from looma_agent.tasks.env.archive import BadArchive, apply_layer, extract
+from looma_agent.tasks.env.oci import PullFailed, parse_reference, platform_pair, pull
+from looma_agent.tasks.spec import EnvSpec, TaskRefused
 
 
 def tar_of(members: dict, path: Path, *, links: dict = None,
@@ -340,11 +340,11 @@ def test_a_binary_environment_needs_a_source(tmp_path):
 
 def test_a_task_runs_a_program_from_a_binary_environment(tmp_path, monkeypatch):
     """The whole point of the kind: something that is not Python."""
-    from loom_agent.tasks.limits import resolve_isolation
-    from loom_agent.tasks.registry import TaskRegistry
-    from loom_agent.tasks.spec import TaskSpec
+    from looma_agent.tasks.limits import resolve_isolation
+    from looma_agent.tasks.registry import TaskRegistry
+    from looma_agent.tasks.spec import TaskSpec
 
-    monkeypatch.setenv("LOOM_ALLOW_UNPRIVILEGED_TASKS", "1")
+    monkeypatch.setenv("LOOMA_ALLOW_UNPRIVILEGED_TASKS", "1")
     archive = tar_of({"bin/greet": b"#!/bin/sh\necho from-the-archive\n"},
                      tmp_path / "tool.tar.gz")
     registry = TaskRegistry(
@@ -367,12 +367,12 @@ def test_running_an_image_without_root_is_refused_with_the_reason(tmp_path, regi
                                                                   monkeypatch):
     """Entering an image needs root. Saying so beats running the task outside
     the image it asked for and letting it fail on a missing library."""
-    from loom_agent.tasks.limits import resolve_isolation
-    from loom_agent.tasks.registry import TaskRegistry
-    from loom_agent.tasks.spec import TaskSpec
+    from looma_agent.tasks.limits import resolve_isolation
+    from looma_agent.tasks.registry import TaskRegistry
+    from looma_agent.tasks.spec import TaskSpec
 
-    monkeypatch.setenv("LOOM_ALLOW_UNPRIVILEGED_TASKS", "1")
-    monkeypatch.setattr("loom_agent.tasks.runner.can_chroot", lambda: False)
+    monkeypatch.setenv("LOOMA_ALLOW_UNPRIVILEGED_TASKS", "1")
+    monkeypatch.setattr("looma_agent.tasks.runner.can_chroot", lambda: False)
     tasks = TaskRegistry(
         root=tmp_path / "tasks", isolation=resolve_isolation(),
         environments=EnvironmentCache(tmp_path / "envs"),

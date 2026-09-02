@@ -1,4 +1,4 @@
-# Loom node agent — thin base image.
+# Looma node agent — thin base image.
 #
 # It holds the LAUNCHER and nothing else that matters: no torch, no vLLM, no
 # CUDA toolkit. Everything a task needs is provisioned into a task directory at
@@ -10,8 +10,8 @@
 # node owner has to re-pull by hand one day.
 #
 #   docker run -d --gpus all --restart unless-stopped --network host \
-#     -v loom-data:/var/lib/loom \
-#     gihpee/loomagent --key loom_<...>
+#     -v looma-data:/var/lib/looma \
+#     gihpee/looma-agent --key looma_<...>
 FROM python:3.12-slim
 
 WORKDIR /app
@@ -19,19 +19,19 @@ WORKDIR /app
 # The user every task runs as. The agent runs as root so it can drop to this
 # user per task; a task therefore cannot read the agent's join key, its files,
 # or another task's directory. Without this user the agent refuses to run
-# anything (see loom_agent/tasks/limits.py).
-RUN useradd --system --no-create-home --shell /usr/sbin/nologin loom-task
+# anything (see looma_agent/tasks/limits.py).
+RUN useradd --system --no-create-home --shell /usr/sbin/nologin looma-task
 
 # git is not needed to run, only to fetch payloads later; kept out on purpose.
 COPY pyproject.toml ./
-# loom_launcher/release_key.pub decides whose code may run on this machine.
+# looma_launcher/release_key.pub decides whose code may run on this machine.
 # Generate your own with
 #   uv run --with cryptography python scripts/sign_release.py keygen
 # An image built without it refuses every update — which is the safe state,
 # and also means such a node never takes one. Проверяется ниже, ПОСЛЕ
 # установки: значение имеет только то, что доехало в site-packages.
-COPY loom_launcher ./loom_launcher
-COPY loom_agent ./loom_agent
+COPY looma_launcher ./looma_launcher
+COPY looma_agent ./looma_agent
 
 # Both extras, deliberately:
 #   [p2p]  the direct path between nodes. Without it every message between two
@@ -50,13 +50,13 @@ RUN pip install --no-cache-dir ".[p2p,cuda]"
 #
 # Имя аргумента без слова KEY намеренно: docker buildx считает такие
 # аргументы секретами и печатает предупреждение на каждой сборке.
-ARG LOOM_ALLOW_UNSIGNED_UPDATES=0
-# `cd /` не для красоты: из WORKDIR=/app питон импортировал бы loom_launcher
+ARG LOOMA_ALLOW_UNSIGNED_UPDATES=0
+# `cd /` не для красоты: из WORKDIR=/app питон импортировал бы looma_launcher
 # из скопированных исходников, где ключ есть всегда, и проверка смотрела бы не
 # туда же, куда смотрит точка входа. Она — console script, и берёт пакет из
 # site-packages.
-RUN if ! (cd / && python -c "from loom_launcher.signature import public_key_bytes; raise SystemExit(0 if public_key_bytes() else 1)"); then \
-      if [ "$LOOM_ALLOW_UNSIGNED_UPDATES" = "1" ]; then \
+RUN if ! (cd / && python -c "from looma_launcher.signature import public_key_bytes; raise SystemExit(0 if public_key_bytes() else 1)"); then \
+      if [ "$LOOMA_ALLOW_UNSIGNED_UPDATES" = "1" ]; then \
         echo "ВНИМАНИЕ: образ без ключа релизов. Узлы с ним не обновляются." >&2; \
       else \
         echo "" >&2; \
@@ -68,18 +68,18 @@ RUN if ! (cd / && python -c "from loom_launcher.signature import public_key_byte
         echo "  # или, если пара уже есть:" >&2; \
         echo "  uv run --with cryptography python scripts/sign_release.py pubkey --key agent-release.key --install" >&2; \
         echo "" >&2; \
-        echo "Собрать всё равно: --build-arg LOOM_ALLOW_UNSIGNED_UPDATES=1" >&2; \
+        echo "Собрать всё равно: --build-arg LOOMA_ALLOW_UNSIGNED_UPDATES=1" >&2; \
         exit 1; \
       fi; \
     fi
 
 # Task directories, environment cache and agent payloads all live here. Mount a
 # volume: without one, every restart re-provisions everything from scratch.
-VOLUME ["/var/lib/loom"]
+VOLUME ["/var/lib/looma"]
 
-ENV LOOM_LOG_LEVEL=INFO \
-    LOOM_ROOT=/var/lib/loom
+ENV LOOMA_LOG_LEVEL=INFO \
+    LOOMA_ROOT=/var/lib/looma
 
 # No EXPOSE: the agent only dials out. Everything comes back through that same
 # outbound connection.
-ENTRYPOINT ["loom-launcher"]
+ENTRYPOINT ["looma-launcher"]

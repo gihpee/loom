@@ -20,7 +20,7 @@ const TITLE: Record<Screen, string> = {
 
 function Shell() {
   const [screen, setScreen] = useState<Screen>(() => {
-    const saved = localStorage.getItem("loom_screen") as Screen;
+    const saved = localStorage.getItem("looma_screen") as Screen;
     return SCREENS.includes(saved) ? saved : "Overview";
   });
   const [secret, setSecret] = useState(token.get());
@@ -31,7 +31,7 @@ function Shell() {
     const target = name as Screen;
     if (!SCREENS.includes(target)) return;
     setScreen(target);
-    localStorage.setItem("loom_screen", target);
+    localStorage.setItem("looma_screen", target);
   };
 
   // Цифры рядом с пунктами меню: видно, где что-то происходит, не заходя туда.
@@ -40,7 +40,7 @@ function Shell() {
     (t) => !["done", "failed", "cancelled", "gone"].includes(t.state)).length;
   const counts: Partial<Record<Screen, number>> = { Nodes: online, Tasks: active };
 
-  useEffect(() => { document.title = `${TITLE[screen]} · Loom`; }, [screen]);
+  useEffect(() => { document.title = `${TITLE[screen]} · Looma`; }, [screen]);
 
   const view = {
     Overview: <Overview go={go} />, Nodes: <Nodes />, Models: <Models />,
@@ -51,7 +51,7 @@ function Shell() {
     <div className="shell">
       <aside className="side">
         <div className="brand">
-          <b>loom</b>
+          <b>looma</b>
           <span>{online ? `${online} online` : "offline"}</span>
         </div>
         <nav>

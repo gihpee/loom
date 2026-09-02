@@ -18,7 +18,7 @@ import time
 # ДО импорта ray, и нужно даже при подключении к чужому кластеру: драйвер
 # заводит свой каталог сессии, а путь unix-сокета не может быть длиннее 103
 # байт — каталог задачи в лимит не влезает.
-os.environ.setdefault("RAY_TMPDIR", os.environ["LOOM_TASK_TMP"])
+os.environ.setdefault("RAY_TMPDIR", os.environ["LOOMA_TASK_TMP"])
 
 import ray  # noqa: E402
 
@@ -57,7 +57,7 @@ report = {
 # Главная строчка отчёта: работа шла больше чем на одной машине.
 report["разъехалось по машинам"] = len(by_node) > 1
 
-out = pathlib.Path(os.environ["LOOM_TASK_OUT"]) / "cluster.json"
+out = pathlib.Path(os.environ["LOOMA_TASK_OUT"]) / "cluster.json"
 out.write_text(json.dumps(report, ensure_ascii=False, indent=2))
 print(json.dumps(report, ensure_ascii=False, indent=2))
 ray.shutdown()

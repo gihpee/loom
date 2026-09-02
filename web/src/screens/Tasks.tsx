@@ -77,7 +77,7 @@ function RunTask({ onClose, onDone }: { onClose: () => void; onDone: () => void 
       </div>
       <p className="sub" style={{ marginTop: 16 }}>
         Результатом считается то, что задача запишет в каталог из
-        <code> $LOOM_TASK_OUT</code>.
+        <code> $LOOMA_TASK_OUT</code>.
       </p>
     </Modal>
   );

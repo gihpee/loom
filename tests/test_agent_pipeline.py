@@ -22,7 +22,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "agent"))
 
-from loom.orchestrator.agents import AgentError
+from looma.orchestrator.agents import AgentError
 
 from test_agent_gateway import Orchestrator  # noqa: E402
 
@@ -40,8 +40,8 @@ def two_nodes(tmp_path, monkeypatch):
     """Two agents on one orchestrator — the smallest real pipeline."""
     from conftest_agent import start_agent
 
-    monkeypatch.setenv("LOOM_ALLOW_UNPRIVILEGED_TASKS", "1")
-    monkeypatch.setenv("LOOM_P2P", "0")   # force the path through the orchestrator
+    monkeypatch.setenv("LOOMA_ALLOW_UNPRIVILEGED_TASKS", "1")
+    monkeypatch.setenv("LOOMA_P2P", "0")   # force the path through the orchestrator
     orchestrator = Orchestrator().start()
     running = []
     for index in range(2):
@@ -116,8 +116,8 @@ def test_a_message_travels_between_nodes_and_comes_back(two_nodes):
 def test_a_longer_pipeline_visits_every_rank_in_order(tmp_path, monkeypatch):
     from conftest_agent import start_agent
 
-    monkeypatch.setenv("LOOM_ALLOW_UNPRIVILEGED_TASKS", "1")
-    monkeypatch.setenv("LOOM_P2P", "0")
+    monkeypatch.setenv("LOOMA_ALLOW_UNPRIVILEGED_TASKS", "1")
+    monkeypatch.setenv("LOOMA_P2P", "0")
     orchestrator = Orchestrator().start()
     running = []
     try:
@@ -162,7 +162,7 @@ def test_asking_a_task_that_serves_nothing_says_so(two_nodes):
 
 def test_a_message_for_a_rank_that_is_not_there_does_not_kill_the_node(two_nodes):
     """A stray message is a bug somewhere else; this node still works after it."""
-    from loom_agent.proto import agent_pb2
+    from looma_agent.proto import agent_pb2
 
     group, _port = start_pipeline(two_nodes)
     two_nodes.hub.route(agent_pb2.TaskMessage(
@@ -248,8 +248,8 @@ def test_готовность_спрашивается_один_раз(two_nodes
 GROUP_INPUT_ECHO = (
     "import os, pathlib;"
     "src = pathlib.Path('shared.txt').read_text();"
-    "out = pathlib.Path(os.environ['LOOM_TASK_OUT']) / 'seen.txt';"
-    "out.write_text(src + ' rank=' + os.environ['LOOM_RANK'])"
+    "out = pathlib.Path(os.environ['LOOMA_TASK_OUT']) / 'seen.txt';"
+    "out.write_text(src + ' rank=' + os.environ['LOOMA_RANK'])"
 )
 
 
@@ -264,7 +264,7 @@ def test_код_группы_доезжает_до_каждого_ранга(two
     """
     from fastapi.testclient import TestClient
 
-    from loom.api.app import create_app
+    from looma.api.app import create_app
     from test_agent_gateway import _Settings
 
     client = TestClient(create_app(agents=two_nodes.hub, config=_Settings()))
@@ -289,7 +289,7 @@ def test_испорченный_base64_называет_свой_файл(two_no
     """«Неверный base64» ничего не стоит, когда файлов десяток."""
     from fastapi.testclient import TestClient
 
-    from loom.api.app import create_app
+    from looma.api.app import create_app
     from test_agent_gateway import _Settings
 
     client = TestClient(create_app(agents=two_nodes.hub, config=_Settings()))

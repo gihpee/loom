@@ -18,12 +18,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "agent"))
 
 def make_join_key(address: str) -> str:
     body = json.dumps({"i": "k1", "s": "secret", "a": address}).encode()
-    return "loom_" + base64.urlsafe_b64encode(body).decode().rstrip("=")
+    return "looma_" + base64.urlsafe_b64encode(body).decode().rstrip("=")
 
 
 def start_agent(port: int, root: Path, node_id: str = "test-agent"):
-    from loom_agent.config import parse_args
-    from loom_agent.main import Agent
+    from looma_agent.config import parse_args
+    from looma_agent.main import Agent
 
     config = parse_args([
         "--key", make_join_key(f"127.0.0.1:{port}"),

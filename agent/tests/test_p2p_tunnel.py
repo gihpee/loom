@@ -21,8 +21,8 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from loom_agent.p2p import PeerNode, lattica_available  # noqa: E402
-from loom_agent.p2p.tunnel import RemoteSide, TunnelRefused, pump  # noqa: E402
+from looma_agent.p2p import PeerNode, lattica_available  # noqa: E402
+from looma_agent.p2p.tunnel import RemoteSide, TunnelRefused, pump  # noqa: E402
 
 pytestmark = pytest.mark.skipif(
     not lattica_available(), reason="без lattica проверять нечего")
@@ -138,7 +138,7 @@ def through(a, peer_id, port, payload: bytes, *, timeout: float = 60.0) -> bytes
 
 def test_байты_доходят_до_соседа_и_возвращаются(pair):
     a, peer_id, echo = pair
-    assert through(a, peer_id, echo.port, b"loom") == b"loom"
+    assert through(a, peer_id, echo.port, b"looma") == b"looma"
 
 
 def test_двоичные_данные_не_портятся(pair):
@@ -223,8 +223,8 @@ class SameNumberElsewhere:
 def test_чужой_порт_становится_местным(pair):
     """То, ради чего всё это: софт подключается к 127.0.0.1 и попадает на
     соседнюю машину, ничего про неё не зная."""
-    from loom_agent.p2p.tunnel import Endpoint
-    from loom_agent.tasks.forward import Forwarder
+    from looma_agent.p2p.tunnel import Endpoint
+    from looma_agent.tasks.forward import Forwarder
 
     _a, _peer_id, echo = pair
     endpoint = Endpoint(allow=lambda port: port == echo.port)
@@ -253,7 +253,7 @@ def test_чужой_порт_становится_местным(pair):
 
 def test_порт_отпускается_вместе_с_задачей(pair):
     """Иначе слушатели держат чужие порты на машине владельца навсегда."""
-    from loom_agent.tasks.forward import Forwarder
+    from looma_agent.tasks.forward import Forwarder
 
     a, peer_id, _echo = pair
     local = free_port()
@@ -272,7 +272,7 @@ def test_порт_отпускается_вместе_с_задачей(pair):
 def test_соседи_на_этой_же_машине_не_проксируются():
     """Их сервер уже слушает эти порты по-настоящему. Вклиниться значило бы
     не ускорить, а сломать: порт занят, слушатель не встанет."""
-    from loom_agent.tasks.forward import Forwarder
+    from looma_agent.tasks.forward import Forwarder
 
     allowed = []
     forwarder = Forwarder(stub_for=None, allow_local=allowed.extend)
@@ -283,7 +283,7 @@ def test_соседи_на_этой_же_машине_не_проксируют�
 
 def test_без_p2p_проброс_отказывает_внятно():
     """Молча не слушать — значит оставить «кластер не собрался» без причины."""
-    from loom_agent.tasks.forward import ForwardRefused, Forwarder
+    from looma_agent.tasks.forward import ForwardRefused, Forwarder
 
     forwarder = Forwarder(stub_for=None)
     with pytest.raises(ForwardRefused, match="прямого канала"):

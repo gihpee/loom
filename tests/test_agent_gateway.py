@@ -22,7 +22,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "agent"))
 
-from loom.orchestrator.agents import AgentError, AgentHub, add_agent_gateway_to_server
+from looma.orchestrator.agents import AgentError, AgentHub, add_agent_gateway_to_server
 
 
 class Orchestrator:
@@ -83,8 +83,8 @@ def stand(tmp_path, monkeypatch):
     """An orchestrator and one node attached to it."""
     from conftest_agent import start_agent
 
-    monkeypatch.setenv("LOOM_ALLOW_UNPRIVILEGED_TASKS", "1")
-    monkeypatch.setenv("LOOM_P2P", "0")
+    monkeypatch.setenv("LOOMA_ALLOW_UNPRIVILEGED_TASKS", "1")
+    monkeypatch.setenv("LOOMA_P2P", "0")
     orchestrator = Orchestrator().start()
     agent, thread = start_agent(orchestrator.port, tmp_path)
     assert orchestrator.wait_node(), "the agent never attached"
@@ -97,7 +97,7 @@ def stand(tmp_path, monkeypatch):
 WRITE_RESULT = (
     "import os, pathlib;"
     "data = pathlib.Path('input.txt').read_text();"
-    "out = pathlib.Path(os.environ['LOOM_TASK_OUT']);"
+    "out = pathlib.Path(os.environ['LOOMA_TASK_OUT']);"
     "(out / 'answer.txt').write_text(data.upper());"
     "print('done with', len(data), 'bytes')"
 )
@@ -223,7 +223,7 @@ def test_the_http_api_runs_a_task_and_hands_back_the_file(stand):
     """
     from fastapi.testclient import TestClient
 
-    from loom.api.app import create_app
+    from looma.api.app import create_app
 
     orchestrator, _agent = stand
     app = create_app(agents=orchestrator.hub, config=_Settings())
@@ -260,7 +260,7 @@ def test_the_http_api_runs_a_task_and_hands_back_the_file(stand):
 def test_the_api_explains_a_task_it_cannot_place(stand):
     from fastapi.testclient import TestClient
 
-    from loom.api.app import create_app
+    from looma.api.app import create_app
 
     orchestrator, _agent = stand
     client = TestClient(create_app(agents=orchestrator.hub, config=_Settings()))
@@ -279,13 +279,13 @@ class _Settings:
 # ------------------------------------------------------------------ releases
 def test_a_node_in_the_wave_is_told_what_to_run(tmp_path, monkeypatch):
     """The release reaches the agent inside the ordinary registration ack."""
-    from loom.orchestrator.releases import ReleaseStore
+    from looma.orchestrator.releases import ReleaseStore
 
     from conftest_agent import start_agent
 
-    monkeypatch.setenv("LOOM_ALLOW_UNPRIVILEGED_TASKS", "1")
-    monkeypatch.setenv("LOOM_P2P", "0")
-    monkeypatch.delenv("LOOM_AGENT_INCOMING", raising=False)
+    monkeypatch.setenv("LOOMA_ALLOW_UNPRIVILEGED_TASKS", "1")
+    monkeypatch.setenv("LOOMA_P2P", "0")
+    monkeypatch.delenv("LOOMA_AGENT_INCOMING", raising=False)
 
     orchestrator = Orchestrator().start()
     store = ReleaseStore(tmp_path / "releases")
@@ -313,12 +313,12 @@ def test_a_node_in_the_wave_is_told_what_to_run(tmp_path, monkeypatch):
 
 
 def test_a_node_outside_the_wave_is_left_alone(tmp_path, monkeypatch):
-    from loom.orchestrator.releases import ReleaseStore
+    from looma.orchestrator.releases import ReleaseStore
 
     from conftest_agent import start_agent
 
-    monkeypatch.setenv("LOOM_ALLOW_UNPRIVILEGED_TASKS", "1")
-    monkeypatch.setenv("LOOM_P2P", "0")
+    monkeypatch.setenv("LOOMA_ALLOW_UNPRIVILEGED_TASKS", "1")
+    monkeypatch.setenv("LOOMA_P2P", "0")
     orchestrator = Orchestrator().start()
     store = ReleaseStore(tmp_path / "releases")
     store.publish(version="9.9.9", signature=b"\x02" * 64, archive=b"payload")
@@ -342,8 +342,8 @@ def test_the_archive_is_served_to_anyone_who_asks(tmp_path):
     and the payload is signed, so the bytes are worthless without the key."""
     from fastapi.testclient import TestClient
 
-    from loom.api.app import create_app
-    from loom.orchestrator.releases import ReleaseStore
+    from looma.api.app import create_app
+    from looma.orchestrator.releases import ReleaseStore
 
     store = ReleaseStore(tmp_path / "releases")
     store.publish(version="0.4.0", signature=b"\x03" * 64, archive=b"the payload")
@@ -358,8 +358,8 @@ def test_the_archive_is_served_to_anyone_who_asks(tmp_path):
 def test_publishing_and_advancing_through_the_api(tmp_path):
     from fastapi.testclient import TestClient
 
-    from loom.api.app import create_app
-    from loom.orchestrator.releases import ReleaseStore
+    from looma.api.app import create_app
+    from looma.orchestrator.releases import ReleaseStore
 
     store = ReleaseStore(tmp_path / "releases")
     client = TestClient(create_app(releases=store, config=_Settings()))
@@ -381,8 +381,8 @@ def test_publishing_and_advancing_through_the_api(tmp_path):
 def test_the_api_refuses_an_unsigned_release(tmp_path):
     from fastapi.testclient import TestClient
 
-    from loom.api.app import create_app
-    from loom.orchestrator.releases import ReleaseStore
+    from looma.api.app import create_app
+    from looma.orchestrator.releases import ReleaseStore
 
     client = TestClient(create_app(releases=ReleaseStore(tmp_path / "r"), config=_Settings()))
     answer = client.post("/admin/release", json={

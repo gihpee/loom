@@ -1,4 +1,4 @@
-// A libp2p circuit-relay v2 server: the springboard Loom workers need to
+// A libp2p circuit-relay v2 server: the springboard Looma workers need to
 // reach each other when neither of them can accept an inbound connection.
 //
 // Why this exists as its own process rather than a flag on the orchestrator:
@@ -38,7 +38,7 @@ import { readFile, writeFile, mkdir } from 'node:fs/promises'
 import { networkInterfaces } from 'node:os'
 import { dirname, join } from 'node:path'
 
-const PORT = Number(process.env.LOOM_RELAY_PORT || 47200)
+const PORT = Number(process.env.LOOMA_RELAY_PORT || 47200)
 
 // The address workers are told to dial. Announced rather than detected: what
 // matters is how the outside reaches us, which this host cannot know.
@@ -48,7 +48,7 @@ const PORT = Number(process.env.LOOM_RELAY_PORT || 47200)
 // deep inside the address parser ("Protocol 201.34.135.177 was unknown"),
 // naming the value and not the setting. Both forms are accepted now.
 // Принимает и мультиадрес, и host:port, и голый хост. Последние два — потому
-// что естественный источник этого значения LOOM_PUBLIC_ADDR у оркестратора, а
+// что естественный источник этого значения LOOMA_PUBLIC_ADDR у оркестратора, а
 // он с портом: реле стоит на той же машине и снаружи виден по тому же адресу.
 function announceHost (raw) {
   const value = (raw || '').trim()
@@ -64,13 +64,13 @@ function announceHost (raw) {
   return value                                       // голый хост или IPv6
 }
 
-const RAW_HOST = process.env.LOOM_RELAY_PUBLIC_HOST || ''
+const RAW_HOST = process.env.LOOMA_RELAY_PUBLIC_HOST || ''
 const PUBLIC_HOST = announceHost(RAW_HOST)
 if (RAW_HOST.startsWith('/') && PUBLIC_HOST) {
-  console.warn(`LOOM_RELAY_PUBLIC_HOST is a multiaddr; using its host: ${PUBLIC_HOST}`)
+  console.warn(`LOOMA_RELAY_PUBLIC_HOST is a multiaddr; using its host: ${PUBLIC_HOST}`)
 }
 if (RAW_HOST && !PUBLIC_HOST) {
-  console.error(`LOOM_RELAY_PUBLIC_HOST=${RAW_HOST} has no host in it. ` +
+  console.error(`LOOMA_RELAY_PUBLIC_HOST=${RAW_HOST} has no host in it. ` +
                 'Set it to the address workers reach this machine at, e.g. 203.0.113.7')
   process.exit(2)
 }
@@ -79,12 +79,12 @@ if (!PUBLIC_HOST) {
   // напечатает свои адреса, и единственным следом останется «0 relay» в логе
   // узла — строчка, которую никто не связывает с этим контейнером.
   console.error('')
-  console.error('LOOM_RELAY_PUBLIC_HOST не задан, и адрес объявлять нечем.')
+  console.error('LOOMA_RELAY_PUBLIC_HOST не задан, и адрес объявлять нечем.')
   console.error('Реле поднимется и НЕ БУДЕТ ИСПОЛЬЗОВАНО: узлы получат «0 relay»,')
   console.error('а пары за симметричным NAT не свяжутся вовсе.')
   console.error('')
-  console.error('  LOOM_RELAY_PUBLIC_HOST=<адрес, по которому машина видна снаружи>')
-  console.error('  # обычно тот же, что LOOM_PUBLIC_ADDR у оркестратора')
+  console.error('  LOOMA_RELAY_PUBLIC_HOST=<адрес, по которому машина видна снаружи>')
+  console.error('  # обычно тот же, что LOOMA_PUBLIC_ADDR у оркестратора')
   console.error('')
 }
 // A name needs /dns4, an address needs /ip4 — announcing a hostname under
@@ -94,7 +94,7 @@ const HOST_PROTO = /^\d+\.\d+\.\d+\.\d+$/.test(PUBLIC_HOST)
   : (PUBLIC_HOST.includes(':') ? 'ip6' : 'dns4')
 // The identity must survive restarts: it is inside every multiaddr a worker
 // holds, so a new one on every boot invalidates them all at once.
-const KEY_PATH = process.env.LOOM_RELAY_KEY || '/data/relay/identity.key'
+const KEY_PATH = process.env.LOOMA_RELAY_KEY || '/data/relay/identity.key'
 
 async function loadOrCreateKey () {
   try {
@@ -159,13 +159,13 @@ const node = await createLibp2p({
       // as long as it is in a pipeline, and a refused reservation silently
       // costs that worker its direct path.
       reservations: {
-        maxReservations: Number(process.env.LOOM_RELAY_MAX_RESERVATIONS || 512),
+        maxReservations: Number(process.env.LOOMA_RELAY_MAX_RESERVATIONS || 512),
         reservationTtl: 60 * 60 * 1000,
         // The standard v2 limits are OFF. They exist to stop a stranger's relay
         // from being used as free bandwidth — 128 KB and two minutes per
         // relayed connection, after which it is torn down.
         //
-        // This relay is not a stranger's: Loom runs it on the orchestrator's
+        // This relay is not a stranger's: Looma runs it on the orchestrator's
         // own machine, alongside the tunnel that carries the same activations
         // anyway. There is no bandwidth to protect and no detour to discourage
         // — both paths are the same two hops to the same host.
@@ -177,9 +177,9 @@ const node = await createLibp2p({
         // and not the route, is why relayed traffic measured 44 ms per token
         // against 83 ms for the identical path through here.
         //
-        // Set LOOM_RELAY_LIMITS=1 to restore them if this relay is ever put
+        // Set LOOMA_RELAY_LIMITS=1 to restore them if this relay is ever put
         // somewhere it has to defend itself.
-        applyDefaultLimit: process.env.LOOM_RELAY_LIMITS === '1'
+        applyDefaultLimit: process.env.LOOMA_RELAY_LIMITS === '1'
       }
     })
   }
@@ -197,7 +197,7 @@ for (const addr of node.getMultiaddrs()) console.log(`  ${addr.toString()}`)
 // Only written when the public host is known. An address of a container's own
 // interface is worse than none: a worker elsewhere would reserve a slot it can
 // never be reached through.
-const ADDR_FILE = process.env.LOOM_RELAY_ADDR_FILE || join(dirname(KEY_PATH), 'address')
+const ADDR_FILE = process.env.LOOMA_RELAY_ADDR_FILE || join(dirname(KEY_PATH), 'address')
 if (PUBLIC_HOST) {
   // TCP first, and that ordering is load-bearing: measured against this very
   // relay, Lattica requests a reservation over the TCP address immediately
@@ -212,7 +212,7 @@ if (PUBLIC_HOST) {
   await writeFile(ADDR_FILE, announced.join('\n') + '\n')
   console.log(`address published for the orchestrator: ${ADDR_FILE}`)
 } else {
-  console.warn('LOOM_RELAY_PUBLIC_HOST is not set: workers will be handed ' +
+  console.warn('LOOMA_RELAY_PUBLIC_HOST is not set: workers will be handed ' +
                'addresses only reachable from this host, so none is published')
 }
 

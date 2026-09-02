@@ -1,4 +1,4 @@
-# Loom orchestrator image: gateway, client API, admin.
+# Looma orchestrator image: gateway, client API, admin.
 FROM python:3.12-slim
 
 WORKDIR /app
@@ -14,7 +14,7 @@ COPY payloads ./payloads
 # .[p2p] adds the rendezvous node (docs/P2P_TRANSPORT.md).
 RUN pip install --no-cache-dir ".[p2p]"
 
-ENV LOOM_PAYLOADS_DIR=/app/payloads
+ENV LOOMA_PAYLOADS_DIR=/app/payloads
 
 EXPOSE 8000 9000
-CMD ["python", "-m", "loom.orchestrator.server"]
+CMD ["python", "-m", "looma.orchestrator.server"]

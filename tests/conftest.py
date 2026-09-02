@@ -1,4 +1,4 @@
-"""Shared fixtures for Loom planning tests."""
+"""Shared fixtures for Looma planning tests."""
 
 import os
 import sys
@@ -9,7 +9,7 @@ import pytest
 
 # Tests must never reach out to the internet: the public-IP lookup in
 # orchestrator/public_addr.py is disabled for the whole session.
-os.environ.setdefault("LOOM_SKIP_IP_LOOKUP", "1")
+os.environ.setdefault("LOOMA_SKIP_IP_LOOKUP", "1")
 
 # Path to the read-only Parallax checkout used for regression parity tests.
 PARALLAX_SRC = Path(__file__).resolve().parent.parent.parent / "dllmi" / "parallax" / "src"

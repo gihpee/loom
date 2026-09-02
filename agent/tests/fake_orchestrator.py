@@ -19,7 +19,7 @@ from typing import Dict, List, Optional
 
 import grpc
 
-from loom_agent.proto import agent_pb2, agent_pb2_grpc
+from looma_agent.proto import agent_pb2, agent_pb2_grpc
 
 CHUNK = 64 * 1024
 

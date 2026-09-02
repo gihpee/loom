@@ -1,7 +1,7 @@
 """Отдельность программы — условие, а не намерение.
 
 Через полгода кто-нибудь «переиспользует» отсюда одну функцию из проекта, и
-утилита перестанет ставиться клиенту, у которого нет репозитория Loom. Проверка
+утилита перестанет ставиться клиенту, у которого нет репозитория Looma. Проверка
 дешевле такого разговора.
 """
 
@@ -10,9 +10,9 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
-PACKAGE = Path(__file__).resolve().parent.parent / "loom_connect"
-# Всё, что живёт в репозитории Loom и чего у клиента не будет.
-FORBIDDEN = ("loom.", "loom_agent", "loom_launcher", "loom_stage", "loom_ray")
+PACKAGE = Path(__file__).resolve().parent.parent / "looma_connect"
+# Всё, что живёт в репозитории Looma и чего у клиента не будет.
+FORBIDDEN = ("looma.", "looma_agent", "looma_launcher", "looma_stage", "looma_ray")
 
 
 def imported_names(source: str):
@@ -32,7 +32,7 @@ def test_ничего_не_импортируется_из_проекта():
 
 
 def test_зависимость_ровно_одна():
-    """Ставится клиенту, который про Loom больше ничего знать не должен."""
+    """Ставится клиенту, который про Looma больше ничего знать не должен."""
     import tomllib
 
     config = tomllib.loads((PACKAGE.parent / "pyproject.toml").read_text())

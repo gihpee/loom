@@ -1,9 +1,9 @@
 {
-  "name": "loom-relay",
+  "name": "looma-relay",
   "version": "0.0.1",
   "private": true,
   "type": "module",
-  "description": "libp2p circuit-relay v2 server for Loom workers behind NAT",
+  "description": "libp2p circuit-relay v2 server for Looma workers behind NAT",
   "main": "relay.mjs",
   "dependencies": {
     "@chainsafe/libp2p-noise": "^16.0.0",

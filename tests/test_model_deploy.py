@@ -13,7 +13,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "agent"))
 
-from loom.orchestrator.models import ModelError, describe, split_layers, stage_payload
+from looma.orchestrator.models import ModelError, describe, split_layers, stage_payload
 
 from test_agent_gateway import stand  # noqa: F401 — фикстура стенда
 
@@ -74,9 +74,9 @@ def test_код_стадии_уезжает_вместе_с_задачей():
     """Узел, который эту модель не обслуживал, получает код с задачей —
     без пакетного реестра посередине."""
     payload = stage_payload()
-    assert "loom_stage/server.py" in payload
-    assert "loom_stage/loader.py" in payload
-    assert all(name.startswith("loom_stage/") for name in payload)
+    assert "looma_stage/server.py" in payload
+    assert "looma_stage/loader.py" in payload
+    assert all(name.startswith("looma_stage/") for name in payload)
     assert 0 < sum(len(v) for v in payload.values()) < 5 * 1024 * 1024
 
 
@@ -101,23 +101,23 @@ def test_код_стадии_находится_и_в_установленном
     /usr/local/lib/python3.12/payloads/... — путь считался от исходников и
     установку не пережил.
     """
-    where = tmp_path / "payloads" / "loom_stage" / "loom_stage"
+    where = tmp_path / "payloads" / "looma_stage" / "looma_stage"
     where.mkdir(parents=True)
     (where / "server.py").write_text("# стадия\n")
     (where / "loader.py").write_text("# загрузчик\n")
-    monkeypatch.setenv("LOOM_PAYLOADS_DIR", str(tmp_path / "payloads"))
+    monkeypatch.setenv("LOOMA_PAYLOADS_DIR", str(tmp_path / "payloads"))
     payload = stage_payload()
-    assert set(payload) == {"loom_stage/server.py", "loom_stage/loader.py"}
+    assert set(payload) == {"looma_stage/server.py", "looma_stage/loader.py"}
 
 
 def test_отсутствие_стадии_называет_где_искали(tmp_path, monkeypatch):
-    monkeypatch.setenv("LOOM_PAYLOADS_DIR", str(tmp_path / "нет-такого"))
-    monkeypatch.setattr("loom.orchestrator.models._payload_dirs",
+    monkeypatch.setenv("LOOMA_PAYLOADS_DIR", str(tmp_path / "нет-такого"))
+    monkeypatch.setattr("looma.orchestrator.models._payload_dirs",
                         lambda: iter([tmp_path / "нет-такого"]))
     with pytest.raises(ModelError) as exc:
         stage_payload()
     assert "Искали в" in str(exc.value)
-    assert "LOOM_PAYLOADS_DIR" in str(exc.value)
+    assert "LOOMA_PAYLOADS_DIR" in str(exc.value)
 
 
 # ------------------------------------------------------------------- движок
@@ -131,7 +131,7 @@ def deploy_body(**extra) -> dict:
 def api(orchestrator):
     from fastapi.testclient import TestClient
 
-    from loom.api.app import create_app
+    from looma.api.app import create_app
     from test_agent_gateway import _Settings
 
     return TestClient(create_app(agents=orchestrator.hub, config=_Settings()))
@@ -169,7 +169,7 @@ def test_vllm_без_карты_отвергается_до_загрузки_в�
 def test_разбор_версии_cuda(version, expected):
     """Не разобрали — None, а не догадка: догадка тут стоит развёрнутой
     группы, которая упадёт через десять минут."""
-    from loom.orchestrator.models import cuda_tuple
+    from looma.orchestrator.models import cuda_tuple
 
     assert cuda_tuple(version) == expected
 
@@ -179,7 +179,7 @@ def node(cuda="12.8", node_id="nv3") -> dict:
 
 
 def test_свежий_драйвер_пропускает_vllm():
-    from loom.orchestrator.models import vllm_refusal
+    from looma.orchestrator.models import vllm_refusal
 
     assert vllm_refusal(node("12.8")) == ""
     assert vllm_refusal(node("12.6")) == ""
@@ -188,7 +188,7 @@ def test_свежий_драйвер_пропускает_vllm():
 def test_старый_драйвер_отвергается_с_названной_причиной():
     """Под cu124 нет сборки torch, которую требует vLLM; pip доставит её с
     PyPI поверх правильной, и упадёт это только при обращении к карте."""
-    from loom.orchestrator.models import vllm_refusal
+    from looma.orchestrator.models import vllm_refusal
 
     reason = vllm_refusal(node("12.4"))
     assert "12.4" in reason and "12.6" in reason
@@ -197,7 +197,7 @@ def test_старый_драйвер_отвергается_с_названно�
 
 
 def test_узел_без_карты_отвергается():
-    from loom.orchestrator.models import vllm_refusal
+    from looma.orchestrator.models import vllm_refusal
 
     assert "не сообщил версию CUDA" in vllm_refusal(node(""))
 
@@ -205,7 +205,7 @@ def test_узел_без_карты_отвергается():
 def test_развёртывание_на_старом_драйвере_отвергается(stand, monkeypatch):
     """Оператор узнаёт об этом до запуска, а не из «CUDA initialization:
     driver is too old» через десять минут загрузки весов."""
-    from loom.orchestrator.models import ModelInfo
+    from looma.orchestrator.models import ModelInfo
 
     orchestrator, _agent = stand
     nodes = orchestrator.hub.node_list()
@@ -213,7 +213,7 @@ def test_развёртывание_на_старом_драйвере_отве�
                         lambda: [{**n, "cuda_version": "12.4"} for n in nodes])
     # Сеть здесь не при чём: config.json подменён, чтобы проверка драйвера
     # осталась единственным, из-за чего этот запрос может не пройти.
-    monkeypatch.setattr("loom.api.app.describe",
+    monkeypatch.setattr("looma.api.app.describe",
                         lambda repo, **kw: ModelInfo(repo=repo, num_layers=36))
     answer = api(orchestrator).post("/admin/deploy",
                                     json=deploy_body(repo="Qwen/Qwen3-4B",
@@ -228,7 +228,7 @@ def test_vllm_ставится_с_версией():
     версии даёт один отпечаток для любой: узел, собравший окружение месяц
     назад, не обновится никогда, а соседний соберёт сегодняшний — и две стадии
     одного конвейера окажутся на разных версиях под одним именем каталога."""
-    from loom.orchestrator.models import stage_requirements
+    from looma.orchestrator.models import stage_requirements
 
     packages = stage_requirements("vllm")
     pinned = [name for name in packages if name.startswith("vllm")]
@@ -237,7 +237,7 @@ def test_vllm_ставится_с_версией():
 
 def test_переносимому_движку_vllm_не_ставится():
     """Это гигабайты и полчаса на узел — за то, чем он не будет считать."""
-    from loom.orchestrator.models import stage_requirements
+    from looma.orchestrator.models import stage_requirements
 
     assert not any(name.startswith("vllm") for name in stage_requirements("torch"))
 
@@ -247,7 +247,7 @@ def test_торч_под_vllm_пинится_той_версией_котору�
     вторым проходом стянет другую версию с PyPI поверх неё. Каталог окружения
     останется с именем cu128, а внутри окажется чужое колесо, и падать это
     будет не на установке, а при первом обращении к карте."""
-    from loom.orchestrator.models import VLLM_TORCH, stage_requirements
+    from looma.orchestrator.models import VLLM_TORCH, stage_requirements
 
     packages = stage_requirements("vllm")
     assert "torch" not in packages, "непинованный torch затянет подмену обратно"
@@ -260,7 +260,7 @@ def test_торч_остаётся_без_версии():
     """Агент выбирает сборку по драйверу узла, и наборы версий на индексах
     cu124/cu126/cu128 разные: пин, годный для одного, сделал бы неустановимым
     другой."""
-    from loom.orchestrator.models import stage_requirements
+    from looma.orchestrator.models import stage_requirements
 
     assert "torch" in stage_requirements("torch")
 
@@ -272,11 +272,11 @@ def test_смена_пина_меняет_окружение_узла():
     from pathlib import Path
 
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "agent"))
-    from loom_agent.tasks.spec import EnvSpec
+    from looma_agent.tasks.spec import EnvSpec
 
-    from loom.orchestrator.models import stage_requirements
+    from looma.orchestrator.models import stage_requirements
 
-    from loom.orchestrator.models import VLLM_PIN
+    from looma.orchestrator.models import VLLM_PIN
 
     packages = stage_requirements("vllm")
     now = EnvSpec(kind="python", requirements=tuple(packages)).fingerprint()

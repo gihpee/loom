@@ -7,7 +7,7 @@
 
 from __future__ import annotations
 
-from loom.orchestrator.connectivity import (can_meet, pairs_needing_relay,
+from looma.orchestrator.connectivity import (can_meet, pairs_needing_relay,
                                             prefer_meshy, verdict)
 
 

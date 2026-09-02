@@ -22,7 +22,7 @@ export function Keys() {
       { label, max_nodes: Number(maxNodes) || 0 });
     setCommand(
       `docker run -d --gpus all --restart unless-stopped --network host \\\n` +
-      `  -v loom-data:/var/lib/loom ${key.agent_image} --key ${key.key}`);
+      `  -v looma-data:/var/lib/looma ${key.agent_image} --key ${key.key}`);
     setLabel(""); setIssuing(false);
   }, "ключ выдан");
 
@@ -56,7 +56,7 @@ export function Keys() {
             </div>
             <p className="sub" style={{ marginTop: 12 }}>
               <code>--network host</code> — иначе прямой канал между узлами невозможен.{" "}
-              <code>-v loom-data</code> — иначе кэш и обновления не переживут перезапуск.
+              <code>-v looma-data</code> — иначе кэш и обновления не переживут перезапуск.
             </p>
           </div>
         </section>

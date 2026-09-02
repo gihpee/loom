@@ -14,13 +14,13 @@ from types import SimpleNamespace
 
 import pytest
 
-from loom_agent.p2p.peer import lattica_available
+from looma_agent.p2p.peer import lattica_available
 
 WORKER_DIR = Path(__file__).resolve().parent.parent / "worker"
 if str(WORKER_DIR) not in sys.path:
     sys.path.insert(0, str(WORKER_DIR))
 
-from loom_agent.p2p import (  # noqa: E402
+from looma_agent.p2p import (  # noqa: E402
     LinkTable,
     Neighbour,
     local_candidate_addrs,
@@ -205,9 +205,9 @@ def test_a_node_offers_both_transports_for_every_interface():
 # ------------------------------------------------- the agent's own decision
 def layer(monkeypatch, **env):
     """A PeerLayer with a stub data plane and a controlled environment."""
-    from loom_agent.p2p.layer import PeerLayer
+    from looma_agent.p2p.layer import PeerLayer
 
-    monkeypatch.delenv("LOOM_P2P_RENDEZVOUS", raising=False)
+    monkeypatch.delenv("LOOMA_P2P_RENDEZVOUS", raising=False)
     for key, value in env.items():
         monkeypatch.setenv(key, value)
     return PeerLayer(on_message=lambda payload: None)
@@ -239,7 +239,7 @@ def test_an_orchestrator_without_a_rendezvous_leaves_us_relaying(monkeypatch):
 
 
 def test_p2p_can_be_turned_off_outright(monkeypatch):
-    peers = layer(monkeypatch, LOOM_P2P="0")
+    peers = layer(monkeypatch, LOOMA_P2P="0")
     peers.on_rendezvous(["/ip4/1.2.3.4/tcp/47100/p2p/12D3KooWx"])
     assert peers.node is None
 
@@ -273,7 +273,7 @@ def test_with_neither_end_reachable_there_is_no_direct_path_to_use():
     """The failure this rule ends, stated as plainly as it can be.
 
     Two workers that both sit behind NAT cannot be connected by libp2p except
-    through a circuit — and Loom runs its relay on the orchestrator's own
+    through a circuit — and Looma runs its relay on the orchestrator's own
     machine, so that circuit is the same two hops as the tunnel, over the same
     wire, with the tunnel's advantages removed. Using it is strictly worse,
     and on a real stand it was: 6 tok/s over the circuit against 8 through the
@@ -369,7 +369,7 @@ def test_a_direct_send_is_bounded(monkeypatch):
     it would mean a single unreachable neighbour freezing the pipeline for
     three minutes to learn what the relay could have done immediately.
     """
-    import loom_agent.p2p.peer as peer_module
+    import looma_agent.p2p.peer as peer_module
 
     captured = {}
 
@@ -408,16 +408,16 @@ def test_the_identity_directory_follows_home_not_a_container_path(monkeypatch):
     """
     import importlib
 
-    import loom_agent.p2p.peer as peer_module
+    import looma_agent.p2p.peer as peer_module
 
-    monkeypatch.delenv("LOOM_P2P_KEY_DIR", raising=False)
+    monkeypatch.delenv("LOOMA_P2P_KEY_DIR", raising=False)
     monkeypatch.setenv("HOME", "/root")
-    assert importlib.reload(peer_module).DEFAULT_KEY_DIR == "/root/.cache/loom/p2p"
+    assert importlib.reload(peer_module).DEFAULT_KEY_DIR == "/root/.cache/looma/p2p"
 
     monkeypatch.setenv("HOME", "/Users/someone")
     assert (
         importlib.reload(peer_module).DEFAULT_KEY_DIR
-        == "/Users/someone/.cache/loom/p2p"
+        == "/Users/someone/.cache/looma/p2p"
     )
     monkeypatch.delenv("HOME", raising=False)
     importlib.reload(peer_module)
@@ -430,16 +430,16 @@ def test_an_unwritable_identity_directory_does_not_cost_the_direct_path(tmp_path
     that changes on restart costs almost nothing — while falling back to the
     relay costs a wide-area crossing on every single token.
     """
-    from loom_agent.p2p.peer import PeerNode
+    from looma_agent.p2p.peer import PeerNode
 
-    node = PeerNode(key_dir="/proc/nonexistent/loom")
+    node = PeerNode(key_dir="/proc/nonexistent/looma")
     resolved = node._usable_key_dir()
-    assert resolved != "/proc/nonexistent/loom"
+    assert resolved != "/proc/nonexistent/looma"
     assert Path(resolved).is_dir(), "the fallback must be usable, not just different"
 
 
 def test_a_writable_directory_is_used_as_given(tmp_path):
-    from loom_agent.p2p.peer import PeerNode
+    from looma_agent.p2p.peer import PeerNode
 
     target = tmp_path / "keys"
     assert PeerNode(key_dir=str(target))._usable_key_dir() == str(target)
@@ -460,7 +460,7 @@ def test_a_busy_port_does_not_cost_the_node_its_direct_path():
     import socket
     import tempfile
 
-    from loom_agent.p2p.peer import PeerNode, _address_in_use
+    from looma_agent.p2p.peer import PeerNode, _address_in_use
 
     assert _address_in_use(
         RuntimeError('Transport(Left(Left(Left(Os { code: 98, kind: AddrInUse }))))')
@@ -543,7 +543,7 @@ def test_an_inbound_message_is_accepted_without_waiting_for_the_stage():
     import threading
     import time
 
-    from loom_agent.p2p.peer import _make_handler
+    from looma_agent.p2p.peer import _make_handler
 
     started = threading.Event()
     release = threading.Event()
@@ -705,7 +705,7 @@ def test_a_node_with_ipv6_offers_it_alongside_ipv4(monkeypatch):
     without a special case — a global IPv6 address is simply a non-circuit
     address, which is all it asks about.
     """
-    from loom_agent.p2p import peer as peer_mod
+    from looma_agent.p2p import peer as peer_mod
 
     monkeypatch.setattr(peer_mod, "_local_ips", lambda: ["10.0.0.4"])
     monkeypatch.setattr(peer_mod, "_local_ipv6", lambda: ["2001:db8::4"])
@@ -722,7 +722,7 @@ def test_a_host_without_ipv6_does_not_try_to_listen_on_it(monkeypatch):
     Losing the direct path over an address family the machine was never going
     to use would be a poor trade, so the listener is conditional.
     """
-    from loom_agent.p2p import peer as peer_mod
+    from looma_agent.p2p import peer as peer_mod
 
     monkeypatch.setattr(peer_mod, "ipv6_supported", lambda: False)
     assert peer_mod._listen_addrs(47100) == [
@@ -741,7 +741,7 @@ def test_link_local_ipv6_is_never_advertised(monkeypatch):
     A multiaddr cannot carry a zone id, so a link-local address handed to a
     neighbour is an address it can only fail to dial.
     """
-    from loom_agent.p2p import peer as peer_mod
+    from looma_agent.p2p import peer as peer_mod
 
     class FakeSocket:
         def __init__(self, *a, **kw):

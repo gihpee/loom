@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from loom_connect.websocket import endpoint
+from looma_connect.websocket import endpoint
 
 
 def test_голый_адрес_идёт_под_wss():
@@ -12,12 +12,12 @@ def test_голый_адрес_идёт_под_wss():
 
 def test_схема_из_панели_понимается():
     assert endpoint("http://1.2.3.4:8000", "group-a").startswith("ws://")
-    assert endpoint("https://loom.example", "group-a").startswith("wss://")
+    assert endpoint("https://looma.example", "group-a").startswith("wss://")
 
 
 def test_лишний_слеш_не_ломает_адрес():
-    assert endpoint("https://loom.example/", "group-a") == \
-        "wss://loom.example/connect/group-a"
+    assert endpoint("https://looma.example/", "group-a") == \
+        "wss://looma.example/connect/group-a"
 
 
 def test_имя_кластера_экранируется():
@@ -31,9 +31,9 @@ def test_insecure_переключает_схему():
 
 def test_неascii_токен_отвергается_внятно(capsys):
     """Иначе это всплывает из глубины библиотеки как «invalid
-    X-Loom-Admin-Token header» — про заголовок, а не про то, что человек
+    X-Looma-Admin-Token header» — про заголовок, а не про то, что человек
     скопировал токен вместе с лишним."""
-    from loom_connect.main import main
+    from looma_connect.main import main
 
     assert main(["1.2.3.4:8000", "group-a", "--token", "токен"]) == 2
     assert "скопирован с лишним" in capsys.readouterr().err

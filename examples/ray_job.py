@@ -1,4 +1,4 @@
-"""Задача Loom, внутри которой работает Ray. Одна нода.
+"""Задача Looma, внутри которой работает Ray. Одна нода.
 
 Отправляется как обычная задача — агент не знает, что внутри Ray, и знать не
 должен:
@@ -25,8 +25,8 @@ import pathlib
 # ДО импорта ray. Плазма-сокет ложится внутрь этого каталога, а путь unix-сокета
 # не может быть длиннее 103 байт — каталог задачи в лимит не укладывается, и
 # `ray.init()` падает с ошибкой про длину пути, из которой причина не следует.
-# LOOM_TASK_TMP агент даёт как раз для такого.
-os.environ.setdefault("RAY_TMPDIR", os.environ["LOOM_TASK_TMP"])
+# LOOMA_TASK_TMP агент даёт как раз для такого.
+os.environ.setdefault("RAY_TMPDIR", os.environ["LOOMA_TASK_TMP"])
 
 import ray  # noqa: E402
 
@@ -43,9 +43,9 @@ def square(n: int) -> int:
 
 answers = ray.get([square.remote(i) for i in range(100)])
 
-# Результат — только то, что положено в LOOM_TASK_OUT. Всё остальное, что
+# Результат — только то, что положено в LOOMA_TASK_OUT. Всё остальное, что
 # задача написала у себя, считается черновиком и никуда не поедет.
-out = pathlib.Path(os.environ["LOOM_TASK_OUT"])
+out = pathlib.Path(os.environ["LOOMA_TASK_OUT"])
 out.joinpath("answer.json").write_text(json.dumps({
     "сумма": sum(answers),
     "узлов в кластере": len(ray.nodes()),

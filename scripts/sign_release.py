@@ -34,7 +34,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 AGENT = ROOT / "agent"
-PUBLIC_KEY_FILE = AGENT / "loom_launcher" / "release_key.pub"
+PUBLIC_KEY_FILE = AGENT / "looma_launcher" / "release_key.pub"
 
 
 def _keys():
@@ -116,14 +116,14 @@ def build_archive(version: str, out: Path) -> Path:
     """
     out.parent.mkdir(parents=True, exist_ok=True)
     files = sorted(
-        path for path in (AGENT / "loom_agent").rglob("*")
+        path for path in (AGENT / "looma_agent").rglob("*")
         if path.is_file() and "__pycache__" not in path.parts
     )
     raw = io.BytesIO()
     with tarfile.open(fileobj=raw, mode="w") as tar:
         for path in files:
             info = tar.gettarinfo(path, arcname=str(
-                Path("loom_agent") / path.relative_to(AGENT / "loom_agent")))
+                Path("looma_agent") / path.relative_to(AGENT / "looma_agent")))
             # Всё, что меняется от прогона к прогону, но не меняет содержимое.
             info.mtime = 0
             info.uid = info.gid = 0
@@ -143,7 +143,7 @@ def build_archive(version: str, out: Path) -> Path:
 def sign(args) -> int:
     Ed25519PrivateKey, serialization = _keys()
     key = Ed25519PrivateKey.from_private_bytes(Path(args.key).read_bytes())
-    archive = build_archive(args.version, Path(args.out or f"dist/loom-agent-{args.version}.tar.gz"))
+    archive = build_archive(args.version, Path(args.out or f"dist/looma-agent-{args.version}.tar.gz"))
     payload = archive.read_bytes()
     digest = hashlib.sha256(payload).hexdigest()
     # The manifest is signed as a whole, not just the digest: signing bytes
@@ -167,7 +167,7 @@ def sign(args) -> int:
     print("\nВ админке, вкладка Release: сначала манифест, потом архив.\n"
           "Или запросом:\n"
           f"  curl -X POST http://<оркестратор>:8000/admin/release \\\n"
-          f"    -H 'X-Loom-Admin-Token: <token>' -H 'Content-Type: application/json' \\\n"
+          f"    -H 'X-Looma-Admin-Token: <token>' -H 'Content-Type: application/json' \\\n"
           f"    -d \"$(python - <<'EOF'\n"
           f"import base64, json, pathlib\n"
           f"m = json.loads(pathlib.Path({str(manifest_path)!r}).read_text())\n"
@@ -193,7 +193,7 @@ def main(argv=None) -> int:
     public = sub.add_parser("pubkey", help="публичная половина из приватной")
     public.add_argument("--key", required=True)
     public.add_argument("--install", action="store_true",
-                        help="записать в agent/loom_launcher/release_key.pub")
+                        help="записать в agent/looma_launcher/release_key.pub")
     public.set_defaults(func=pubkey)
 
     signer = sub.add_parser("sign", help="pack and sign the agent payload")

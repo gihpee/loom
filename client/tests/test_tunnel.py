@@ -11,7 +11,7 @@ import asyncio
 
 import pytest
 
-from loom_connect.tunnel import Listener, Upstream
+from looma_connect.tunnel import Listener, Upstream
 
 
 class Echo(Upstream):
@@ -42,9 +42,13 @@ async def test_байты_доходят_туда_и_обратно():
     serving = asyncio.create_task(listener.serve_forever())
     try:
         reader, writer = await asyncio.open_connection("127.0.0.1", port)
-        writer.write(b"loom")
+        # Длина берётся из самих данных: захардкоженное число молча
+        # разъезжается с ними при первом же переименовании, и тест не падает,
+        # а виснет на чтении недостающего байта.
+        payload = b"looma"
+        writer.write(payload)
         await writer.drain()
-        assert await reader.readexactly(4) == b"loom"
+        assert await reader.readexactly(len(payload)) == payload
         writer.close()
     finally:
         serving.cancel()
