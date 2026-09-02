@@ -74,6 +74,9 @@ def test_несовпадение_числа_слоёв_отвергается(m
                         lambda *_a: _FakeRunner)
     # Конфиг vLLM держится открытым на всю жизнь процесса — тут его нет.
     monkeypatch.setattr(vllm_engine, "_hold_config", lambda _c: None)
+    # Иначе тест пойдёт качать модель с HuggingFace.
+    monkeypatch.setattr(vllm_engine, "prepare_weights",
+                        lambda weights, **_k: weights)
 
     # Именно атрибут модуля, а не запись в sys.modules: `from loom_stage
     # import vllm_patch` берёт атрибут пакета, и подмена через sys.modules
@@ -190,16 +193,17 @@ def test_если_тензоров_нет_нигде_отказ_называет
 
 def test_логиты_ищутся_и_в_ответе_и_в_состоянии():
     ответ = types.SimpleNamespace(logits="прямо")
-    assert vllm_engine._logits_from(types.SimpleNamespace(), ответ) == "прямо"
+    assert vllm_engine._logits_from(types.SimpleNamespace(), ответ, expected=1) == "прямо"
 
     runner = types.SimpleNamespace(
         execute_model_state=types.SimpleNamespace(logits="в состоянии"))
-    assert vllm_engine._logits_from(runner, object()) == "в состоянии"
+    assert vllm_engine._logits_from(runner, object(), expected=1) == "в состоянии"
 
 
 def test_если_логитов_нет_отказ_называет_что_пришло():
     with pytest.raises(RunnerRefused, match="вернул int"):
-        vllm_engine._logits_from(types.SimpleNamespace(execute_model_state=None), 7)
+        vllm_engine._logits_from(types.SimpleNamespace(execute_model_state=None), 7,
+                                 expected=1)
 
 
 def test_неголовной_стадии_без_тензоров_считать_нечего(monkeypatch, sequence_module):
@@ -339,3 +343,106 @@ def test_не_датакласс_собирается_как_есть():
             self.kwargs = kwargs
 
     assert vllm_engine._config_with(Обычный, a=1).kwargs == {"a": 1}
+
+
+# ------------------------------------------------------ урезанный чекпоинт
+def test_стадии_дают_урезанный_чекпоинт(monkeypatch):
+    """vLLM перечисляет каждый файл из индекса и открывает его: недостающий —
+    ошибка, а не экономия. Поэтому рядом собирается вид из симлинков с
+    переписанным индексом."""
+    просили = {}
+
+    def resolve(weights, shard=None, **_kwargs):
+        просили["скачано для"] = (shard.start_layer, shard.end_layer)
+        просили["роли"] = (shard.is_first, shard.is_last)
+        return "/локально"
+
+    def view(path, shard):
+        просили["вид из"] = path
+        return "/локально/вид"
+
+    monkeypatch.setattr("loom_stage.loader.resolve_model_path", resolve)
+    monkeypatch.setattr("loom_stage.loader.build_stage_checkpoint_view", view)
+
+    got = vllm_engine.prepare_weights("Qwen/Qwen3-4B", start_layer=0, end_layer=18,
+                                      is_first=True, is_last=False, dtype="bfloat16")
+    assert got == "/локально/вид"
+    assert просили["скачано для"] == (0, 18), "скачали не свой срез"
+    assert просили["роли"] == (True, False)
+    assert просили["вид из"] == "/локально"
+
+
+def test_если_урезать_нечем_читаем_целиком(monkeypatch):
+    """Единственный файл или незнакомые имена ключей — не отказ: стадия просто
+    прочитает больше, чем ей нужно."""
+    monkeypatch.setattr("loom_stage.loader.resolve_model_path",
+                        lambda *a, **k: "/локально")
+    monkeypatch.setattr("loom_stage.loader.build_stage_checkpoint_view",
+                        lambda path, shard: path)
+
+    got = vllm_engine.prepare_weights("модель", start_layer=0, end_layer=18,
+                                      is_first=True, is_last=False, dtype="bfloat16")
+    assert got == "/локально"
+
+
+# ------------------------------------------------------- батч из нескольких
+class _Answer:
+    def __init__(self, logits):
+        self.logits = logits
+
+
+class _Rows:
+    """Тензор ровно настолько, насколько его щупает _logits_from."""
+
+    def __init__(self, *shape):
+        self.shape = shape
+
+
+def test_число_строк_логитов_сверяется_с_батчем():
+    """Строка логитов не подписана именем запроса: соответствие держится
+    только на порядке. Разойдись оно молча — токен уехал бы чужому клиенту."""
+    from loom_stage import vllm_engine
+
+    with pytest.raises(vllm_engine.RunnerRefused, match="строк логитов"):
+        vllm_engine._logits_from(object(), _Answer(_Rows(2, 151936)), expected=3)
+
+
+def test_совпавший_батч_логитов_проходит():
+    from loom_stage import vllm_engine
+
+    logits = _Rows(3, 151936)
+    assert vllm_engine._logits_from(object(), _Answer(logits), expected=3) is logits
+
+
+def test_одномерные_логиты_считаются_одной_строкой():
+    from loom_stage import vllm_engine
+
+    logits = _Rows(151936)
+    assert vllm_engine._logits_from(object(), _Answer(logits), expected=1) is logits
+
+
+def test_шаг_без_последовательностей_отвергается():
+    from loom_stage import vllm_engine
+
+    with pytest.raises(vllm_engine.RunnerRefused, match="без единой"):
+        vllm_engine.step(object(), [], first_step=True)
+
+
+@pytest.mark.parametrize("text, expected", [
+    ("1,2,3", [[1, 2, 3]]),
+    ("1,2,3;4,5", [[1, 2, 3], [4, 5]]),
+    ("1,2;;3", [[1, 2], [3]]),
+    (" 1 , 2 ; 3 ", [[1, 2], [3]]),
+])
+def test_разбор_нескольких_промптов(text, expected):
+    from loom_stage import vllm_engine
+
+    assert vllm_engine._parse_prompts(text) == expected
+
+
+def test_промпты_без_токенов_отвергаются():
+    """Батч из пустой последовательности vLLM примет и посчитает ни за чем."""
+    from loom_stage import vllm_engine
+
+    with pytest.raises(vllm_engine.RunnerRefused, match="ни одного токена"):
+        vllm_engine._parse_prompts(";;")

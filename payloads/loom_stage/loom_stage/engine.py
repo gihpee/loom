@@ -3,9 +3,10 @@
 Движков будет два, и различаются они не тем, «как считать», а тем, **чем
 задан батч**:
 
-`torch`  — по одной последовательности на запрос. Просто, переносимо, работает
-           на CPU и проверяется без карты. Пропускная способность равна
-           скорости одного запроса: параллельные клиенты делят её, а не
+`torch`  — переносимо, работает на CPU и проверяется без карты. Батч принимает,
+           но прогоняет по одной последовательности: плотная каузальная маска
+           дала бы каждой следующей видеть предыдущую. Пропускная способность
+           равна скорости одного запроса — параллельные клиенты делят её, а не
            складывают.
 `vllm`   — continuous batching: несколько последовательностей в одном шаге
            движка. Состав батча выбирает ПЕРВАЯ стадия, остальные обязаны
@@ -15,10 +16,12 @@
 ни строчкой больше. Широкий интерфейс притянул бы в стадию подробности того
 движка, который его задал, и второй пришлось бы под них подгонять.
 
-Одна деталь стоит отдельного слова. `forward` возвращает `(hidden, logits)`, и
-ровно одно из них не None: на последней стадии логиты, на всех прочих —
-скрытые состояния. Так устроен конвейер, и оба движка обязаны отвечать
-одинаково, потому что `server.py` различать их не должен.
+Одна деталь стоит отдельного слова. `step_batch` возвращает `(тензоры, логиты)`,
+и ровно одно из них не None: на последней стадии логиты, на всех прочих —
+карта скрытых состояний. Так устроен конвейер, и оба движка обязаны отвечать
+одинаково, потому что `server.py` различать их не должен. Карта, а не один
+тензор, потому что vLLM передаёт между стадиями два: `hidden_states` и
+`residual`.
 """
 
 from __future__ import annotations
@@ -29,28 +32,32 @@ from typing import List, Optional, Protocol, Tuple
 class Engine(Protocol):
     """То, что умеет прогнать слои этой стадии."""
 
-    def forward(self, *, request_id: str, positions: List[int],
-                input_ids: Optional[List[int]] = None,
-                hidden: Optional[object] = None) -> Tuple[object, object]:
-        """Прогнать шаг.
+    #: Считает ли движок несколько последовательностей одним прогоном. Оба
+    #: движка принимают батч, но только один от этого ускоряется: собственный
+    #: исполнитель прогоняет их по одной, потому что плотная каузальная маска
+    #: дала бы каждой следующей видеть предыдущую.
+    batches: bool
 
-        `input_ids` приходят на первой стадии, `hidden` — на всех остальных.
-        Возвращает `(hidden, None)` либо `(None, logits)` — см. шапку модуля.
+    def step_batch(self, sequences, *, incoming=None,
+                   first_step: bool) -> Tuple[object, object]:
+        """Прогнать шаг над батчем, который выбрали снаружи.
+
+        `incoming` — карта тензоров от предыдущей стадии (на первой её нет).
+        Возвращает `(карта тензоров, None)` либо `(None, логиты)`: ровно одно
+        не None, и различать движки вызывающему не нужно.
         """
+
+    def sample_batch(self, logits, sequences) -> List[int]:
+        """По токену на последовательность, в порядке батча. Порядок и есть
+        соответствие между строкой логитов и запросом."""
 
     def sample(self, logits, *, temperature: float, top_p: float,
                seed: Optional[int] = None) -> int:
-        """Выбрать токен. Зовётся только на последней стадии."""
+        """Выбрать токен по одной строке логитов."""
 
     def free(self, request_id: str) -> None:
         """Забыть состояние запроса. KV-кэш чужого запроса — чистая трата
         памяти, а на стадии её и так впритык."""
-
-    def serialize(self, hidden) -> Tuple[bytes, List[int], str]:
-        """Тензор в то, что уедет по проводу (см. wire.py)."""
-
-    def deserialize(self, data: bytes, shape: List[int], dtype: str):
-        """Обратно."""
 
     def active_requests(self) -> int:
         """Сколько запросов сейчас держит состояние."""
@@ -60,8 +67,17 @@ class EngineRefused(RuntimeError):
     """Этот движок тут работать не может, и вот почему."""
 
 
-def build(kind: str, shard, *, max_requests: int = 64, **options) -> Engine:
+def build(kind: str, shard=None, *, model_path: str = "", start_layer: int = 0,
+          end_layer: int = 0, num_model_layers: int = 0,
+          dtype: str = "bfloat16", vram_quota_bytes: int = 0,
+          max_requests: int = 64, **options) -> Engine:
     """Собрать движок по имени.
+
+    Аргументы у двух движков разные, и свести их к одному набору не выйдет:
+    собственный исполнитель получает уже собранную моделью стадию, а vLLM
+    строит свою сам, из пути. Отдать ему чужую значило бы держать одни и те же
+    слои на карте дважды — там, где памяти хватало впритык, стадия не
+    поднялась бы вовсе.
 
     Отказ здесь — обычное дело, а не поломка: vLLM не работает без карты, и
     сказать об этом на старте куда полезнее, чем упасть посреди первого
@@ -71,10 +87,23 @@ def build(kind: str, shard, *, max_requests: int = 64, **options) -> Engine:
     if kind == "torch":
         from loom_stage.executor import ShardExecutor
 
+        if shard is None:
+            raise EngineRefused(
+                "переносимому движку нужна уже собранная стадия, а её не дали")
         return ShardExecutor(shard, max_requests=max_requests)
     if kind == "vllm":
         from loom_stage.vllm_engine import VllmEngine
 
-        return VllmEngine(shard, max_requests=max_requests, **options)
+        if not model_path:
+            raise EngineRefused("движку vLLM нужен путь к весам: он грузит их сам")
+        if not num_model_layers:
+            raise EngineRefused(
+                "движку vLLM нужно число слоёв всей модели: без него он не "
+                "знает, эта ли стадия последняя, и не соберёт lm_head")
+        return VllmEngine(model_path, start_layer=start_layer,
+                          end_layer=end_layer,
+                          num_model_layers=num_model_layers, dtype=dtype,
+                          vram_quota_bytes=vram_quota_bytes,
+                          max_requests=max_requests, **options)
     raise EngineRefused(
         f"неизвестный движок {kind!r}; эта стадия умеет torch и vllm")

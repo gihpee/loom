@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import List, Optional, Tuple
+from typing import List, Optional
 
 from loom_stage.vllm_runner import (RunnerRefused, layer_range, replace_pipeline_group,
                                     stage_role, stage_runner_class)
@@ -111,6 +111,38 @@ def _config_with(kind, **options):
         logger.warning("%s не знает про %s — эта версия vLLM устроена иначе",
                        kind.__name__, ", ".join(dropped))
     return kind(**{name: value for name, value in options.items() if name in known})
+
+
+def prepare_weights(weights: str, *, start_layer: int, end_layer: int,
+                    is_first: bool, is_last: bool, dtype: str) -> str:
+    """Положить рядом ровно те веса, которые нужны этой стадии.
+
+    Две разные экономии, и обе заметные:
+
+    **Скачивание.** Из репозитория берутся метаданные, а по ним — только те
+    файлы safetensors, где лежат наши слои. Половина модели вместо целой.
+
+    **Чтение.** vLLM, в отличие от нашего исполнителя, не терпит неполного
+    чекпоинта: он перечисляет каждый файл из `model.safetensors.index.json` и
+    открывает его, так что недостающий — ошибка, а не экономия. Поэтому рядом
+    собирается «вид»: симлинки на нужные файлы плюс переписанный индекс, где
+    упомянуты только они.
+
+    Если урезать нечего — единственный файл, незнакомые имена ключей — вернётся
+    исходный путь. Это не отказ: стадия просто прочитает больше, чем ей нужно.
+    """
+    from loom_stage.loader import ShardSpec, build_stage_checkpoint_view, resolve_model_path
+
+    spec = ShardSpec(model_path=weights, start_layer=start_layer,
+                     end_layer=end_layer, is_first=is_first, is_last=is_last,
+                     dtype=dtype)
+    local = resolve_model_path(weights, shard=spec)
+    view = build_stage_checkpoint_view(local, spec)
+    if view != local:
+        logger.info("читаем урезанный чекпоинт: %s", view)
+    else:
+        logger.info("чекпоинт урезать нечем, читаем целиком: %s", local)
+    return view
 
 
 def _build_config(model_path: str, *, dtype: str, max_model_len: int,
@@ -201,6 +233,9 @@ def load_shard(model_path: str, *, start_layer: int, end_layer: int,
     logger.info("собираю слои [%d, %d) из %d: первая=%s, последняя=%s",
                 start_layer, end_layer, num_model_layers, is_first, is_last)
 
+    model_path = prepare_weights(model_path, start_layer=start_layer,
+                                 end_layer=end_layer, is_first=is_first,
+                                 is_last=is_last, dtype=dtype)
     vllm_patch.allow_missing_ends(is_first=is_first, is_last=is_last)
     _start_distributed()
     replace_pipeline_group(start_layer, end_layer, num_model_layers)
@@ -249,18 +284,127 @@ def step(shard: LoadedShard, sequences, *, incoming=None, first_step: bool):
     """
     from loom_stage import vllm_batch
 
-    runner = shard.runner
-    form = vllm_batch.prefill if first_step else vllm_batch.decode
-    scheduled = form(list(sequences), runner)
-
+    # Сначала то, что можно проверить, ничего не трогая: пустой батч и
+    # отсутствующие тензоры — это не сбой движка, а неправильный вызов, и
+    # звучать они должны так же.
+    batch = list(sequences)
+    if not batch:
+        raise RunnerRefused("шаг без единой последовательности")
     if not shard.is_first and incoming is None:
         raise RunnerRefused(
             "неголовной стадии нечего считать: тензоры от предыдущей не пришли")
+
+    runner = shard.runner
+    form = vllm_batch.prefill if first_step else vllm_batch.decode
+    scheduled = form(batch, runner)
     answer = runner.execute_model(scheduled, incoming if not shard.is_first else None)
 
     if shard.is_last:
-        return None, _logits_from(runner, answer)
+        return None, _logits_from(runner, answer, expected=len(batch))
     return _hidden_from(runner, answer), None
+
+
+class VllmEngine:
+    """Стадия на vLLM, какой её видит `server.py`.
+
+    Всё, что тут есть, — это обёртка вокруг `load_shard` и `step`: сам движок
+    выше по файлу и ничего про конвейер Loom не знает. Класс нужен затем, что
+    голове нельзя различать движки — она обязана звать одно и то же и получать
+    одинаково устроенный ответ.
+
+    Веса грузит он сам, из пути. Отдать ему уже собранную моделью стадию
+    нельзя: она заняла бы карту вторым экземпляром тех же слоёв, и на карту,
+    которой хватало впритык, стадия просто не поднялась бы.
+    """
+
+    #: Батч из нескольких — то, ради чего этот движок вообще нужен.
+    batches = True
+
+    def __init__(self, model_path: str, *, start_layer: int, end_layer: int,
+                 num_model_layers: int, dtype: str = "bfloat16",
+                 vram_quota_bytes: int = 0, max_requests: int = 64,
+                 max_model_len: int = 4096, **_options) -> None:
+        import torch
+
+        self.torch = torch
+        self.shard = load_shard(model_path, start_layer=start_layer,
+                                end_layer=end_layer,
+                                num_model_layers=num_model_layers, dtype=dtype,
+                                vram_quota_bytes=vram_quota_bytes,
+                                max_model_len=max_model_len,
+                                max_sequences=max_requests)
+        self.is_first = self.shard.is_first
+        self.is_last = self.shard.is_last
+        self._live: set = set()
+
+    # ------------------------------------------------------------ счёт
+    def step_batch(self, sequences, *, incoming=None, first_step: bool):
+        """Один шаг над батчем. Возвращает `(карта тензоров, логиты)`.
+
+        Ровно одно из двух не None: на последней стадии логиты, на прочих —
+        тензоры. Так же отвечает и собственный исполнитель.
+        """
+        hidden, logits = step(self.shard, sequences,
+                              incoming=self._incoming(incoming),
+                              first_step=first_step)
+        for sequence in sequences:
+            self._live.add(sequence.request_id)
+        if hidden is None:
+            return None, logits
+        return dict(hidden.tensors), None
+
+    def _incoming(self, tensors):
+        """Карта тензоров с провода — в то, что понимает vLLM.
+
+        Превращение прячется здесь, а не у зовущего: голова обязана звать оба
+        движка одинаково, а `IntermediateTensors` — тип vLLM, и знать о нём
+        стадии на собственном исполнителе незачем.
+        """
+        from vllm.sequence import IntermediateTensors
+
+        if tensors is None or isinstance(tensors, IntermediateTensors):
+            return tensors
+        device = getattr(self.shard.runner, "device", None)
+        if device is not None:
+            tensors = {name: value.to(device) for name, value in tensors.items()}
+        return IntermediateTensors(tensors)
+
+    def sample_batch(self, logits, sequences) -> list:
+        """По токену на последовательность, в порядке батча."""
+        from loom_stage import batch_wire
+
+        rows = logits if getattr(logits, "dim", lambda: 1)() > 1 else logits[None]
+        batch_wire.check_rows(list(sequences), int(rows.shape[0]))
+        return [self.sample(row, temperature=sequence.temperature,
+                            top_p=sequence.top_p, seed=sequence.seed)
+                for row, sequence in zip(rows, sequences)]
+
+    def sample(self, logits, *, temperature: float = 0.0, top_p: float = 1.0,
+               seed: Optional[int] = None) -> int:
+        """Выбор токена — тот же, что у собственного исполнителя.
+
+        Не из vLLM: его сэмплер живёт внутри его же планировщика, которого мы
+        как раз обходим. Одинаковый выбор на обоих движках стоит дороже, чем
+        экономия на этих десяти строках, — иначе один и тот же промпт даёт
+        разные ответы в зависимости от того, чем считали.
+        """
+        from loom_stage.executor import ShardExecutor
+
+        return ShardExecutor.sample(self, logits, temperature=temperature,
+                                    top_p=top_p, seed=seed)
+
+    # ------------------------------------------------------------ уборка
+    def free(self, request_id: str) -> None:
+        from loom_stage import vllm_batch
+
+        vllm_batch.release(self.shard.runner, request_id)
+        self._live.discard(request_id)
+
+    def active_requests(self) -> int:
+        return len(self._live)
+
+    def shutdown(self) -> None:
+        shutdown()
 
 
 def _hidden_from(runner, answer):
@@ -284,13 +428,27 @@ def _hidden_from(runner, answer):
         "в этой версии vLLM они лежат где-то ещё")
 
 
-def _logits_from(runner, answer):
-    """Логиты последней стадии."""
+def _logits_from(runner, answer, *, expected: int):
+    """Логиты последней стадии — по строке на последовательность.
+
+    Строка логитов не подписана именем запроса: соответствие держится только
+    на порядке батча. Поэтому число строк сверяется с числом последовательностей
+    здесь и сразу. Разойдись оно молча — токен уехал бы чужому клиенту, и
+    заметить это можно было бы разве что по жалобе на бессвязный ответ.
+    """
     state = getattr(runner, "execute_model_state", None)
     for source in (answer, state):
         found = getattr(source, "logits", None)
-        if found is not None:
-            return found
+        if found is None:
+            continue
+        shape = list(getattr(found, "shape", []) or [])
+        rows = shape[0] if len(shape) > 1 else 1
+        if rows != expected:
+            raise RunnerRefused(
+                f"движок вернул {rows} строк логитов на {expected} "
+                f"последовательностей (форма {shape}); соответствие строки и "
+                "запроса держится только на порядке батча, а он уже разошёлся")
+        return found
     raise RunnerRefused(
         f"шаг не отдал логитов, а вернул {type(answer).__name__}; "
         "в этой версии vLLM они лежат где-то ещё")
@@ -366,13 +524,32 @@ def _count_layers(runner) -> int:
     return 0
 
 
-def _one_prompt(shard: LoadedShard, prompt_ids: List[int], *, incoming=None):
-    """Один prefill над одной последовательностью. Ровно то, чем проверяется
-    веха 2: батч из одного — частный случай батча, а не отдельный путь."""
-    from loom_stage.vllm_batch import Sequence
+def _prompts(shard: LoadedShard, prompts: List[List[int]], *, incoming=None):
+    """Prefill над батчем из скольких угодно последовательностей.
 
-    sequence = Sequence(request_id="проверка", prompt_ids=list(prompt_ids))
-    return step(shard, [sequence], incoming=incoming, first_step=True)
+    Имена запросов задаются здесь и по порядку — тот же порядок повторит
+    следующая стадия, собрав батч из тех же промптов. В этом и смысл проверки:
+    состав батча не пересчитывается на каждой стадии, а повторяется, и если бы
+    он разъехался, тензоры пришли бы не той длины.
+    """
+    from loom_stage.scheduler import Sequence
+
+    batch = [Sequence(request_id=f"проверка-{index}", prompt_ids=list(ids))
+             for index, ids in enumerate(prompts)]
+    return step(shard, batch, incoming=incoming, first_step=True)
+
+
+def _parse_prompts(text: str) -> List[List[int]]:
+    """«1,2,3;4,5» -> [[1,2,3],[4,5]]. Пустые промпты отбрасываются: батч из
+    пустой последовательности vLLM примет и посчитает ни за чем."""
+    prompts = []
+    for chunk in text.split(";"):
+        ids = [int(piece) for piece in chunk.split(",") if piece.strip()]
+        if ids:
+            prompts.append(ids)
+    if not prompts:
+        raise RunnerRefused(f"в --prompt-ids не нашлось ни одного токена: {text!r}")
+    return prompts
 
 
 def _save_hidden(tensors, path: str) -> dict:
@@ -450,7 +627,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--dtype", default="bfloat16")
     parser.add_argument("--vram-quota-bytes", type=int, default=0)
     parser.add_argument("--prompt-ids", default="",
-                        help="через запятую; без них шаг не делается")
+                        help="токены через запятую; несколько промптов — через "
+                             "точку с запятой, и тогда шаг считает их батчем")
     parser.add_argument("--dump-hidden", default="",
                         help="куда сложить промежуточные тензоры")
     parser.add_argument("--load-hidden", default="",
@@ -469,10 +647,12 @@ def main(argv: Optional[List[str]] = None) -> int:
         answer.update(shard.as_dict())
 
         if args.prompt_ids:
-            ids = [int(piece) for piece in args.prompt_ids.split(",") if piece.strip()]
+            prompts = _parse_prompts(args.prompt_ids)
             incoming = (_load_hidden(args.load_hidden, shard.runner.device)
                         if args.load_hidden else None)
-            hidden, logits = _one_prompt(shard, ids, incoming=incoming)
+            answer["последовательностей в батче"] = len(prompts)
+            answer["токенов в батче"] = sum(len(ids) for ids in prompts)
+            hidden, logits = _prompts(shard, prompts, incoming=incoming)
             if hidden is not None:
                 answer["отдала"] = "скрытые состояния"
                 answer["тензоры"] = sorted(hidden.tensors)
@@ -481,6 +661,11 @@ def main(argv: Optional[List[str]] = None) -> int:
             if logits is not None:
                 answer["отдала"] = "логиты"
                 answer["форма логитов"] = list(getattr(logits, "shape", []))
+                # По строке на последовательность, в порядке батча. Печатаем
+                # выбранные токены: одинаковые токены на разных промптах —
+                # первый признак, что батч склеился в одну последовательность.
+                answer["токены"] = [int(row.argmax().item()) for row in
+                                    (logits if logits.dim() > 1 else logits[None])]
     except RunnerRefused as exc:
         print(f"не вышло: {exc}")
         return 2

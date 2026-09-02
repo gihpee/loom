@@ -15,6 +15,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "agent"))
 
 from loom.orchestrator.models import ModelError, describe, split_layers, stage_payload
 
+from test_agent_gateway import stand  # noqa: F401 — фикстура стенда
+
 
 # ------------------------------------------------------------------- разрез
 def test_слои_делятся_поровну():
@@ -116,3 +118,40 @@ def test_отсутствие_стадии_называет_где_искали(
         stage_payload()
     assert "Искали в" in str(exc.value)
     assert "LOOM_PAYLOADS_DIR" in str(exc.value)
+
+
+# ------------------------------------------------------------------- движок
+def deploy_body(**extra) -> dict:
+    # Имя модели заведомо негодное: оба отказа ниже обязаны случиться ДО
+    # обращения к HuggingFace, и если проверка движка когда-нибудь переедет
+    # ниже, эти тесты упадут на другом сообщении, а не тихо уйдут в сеть.
+    return {"repo": "не/модель", "stages": 1, **extra}
+
+
+def api(orchestrator):
+    from fastapi.testclient import TestClient
+
+    from loom.api.app import create_app
+    from test_agent_gateway import _Settings
+
+    return TestClient(create_app(agents=orchestrator.hub, config=_Settings()))
+
+
+def test_неизвестный_движок_отвергается_до_запуска(stand):
+    """Оператор должен узнать об опечатке здесь, а не из логов узла, на который
+    уже уехала задача."""
+    orchestrator, _agent = stand
+    answer = api(orchestrator).post("/admin/deploy",
+                                    json=deploy_body(engine="vllm2"))
+    assert answer.status_code == 400
+    assert "не поддерживается" in answer.json()["error"]["message"]
+
+
+def test_vllm_без_карты_отвергается_до_загрузки_весов(stand):
+    """vLLM без карты не поднимается вовсе, а узнать об этом через десять минут
+    качания весов — худший способ."""
+    orchestrator, _agent = stand
+    answer = api(orchestrator).post("/admin/deploy",
+                                    json=deploy_body(engine="vllm", device="cpu"))
+    assert answer.status_code == 400
+    assert "только на cuda" in answer.json()["error"]["message"]

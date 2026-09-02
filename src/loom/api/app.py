@@ -481,6 +481,18 @@ def create_app(*, agents=None, releases=None, keystore=None, config=None,
         if agents is None:
             return need_agents()
         raw = await request.json()
+        # Сочетания, которые не сойдутся ни при каком ответе HuggingFace, —
+        # до обращения к нему. Опечатка в имени движка не стоит похода в сеть,
+        # и оператор узнаёт о ней сразу, а не через задержку, которая выглядит
+        # как работа.
+        device = (raw.get("device") or "cuda").strip()
+        engine = (raw.get("engine") or "torch").strip().lower()
+        if engine not in ("torch", "vllm"):
+            return _error(400, f"движок {engine!r} не поддерживается: torch или vllm")
+        if engine == "vllm" and device != "cuda":
+            # vLLM без карты не поднимается вовсе, и узнавать об этом из его
+            # внутренней ошибки на узле — худший способ.
+            return _error(400, "движок vllm работает только на cuda")
         try:
             model = describe((raw.get("repo") or "").strip())
         except ModelError as exc:
@@ -512,7 +524,6 @@ def create_app(*, agents=None, releases=None, keystore=None, config=None,
         except ModelError as exc:
             return _error(400, str(exc))
 
-        device = (raw.get("device") or "cuda").strip()
         dtype = (raw.get("dtype") or "bfloat16").strip()
         label = (raw.get("label") or model.repo.split("/")[-1]).strip()
         per_rank = [{
@@ -522,6 +533,11 @@ def create_app(*, agents=None, releases=None, keystore=None, config=None,
                 "--weights-uri", model.repo,
                 "--start-layer", str(start), "--end-layer", str(end),
                 "--device", device, "--dtype", dtype,
+                "--engine", engine,
+                # Стадия знает только свой срез, а движку нужно знать, где
+                # кончается модель: иначе он не определит, что эта стадия
+                # последняя, и не соберёт lm_head.
+                "--num-model-layers", str(model.num_layers),
             ],
         } for start, end in ranges]
 
@@ -537,7 +553,7 @@ def create_app(*, agents=None, releases=None, keystore=None, config=None,
                 inputs=payload,
                 environment={"kind": "python", "requirements": [
                     "torch", "transformers", "safetensors", "huggingface-hub",
-                ]},
+                ] + (["vllm"] if engine == "vllm" else [])},
                 # Без потолка: стадия живёт, пока модель развёрнута.
                 timeout_s=raw.get("timeout_s") or 30 * 24 * 3600,
                 env={"HF_TOKEN": os.environ.get("HF_TOKEN", "")} if os.environ.get("HF_TOKEN") else None,

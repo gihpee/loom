@@ -33,43 +33,20 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import List
+
+from loom_stage.scheduler import Sequence
 
 logger = logging.getLogger("loom_stage.vllm_batch")
+
+# Состав батча выбирает планировщик, поэтому и тип его элемента живёт там:
+# он едет между стадиями и не должен зависеть от того, каким движком его
+# посчитают. Здесь он только читается.
+__all__ = ["Sequence", "BatchRefused", "prefill", "decode", "release"]
 
 
 class BatchRefused(RuntimeError):
     """Батч собрать нельзя, и вот почему."""
-
-
-@dataclass
-class Sequence:
-    """Одна последовательность в батче — то, что стадия про неё знает.
-
-    Наш собственный тип, а не vLLM'ный: он едет между стадиями, и привязывать
-    провод к внутренностям движка значило бы менять протокол вместе с его
-    версией.
-    """
-
-    request_id: str
-    prompt_ids: List[int]
-    output_ids: List[int] = field(default_factory=list)
-    temperature: float = 0.0
-    top_p: float = 1.0
-    max_tokens: int = 128
-    seed: Optional[int] = None
-
-    @property
-    def computed(self) -> int:
-        """Сколько токенов уже посчитано.
-
-        На первом шаге декодирования это весь промпт; дальше — промпт плюс
-        все выданные токены, кроме последнего: он и есть вход этого шага.
-        """
-        if not self.output_ids:
-            return len(self.prompt_ids)
-        return len(self.prompt_ids) + len(self.output_ids) - 1
 
 
 def sampling_for(sequence: Sequence):

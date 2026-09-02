@@ -82,6 +82,7 @@ function Deploy({ nodes, onClose, onDone }: {
   const [label, setLabel] = useState("");
   const [dtype, setDtype] = useState("bfloat16");
   const [device, setDevice] = useState("cuda");
+  const [engine, setEngine] = useState("torch");
   const [stages, setStages] = useState("2");
   const [byVram, setByVram] = useState(true);
   const [picked, setPicked] = useState<string[]>([]);
@@ -95,7 +96,7 @@ function Deploy({ nodes, onClose, onDone }: {
   });
 
   const deploy = () => action.run(async () => {
-    const body: Record<string, unknown> = { repo, dtype, device, by_vram: byVram };
+    const body: Record<string, unknown> = { repo, dtype, device, engine, by_vram: byVram };
     if (label) body.label = label;
     if (picked.length) body.node_ids = picked;
     else body.stages = Number(stages) || 1;
@@ -111,12 +112,18 @@ function Deploy({ nodes, onClose, onDone }: {
 
   const takers = nodes.filter((n) => n.accepts_tasks);
   const count = picked.length || Number(stages) || 1;
+  // vLLM без карты не поднимается вовсе. Сказать это здесь, а не дать
+  // оркестратору отказать после нажатия: сочетание видно на экране целиком,
+  // и объяснять его лучше рядом с тем, что его создало.
+  const clash = engine === "vllm" && device !== "cuda"
+    ? "vLLM работает только на cuda" : "";
 
   return (
     <Modal title="Развернуть модель" onClose={onClose} footer={
       <div className="form-actions">
         <Button kind="ghost" onClick={onClose}>отмена</Button>
-        <Button kind="primary" onClick={deploy} disabled={action.busy || !repo}>
+        <Button kind="primary" onClick={deploy}
+                disabled={action.busy || !repo || !!clash}>
           {action.busy ? "…" : "развернуть"}
         </Button>
       </div>
@@ -138,6 +145,15 @@ function Deploy({ nodes, onClose, onDone }: {
         <Field label="Устройство">
           <select value={device} onChange={(e) => setDevice(e.target.value)}>
             <option>cuda</option><option>cpu</option>
+          </select>
+        </Field>
+        <Field label="Движок"
+               hint={clash || (engine === "vllm"
+                 ? "несколько запросов в одном шаге — параллельные клиенты складывают пропускную способность, а не делят её"
+                 : "работает везде, в том числе на cpu; параллельные запросы делят одну карту по очереди")}>
+          <select value={engine} onChange={(e) => setEngine(e.target.value)}>
+            <option value="torch">transformers — переносимый</option>
+            <option value="vllm">vLLM — батчинг, только cuda</option>
           </select>
         </Field>
       </div>
@@ -182,6 +198,8 @@ function Deploy({ nodes, onClose, onDone }: {
       <p className="sub" style={{ marginTop: 16 }}>
         Веса качает сама стадия, только свой диапазон. Первый запуск на узле —
         минуты: ставится окружение и качаются веса. Дальше из кэша.
+        {engine === "vllm" && " Для vLLM первый запуск дольше: он ставится в " +
+          "окружение узла отдельно и весит немало."}
       </p>
     </Modal>
   );

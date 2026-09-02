@@ -283,3 +283,58 @@ def test_состояние_стадий_видно_пока_модель_под
             agent.stop()
             thread.join(timeout=15)
         orchestrator.stop()
+
+
+@pytest.mark.slow
+def test_два_клиента_обслуживаются_одновременно(tmp_path, monkeypatch, tiny_model):
+    """То, ради чего появился общий цикл.
+
+    Раньше каждый запрос вёл конвейер сам и стоял в очереди за замком вокруг
+    модели: параллельные клиенты делили пропускную способность, а не
+    складывали её. Теперь запросы попадают в один шаг движка, и проверяется
+    здесь именно это — оба получают СВОЙ ответ, а не один чужой на двоих.
+
+    Ответы сравниваются с одиночными, снятыми тем же жадным декодированием.
+    Батч, склеившийся в одну последовательность, ответ бы дал — просто
+    другой, и без этой сверки такая поломка выглядела бы как успех.
+    """
+    monkeypatch.setenv("LOOM_ALLOW_UNPRIVILEGED_TASKS", "1")
+    monkeypatch.setenv("LOOM_P2P", "0")
+    orchestrator = Orchestrator().start()
+    running = start_nodes(orchestrator, tmp_path, 1)
+    try:
+        group = orchestrator.hub.submit_group(
+            size=1, command=stage_command(tiny_model, 0, 6),
+            env={"PYTHONPATH": PAYLOAD}, serve_port=1, timeout_s=600,
+            node_ids=["node-0"],
+        )
+        wait_ready(orchestrator, group)
+
+        alone = {prompt: ask(orchestrator, group, prompt, max_tokens=4)
+                 ["choices"][0]["message"]["content"]
+                 for prompt in ("hello", "goodbye")}
+
+        import concurrent.futures as futures
+
+        with futures.ThreadPoolExecutor(max_workers=2) as pool:
+            both = list(pool.map(
+                lambda prompt: (prompt, ask(orchestrator, group, prompt,
+                                            max_tokens=4)),
+                ("hello", "goodbye")))
+
+        for prompt, answer in both:
+            assert answer["usage"]["completion_tokens"] >= 1
+            assert answer["choices"][0]["message"]["content"] == alone[prompt], \
+                f"вместе и по одному ответы разошлись на {prompt!r}"
+
+        # Попали ли они в один шаг — здесь не утверждается: это зависит от
+        # того, успел ли второй прийти, пока считался первый, и на разной
+        # машине выходит по-разному. Число видно в ответе (`batch_max`), и
+        # проверяется оно там, где это можно сделать без гонки, — на самом
+        # цикле в tests/test_pipeline.py.
+        assert all(answer["timings"]["batch_max"] >= 1 for _p, answer in both)
+    finally:
+        for agent, thread in running:
+            agent.stop()
+            thread.join(timeout=15)
+        orchestrator.stop()

@@ -8,16 +8,46 @@ from __future__ import annotations
 
 import pytest
 
-from loom_stage.engine import Engine, EngineRefused, build
+from loom_stage.engine import EngineRefused, build
 
 
-def test_нынешний_исполнитель_удовлетворяет_шву():
+CONTRACT = ("step_batch", "sample_batch", "sample", "free", "active_requests")
+
+
+def test_переносимый_исполнитель_удовлетворяет_шву():
     """Иначе шов описывает не то, что есть, а то, что хотелось бы."""
     from loom_stage.executor import ShardExecutor
 
-    for name in ("forward", "sample", "free", "serialize", "deserialize",
-                 "active_requests"):
+    for name in CONTRACT:
         assert hasattr(ShardExecutor, name), f"нет {name}"
+    assert ShardExecutor.batches is False
+
+
+def test_движок_vllm_удовлетворяет_тому_же_шву():
+    """Проверяется класс, а не работающий движок: сам vLLM без карты не
+    поднимется, но контракт должен сходиться и на машине без неё — иначе
+    расхождение найдётся только на узле, посреди первого запроса."""
+    from loom_stage.vllm_engine import VllmEngine
+
+    for name in CONTRACT:
+        assert hasattr(VllmEngine, name), f"нет {name}"
+    assert VllmEngine.batches is True
+
+
+def test_vllm_без_пути_к_весам_отказывает_внятно():
+    with pytest.raises(EngineRefused, match="грузит их сам"):
+        build("vllm")
+
+
+def test_vllm_без_числа_слоёв_отказывает_внятно():
+    """Без него он не знает, эта ли стадия последняя, и не соберёт lm_head."""
+    with pytest.raises(EngineRefused, match="не соберёт lm_head"):
+        build("vllm", model_path="/где-то/модель")
+
+
+def test_переносимому_движку_нужна_собранная_стадия():
+    with pytest.raises(EngineRefused, match="её не дали"):
+        build("torch")
 
 
 def test_неизвестный_движок_называет_известные():

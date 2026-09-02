@@ -32,13 +32,9 @@ import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Deque, Dict, List, Optional
 
-from loom_stage.executor import ShardExecutor
-from loom_stage.loader import (
-    ShardSpec,
-    build_shard,
-    build_stage_checkpoint_view,
-    resolve_model_path,
-)
+from loom_stage import pipeline
+from loom_stage.loader import ShardSpec, build_shard, resolve_model_path
+from loom_stage.scheduler import Full, Scheduler, Sequence
 
 logger = logging.getLogger("loom_stage.server")
 
@@ -119,35 +115,14 @@ def announce(port: int) -> None:
 
 
 # ------------------------------------------------------------- head bookkeeping
-class PendingRequest:
-    """Head-side state: waits for tokens coming back from the last stage."""
-
-    def __init__(self, request_id: str) -> None:
-        self.request_id = request_id
-        self.tokens: "queue.Queue[dict]" = queue.Queue()
+# Кто ведёт конвейер, зависит от места стадии: голова (`pipeline.Head`) держит
+# очередь и один считающий поток, все прочие (`pipeline.Stage`) считают то, что
+# прислали. Оба живут в STATE, потому что до них добираются три разных потока:
+# HTTP, приём сообщений и сам цикл.
 
 
-PENDING: Dict[str, PendingRequest] = {}
-PENDING_LOCK = threading.Lock()
-
-
-def _tensor_payload(executor: ShardExecutor, hidden) -> dict:
-    import base64
-
-    data, shape, dtype = executor.serialize(hidden)
-    return {
-        "tensor_b64": base64.b64encode(data).decode(),
-        "shape": shape,
-        "dtype": dtype,
-    }
-
-
-def _decode_tensor(executor: ShardExecutor, payload: dict):
-    import base64
-
-    return executor.deserialize(
-        base64.b64decode(payload["tensor_b64"]), payload["shape"], payload["dtype"]
-    )
+def head() -> pipeline.Head:
+    return STATE["head"]
 
 
 # --------------------------------------------------------- measured speed
@@ -248,101 +223,43 @@ def _describe_failure(exc: BaseException, topology: dict) -> str:
 
 
 def handle_stage_message(msg: dict) -> None:
-    """Process one inter-stage message on this stage."""
-    executor: ShardExecutor = STATE["executor"]
-    topology = STATE["topology"]
+    """Одно межстадийное сообщение.
+
+    Разбор кончается здесь: дальше сообщение уходит либо в голову, либо в
+    стадию, и обе они ничего не знают ни про HTTP, ни про агента.
+    """
     kind = msg.get("kind")
-    request_id = msg.get("request_id", "")
+    topology = STATE["topology"]
+    if not STATE.get("ready"):
+        # Веса грузятся минутами, а сосед может успеть прислать активации
+        # раньше. Сказать об этом внятно лучше, чем KeyError по имени, которого
+        # ещё нет в STATE, — по нему не видно даже, что стадия просто не готова.
+        logger.warning("сообщение %s пришло, пока стадия грузит веса — отбрасываю",
+                       kind)
+        return
 
     if kind == "free":
-        executor.free(request_id)
-        with PENDING_LOCK:
-            PENDING.pop(request_id, None)
+        request_id = msg.get("request_id", "")
+        if topology["is_first"]:
+            head().cancel(request_id)
+        else:
+            STATE["stage"].on_free(request_id)
         return
 
-    if kind == "token":
-        # Head stage: the last stage returned a sampled token.
-        with PENDING_LOCK:
-            pending = PENDING.get(request_id)
-        if pending is not None:
-            pending.tokens.put(msg)
+    if kind in ("tokens", "error") and topology["is_first"]:
+        head().on_returned(msg)
         return
 
-    if kind == "error":
-        with PENDING_LOCK:
-            pending = PENDING.get(request_id)
-        if pending is not None:
-            pending.tokens.put({"kind": "error", "error": msg.get("error", "stage failed")})
+    if kind == "activations":
+        if topology["is_first"]:
+            # Голова активаций не принимает: она их только рассылает. Приход
+            # такого сообщения означает, что кольцо замкнулось не туда.
+            logger.error("голова получила активации — адресация конвейера сбита")
+            return
+        STATE["stage"].on_activations(msg)
         return
 
-    if kind != "activations":
-        logger.warning("unknown stage message kind: %s", kind)
-        return
-
-    positions = list(msg.get("positions") or [])
-    hidden = _decode_tensor(executor, msg)
-    # Everything this stage adds to the token's latency: decode of the incoming
-    # tensor is already done, so this is the forward (plus sampling on the tail).
-    stage_started = time.perf_counter()
-    try:
-        out_hidden, logits = executor.forward(
-            request_id=request_id, positions=positions, hidden=hidden
-        )
-    except Exception as exc:
-        logger.exception("stage forward failed")
-        relay(
-            {
-                "kind": "error",
-                "request_id": request_id,
-                "target_stage": 0,
-                "error": _describe_failure(exc, topology),
-            }
-        )
-        return
-
-    layers = STATE.get("layer_range") or [0, 0]
-    if topology["is_last"]:
-        sampling = msg.get("sampling") or {}
-        token = executor.sample(
-            logits,
-            temperature=sampling.get("temperature", 0.0),
-            top_p=sampling.get("top_p", 1.0),
-            seed=sampling.get("seed"),
-        )
-        compute_ms = (time.perf_counter() - stage_started) * 1000
-        SPEED.record(compute_ms, layers[1] - layers[0])
-        relay(
-            {
-                "kind": "token",
-                "request_id": request_id,
-                "target_stage": 0,
-                "token_id": token,
-                "step": msg.get("step", 0),
-                # Carried home so the head can subtract compute from the round
-                # trip and see the transport on its own.
-                "compute_ms": compute_ms,
-                "upstream_ms": float(msg.get("upstream_ms") or 0.0),
-                "hops": int(msg.get("hops") or 0) + 1,
-            }
-        )
-    else:
-        compute_ms = (time.perf_counter() - stage_started) * 1000
-        SPEED.record(compute_ms, layers[1] - layers[0])
-        relay(
-            {
-                "kind": "activations",
-                "request_id": request_id,
-                "target_stage": topology["stage_index"] + 1,
-                "step": msg.get("step", 0),
-                "positions": positions,
-                "sampling": msg.get("sampling"),
-                "compute_ms": compute_ms,
-                # Accumulate so the tail carries the whole pipeline's compute.
-                "upstream_ms": float(msg.get("upstream_ms") or 0.0) + compute_ms,
-                "hops": int(msg.get("hops") or 0) + 1,
-                **_tensor_payload(executor, out_hidden),
-            }
-        )
+    logger.warning("неизвестный вид межстадийного сообщения: %s", kind)
 
 
 # ------------------------------------------------------------------ generation
@@ -353,101 +270,77 @@ def generate(
     temperature: float,
     top_p: float,
     stream_cb=None,
+    on_open=None,
     template_kwargs: Optional[dict] = None,
 ) -> dict:
-    """Head-stage generation loop; returns the completion text and token counts."""
-    executor: ShardExecutor = STATE["executor"]
-    topology = STATE["topology"]
+    """Один клиентский запрос: поставить в очередь и читать токены.
+
+    Конвейер этот поток больше не ведёт — его ведёт один общий цикл, который
+    считает батчами. Отсюда видно только свой запрос, и это ровно то, что
+    клиенту нужно знать.
+    """
+    loop = head()
     tokenizer = STATE["tokenizer"]
-    eos_ids = set(STATE["eos_token_ids"])
 
     prompt_ids = _encode_chat(tokenizer, messages, template_kwargs)
-    request_id = uuid.uuid4().hex
-    pending = PendingRequest(request_id)
-    with PENDING_LOCK:
-        PENDING[request_id] = pending
+    sequence = Sequence(
+        request_id=uuid.uuid4().hex,
+        prompt_ids=prompt_ids,
+        temperature=temperature,
+        top_p=top_p,
+        max_tokens=max_tokens,
+    )
+    # Бросает Full, если мест нет. Зовущий на потоке открывает поток только
+    # после этой строки: начав его, отказать кодом ответа уже нельзя.
+    ticket = loop.submit(sequence)
+    if on_open is not None:
+        on_open()
 
     generated: List[int] = []
     finish_reason = "length"
-    # Timings are measured here, at the only place that sees the whole request:
-    # prefill, every hop between stages and sampling. A client can only guess
-    # at these from the outside, and for a pipeline the guess is worst.
     started_at = time.perf_counter()
     first_token_at: Optional[float] = None
     token_times: List[float] = []
-    # Per-token latency split. `head_ms` is this stage's own forward; `peer_ms`
-    # is what the other stages reported doing; whatever is left of the round
-    # trip is transport — the wire, the two relays and the orchestrator hop.
+    # Разбивка осталась пошаговой: шаг считал весь батч сразу, и делить его
+    # стоимость между участниками было бы выдумкой. Здесь она приписана тем
+    # токенам, которые этот шаг и выдал.
     head_times: List[float] = []
     peer_times: List[float] = []
     transport_times: List[float] = []
+    # Сколько последовательностей считалось вместе с этой. Единственное место,
+    # откуда видно, работает ли батчинг вообще: ответы остаются правильными и
+    # когда каждый запрос считается в одиночку — просто медленнее.
+    batch_sizes: List[int] = []
     try:
-        positions = list(range(len(prompt_ids)))
-        step_input = list(prompt_ids)
-        sampling = {"temperature": temperature, "top_p": top_p}
-        for step in range(max_tokens):
-            step_started = time.perf_counter()
-            hidden, logits = executor.forward(
-                request_id=request_id, positions=positions, input_ids=step_input
-            )
-            head_ms = (time.perf_counter() - step_started) * 1000
-            peer_ms = 0.0
-            if topology["num_stages"] == 1:
-                token = executor.sample(
-                    logits, temperature=temperature, top_p=top_p
-                )
-                head_ms = (time.perf_counter() - step_started) * 1000
-            else:
-                relay(
-                    {
-                        "kind": "activations",
-                        "request_id": request_id,
-                        "target_stage": 1,
-                        "step": step,
-                        "positions": positions,
-                        "sampling": sampling,
-                        "compute_ms": head_ms,
-                        "upstream_ms": head_ms,
-                        "hops": 1,
-                        **_tensor_payload(executor, hidden),
-                    }
-                )
-                msg = pending.tokens.get(timeout=STATE["stage_timeout_s"])
-                if msg.get("kind") == "error":
-                    raise RuntimeError(msg.get("error", "pipeline error"))
-                token = int(msg["token_id"])
-                # What every stage after this one spent: the tail carries the
-                # running total plus its own.
-                peer_ms = float(msg.get("upstream_ms") or 0.0) - head_ms
-                peer_ms += float(msg.get("compute_ms") or 0.0)
-
+        while True:
+            try:
+                event = ticket.next(STATE["stage_timeout_s"])
+            except queue.Empty:
+                raise RuntimeError(
+                    f"конвейер молчит дольше {STATE['stage_timeout_s']:g} с")
+            kind = event.get("kind")
+            if kind == "error":
+                raise RuntimeError(event.get("error", "конвейер не ответил"))
+            if kind == "done":
+                finish_reason = event.get("finish_reason", "length")
+                break
+            token = int(event["token_id"])
             now = time.perf_counter()
-            head_times.append(head_ms)
-            peer_times.append(max(0.0, peer_ms))
-            # No clock comparison anywhere: a duration measured here minus
-            # durations measured there. Both sides use their own monotonic
-            # clock, so unsynchronised machines cannot skew this.
-            transport_times.append(
-                max(0.0, (now - step_started) * 1000 - head_ms - max(0.0, peer_ms))
-            )
             if first_token_at is None:
                 first_token_at = now
             token_times.append(now)
+            head_times.append(float(event.get("head_ms") or 0.0))
+            peer_times.append(float(event.get("peer_ms") or 0.0))
+            transport_times.append(float(event.get("transport_ms") or 0.0))
+            batch_sizes.append(int(event.get("batch") or 1))
             generated.append(token)
             if stream_cb is not None:
                 stream_cb(tokenizer.decode([token], skip_special_tokens=True))
-            if token in eos_ids:
-                finish_reason = "stop"
-                break
-            positions = [len(prompt_ids) + len(generated) - 1]
-            step_input = [token]
     finally:
-        # Release KV state on every stage.
-        executor.free(request_id)
-        with PENDING_LOCK:
-            PENDING.pop(request_id, None)
-        if topology["num_stages"] > 1:
-            relay({"kind": "free", "request_id": request_id, "target_stage": -1})
+        # Клиент мог уйти посреди ответа, а мог дойти до конца — цикл в обоих
+        # случаях должен перестать считать этот запрос и отпустить его кэш на
+        # всех стадиях.
+        loop.cancel(sequence.request_id)
 
     text = tokenizer.decode(generated, skip_special_tokens=True)
     return {
@@ -463,6 +356,7 @@ def generate(
             head_times=head_times,
             peer_times=peer_times,
             transport_times=transport_times,
+            batch_sizes=batch_sizes,
         ),
     }
 
@@ -483,6 +377,7 @@ def _timings(
     head_times: Optional[List[float]] = None,
     peer_times: Optional[List[float]] = None,
     transport_times: Optional[List[float]] = None,
+    batch_sizes: Optional[List[int]] = None,
 ) -> dict:
     """Per-request numbers, in the units people actually compare.
 
@@ -518,6 +413,12 @@ def _timings(
         "inter_token_ms_max": round(gaps[-1], 1) if gaps else 0.0,
         "stages": int(topology.get("num_stages", 1)),
         "pipeline_id": topology.get("pipeline_id", ""),
+        # Средний и наибольший батч, в котором считался этот запрос. Единица
+        # означает, что он всё время был на узле один: батчинг тут не при чём,
+        # просто некого было к нему добавить.
+        "batch_avg": (round(sum(batch_sizes) / len(batch_sizes), 2)
+                      if batch_sizes else 1.0),
+        "batch_max": max(batch_sizes) if batch_sizes else 1,
         # Where each token's time actually goes. Decode steps only: the first
         # entry is prefill, whose cost is already reported as ttft.
         **_latency_split(head_times, peer_times, transport_times),
@@ -697,7 +598,14 @@ class Handler(BaseHTTPRequestHandler):
                     "stage": STATE.get("topology", {}).get("stage_index"),
                     "layers": STATE.get("layer_range"),
                     "active_requests": (
-                        STATE["executor"].active_requests() if ready else 0
+                        STATE["engine"].active_requests() if ready else 0
+                    ),
+                    # Сколько ещё влезет. Клиент, получивший отказ, должен
+                    # видеть отсюда, что узел действительно полон, а не молча
+                    # гадать.
+                    "queue": (
+                        STATE["head"].snapshot()
+                        if ready and STATE.get("head") is not None else None
                     ),
                     # None until enough steps have been seen; the planner then
                     # keeps using its roofline estimate instead of a warm-up
@@ -768,6 +676,13 @@ class Handler(BaseHTTPRequestHandler):
                     top_p=top_p,
                     template_kwargs=template_kwargs,
                 )
+            except Full as exc:
+                # 429, а не 500: узел исправен, он занят. Разница видна
+                # клиенту — на 500 повторять запрос бессмысленно, на 429
+                # осмысленно, и именно так поступают все библиотеки.
+                self._json(429, {"error": {"message": str(exc),
+                                           "type": "rate_limit_exceeded"}})
+                return
             except Exception as exc:
                 logger.exception("generation failed")
                 self._json(500, {"error": {"message": str(exc), "type": "server_error"}})
@@ -798,12 +713,16 @@ class Handler(BaseHTTPRequestHandler):
             )
             return
 
-        # Streaming (SSE, chunked).
-        self.send_response(200)
-        self.send_header("Content-Type", "text/event-stream")
-        self.send_header("Cache-Control", "no-cache")
-        self.send_header("Transfer-Encoding", "chunked")
-        self.end_headers()
+        # Streaming (SSE, chunked). Заголовки уходят не отсюда, а из
+        # `on_open` — то есть только после того, как запрос принят в очередь.
+        # Начав поток, отказать кодом ответа уже нельзя: остаётся строка внутри
+        # него, которую половина клиентов не покажет.
+        def on_open() -> None:
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Transfer-Encoding", "chunked")
+            self.end_headers()
 
         def emit(piece: str) -> None:
             event = {
@@ -815,6 +734,12 @@ class Handler(BaseHTTPRequestHandler):
             }
             self._chunk(f"data: {json.dumps(event)}\n\n")
 
+        opened = {"да": False}
+
+        def open_stream() -> None:
+            on_open()
+            opened["да"] = True
+
         try:
             result = generate(
                 messages,
@@ -822,28 +747,13 @@ class Handler(BaseHTTPRequestHandler):
                 temperature=temperature,
                 top_p=top_p,
                 stream_cb=emit,
+                on_open=open_stream,
                 template_kwargs=template_kwargs,
             )
-            # The closing chunk carries the counts and timings (what OpenAI
-            # calls stream_options.include_usage). Without it a streaming
-            # client has to guess token counts from the number of deltas.
-            final = {
-                "id": chat_id,
-                "object": "chat.completion.chunk",
-                "created": created,
-                "model": model_id,
-                "choices": [
-                    {"index": 0, "delta": {}, "finish_reason": result["finish_reason"]}
-                ],
-                "usage": {
-                    "prompt_tokens": result["prompt_tokens"],
-                    "completion_tokens": result["completion_tokens"],
-                    "total_tokens": result["prompt_tokens"] + result["completion_tokens"],
-                },
-                "timings": result["timings"],
-            }
-            self._chunk(f"data: {json.dumps(final)}\n\n")
-            self._chunk("data: [DONE]\n\n")
+        except Full as exc:
+            self._json(429, {"error": {"message": str(exc),
+                                       "type": "rate_limit_exceeded"}})
+            return
         except Exception as exc:
             logger.exception("streaming generation failed")
             # A failure raised HERE is the head's own. One raised on another
@@ -854,9 +764,37 @@ class Handler(BaseHTTPRequestHandler):
                 if str(exc).startswith("stage ")
                 else _describe_failure(exc, STATE.get("topology") or {})
             )
+            if not opened["да"]:
+                # Поток не открылся — значит заголовков ещё не было, и отказать
+                # можно кодом ответа, а не строкой внутри тела.
+                self._json(500, {"error": {"message": described,
+                                           "type": "server_error"}})
+                return
             self._chunk(f"data: {json.dumps({'error': described})}\n\n")
-        finally:
             self._chunk("")
+            return
+
+        # The closing chunk carries the counts and timings (what OpenAI calls
+        # stream_options.include_usage). Without it a streaming client has to
+        # guess token counts from the number of deltas.
+        final = {
+            "id": chat_id,
+            "object": "chat.completion.chunk",
+            "created": created,
+            "model": model_id,
+            "choices": [
+                {"index": 0, "delta": {}, "finish_reason": result["finish_reason"]}
+            ],
+            "usage": {
+                "prompt_tokens": result["prompt_tokens"],
+                "completion_tokens": result["completion_tokens"],
+                "total_tokens": result["prompt_tokens"] + result["completion_tokens"],
+            },
+            "timings": result["timings"],
+        }
+        self._chunk(f"data: {json.dumps(final)}\n\n")
+        self._chunk("data: [DONE]\n\n")
+        self._chunk("")
 
     def _chunk(self, data: str) -> None:
         raw = data.encode()
@@ -892,6 +830,31 @@ def _watch_parent(poll_s: float = 2.0) -> None:
 
 
 # ----------------------------------------------------------------------- main
+def _build_engine(args, spec: ShardSpec):
+    """Собрать то, что будет считать слои, и вернуть его вместе с конфигом.
+
+    Конфиг нужен ровно за одним: за списком токенов конца строки. Читается он
+    отсюда, а не из движка, потому что у vLLM своя модель конфигурации, а
+    останавливать генерацию надо одинаково на обоих.
+    """
+    from transformers import AutoConfig
+
+    from loom_stage import engine as engines
+
+    if args.engine == "vllm":
+        num_layers = args.num_model_layers or getattr(
+            AutoConfig.from_pretrained(spec.model_path), "num_hidden_layers", 0)
+        built = engines.build(
+            "vllm", model_path=spec.model_path, start_layer=args.start_layer,
+            end_layer=args.end_layer, num_model_layers=num_layers,
+            dtype=args.dtype, vram_quota_bytes=args.vram_quota_bytes,
+            max_requests=args.max_sequences)
+        return built, AutoConfig.from_pretrained(spec.model_path)
+
+    shard, config = build_shard(spec)
+    return engines.build("torch", shard, max_requests=args.max_sequences), config
+
+
 def main(argv=None) -> None:
     parser = argparse.ArgumentParser(description="Loom pipeline-stage server")
     parser.add_argument("--model-id", required=True)
@@ -914,12 +877,13 @@ def main(argv=None) -> None:
         "--stage-timeout-s", type=float, default=float(os.environ.get("LOOM_STAGE_TIMEOUT_S", "120"))
     )
     parser.add_argument(
-        "--unused-engine",
-        choices=("torch", "vllm", "mlx"),
+        "--engine",
+        choices=("torch", "vllm"),
         default=os.environ.get("LOOM_STAGE_ENGINE", "torch"),
         help=(
-            "what runs the layers: transformers (portable), vLLM (fast, CUDA "
-            "only) or MLX (Apple Silicon)"
+            "чем считать слои: transformers (переносимо, работает на CPU) или "
+            "vLLM (батч из нескольких последовательностей в одном шаге, только "
+            "CUDA)"
         ),
     )
     parser.add_argument(
@@ -929,6 +893,15 @@ def main(argv=None) -> None:
         help="layers in the whole model; the vLLM engine needs it to know if "
         "this stage is the tail",
     )
+    parser.add_argument(
+        "--max-sequences", type=int,
+        default=int(os.environ.get("LOOM_MAX_SEQUENCES", "64")),
+        help="сколько запросов держать одновременно; сверх этого — честный "
+             "отказ, а не вытеснение чужого кэша")
+    parser.add_argument(
+        "--max-batch-tokens", type=int,
+        default=int(os.environ.get("LOOM_MAX_BATCH_TOKENS", "8192")),
+        help="сколько токенов промпта считать за один шаг")
     parser.add_argument(
         "--vram-quota-bytes",
         type=int,
@@ -981,12 +954,10 @@ def main(argv=None) -> None:
         device=args.device,
         dtype=args.dtype,
     )
-    # Fetch only the safetensors files this stage's layers live in. Other
-    # engines (vLLM, MLX) are their own payloads: a payload carries one way of
-    # running a model, and mixing them is how an image ends up carrying three.
+    # Fetch only the safetensors files this stage's layers live in.
     spec.model_path = resolve_model_path(args.weights_uri, shard=spec)
-    shard, config = build_shard(spec)
-    STATE["executor"] = ShardExecutor(shard)
+    engine, config = _build_engine(args, spec)
+    STATE["engine"] = engine
 
     if is_first or is_last:
         from transformers import AutoTokenizer
@@ -996,6 +967,20 @@ def main(argv=None) -> None:
     STATE["eos_token_ids"] = (
         [eos] if isinstance(eos, int) else list(eos or [])
     )
+
+    layers = args.end_layer - args.start_layer
+    if is_first:
+        STATE["head"] = pipeline.Head(
+            engine, num_stages=args.num_stages, send=relay,
+            eos_ids=STATE["eos_token_ids"], timeout_s=args.stage_timeout_s,
+            scheduler=Scheduler(max_sequences=args.max_sequences,
+                                max_batch_tokens=args.max_batch_tokens),
+            on_step=lambda ms, size: SPEED.record(ms, layers))
+        STATE["head"].start()
+    else:
+        STATE["stage"] = pipeline.Stage(
+            engine, stage_index=args.stage_index, is_last=is_last, send=relay,
+            on_step=lambda ms, size: SPEED.record(ms, layers))
     STATE["ready"] = True
     # Exit immediately on SIGTERM: a redeploy must not wait out a 30s kill
     # timeout, and the freed VRAM should be reusable at once.

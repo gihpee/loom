@@ -229,3 +229,87 @@ class ShardExecutor:
         # Whatever arrived, in the dtype it was sent as. The layers convert it
         # themselves on the first matmul, so there is nothing to cast here.
         return from_wire(self.torch, data, shape, dtype)
+
+    # ------------------------------------------------------------- батч
+    #: Считать несколько последовательностей одним прогоном этот исполнитель
+    #: не умеет: плотная каузальная маска дала бы каждой следующей видеть
+    #: предыдущую. Он прогоняет их по одной и складывает результат так же,
+    #: как сложил бы настоящий батч, — чтобы протокол между стадиями был один
+    #: на оба движка. Пропускная способность от этого не растёт.
+    batches = False
+
+    def step_batch(self, sequences, *, incoming=None, first_step: bool):
+        """Батч по одной последовательности за раз.
+
+        Границы внутри общего тензора заданы только составом батча, поэтому
+        нарезка входа и склейка выхода идут по тем же ширинам, что и у
+        настоящего батча, и в том же порядке.
+        """
+        from loom_stage import batch_wire
+
+        torch = self.torch
+        batch = list(sequences)
+        widths = batch_wire.widths(batch, first_step=first_step)
+        pieces = None
+        if not self.spec.is_first:
+            pieces = self._slice_incoming(incoming, widths, batch,
+                                          first_step=first_step)
+
+        hiddens, rows = [], []
+        for index, sequence in enumerate(batch):
+            positions, input_ids = self._where(sequence, first_step=first_step)
+            hidden, logits = self.forward(
+                request_id=sequence.request_id, positions=positions,
+                input_ids=input_ids if self.spec.is_first else None,
+                hidden=None if self.spec.is_first else pieces[index])
+            if self.spec.is_last:
+                rows.append(logits)
+            else:
+                hiddens.append(hidden if hidden.dim() == 3 else hidden.unsqueeze(0))
+
+        if self.spec.is_last:
+            return None, torch.stack(rows)
+        # По второй оси: токены разных последовательностей лежат подряд, как и
+        # у настоящего батча, — иначе следующая стадия нарежет не по тем
+        # границам и ошибки не будет, будет чушь.
+        return {"hidden_states": torch.cat(hiddens, dim=1)}, None
+
+    def _where(self, sequence, *, first_step: bool):
+        """Какие позиции и какие токены считает эта последовательность.
+
+        Позиции берутся из состояния самой последовательности, а не из счётчика
+        снаружи: батч живёт дольше одного шага, и запросы в нём разной длины.
+        """
+        if first_step:
+            return list(range(len(sequence.prompt_ids))), list(sequence.prompt_ids)
+        last = sequence.output_ids[-1] if sequence.output_ids else (
+            sequence.prompt_ids[-1] if sequence.prompt_ids else 0)
+        return [sequence.computed], [last]
+
+    def _slice_incoming(self, incoming, widths, batch, *, first_step: bool):
+        """Разложить общий тензор обратно по последовательностям."""
+        from loom_stage import batch_wire
+
+        if not incoming:
+            raise ValueError("non-first stage requires hidden states")
+        tensor = incoming.get("hidden_states")
+        if tensor is None:
+            raise ValueError(
+                f"в тензорах нет hidden_states, есть {sorted(incoming)}")
+        flat = tensor if tensor.dim() == 2 else tensor[0]
+        batch_wire.check_tokens(batch, int(flat.shape[0]), first_step=first_step)
+        pieces, at = [], 0
+        for width in widths:
+            pieces.append(flat[at:at + width].unsqueeze(0))
+            at += width
+        return pieces
+
+    def sample_batch(self, logits, sequences) -> List[int]:
+        """По токену на последовательность, в порядке батча."""
+        from loom_stage import batch_wire
+
+        rows = logits if logits.dim() > 1 else logits[None]
+        batch_wire.check_rows(list(sequences), int(rows.shape[0]))
+        return [self.sample(row, temperature=sequence.temperature,
+                            top_p=sequence.top_p, seed=sequence.seed)
+                for row, sequence in zip(rows, sequences)]
