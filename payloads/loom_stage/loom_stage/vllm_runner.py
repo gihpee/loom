@@ -101,6 +101,52 @@ def coordinator_for(start_layer: int, end_layer: int, num_layers: int):
     return StageGroupCoordinator
 
 
+def _kv_spec_of(runner):
+    """Спросить у модели, какой ей нужен KV-кэш.
+
+    Спрашивать приходится с оговоркой: vLLM оборачивает модель в
+    cudagraph-обёртку, и та НЕ пропускает `get_kv_cache_spec` — обращение
+    падает с «not exists in the runnable of cudagraph wrapper».
+
+    У первоисточника здесь запасной путь: посчитать форму кэша по конфигу
+    модели — число голов, размер головы. Мы так не делаем. Неверная форма
+    кэша не падает, она портит внимание: ответы остаются связными и
+    становятся неправильными, и найти это можно только по качеству.
+
+    Поэтому обёртку снимают, а не обходят.
+    """
+    tried = []
+    for name, candidate in _unwrap(runner):
+        tried.append(name)
+        ask = getattr(candidate, "get_kv_cache_spec", None)
+        if ask is None:
+            continue
+        try:
+            return ask()
+        except AttributeError:
+            continue      # ещё одна обёртка, идём глубже
+    raise RunnerRefused(
+        "ни один слой обёрток не рассказал про KV-кэш (смотрели: "
+        + ", ".join(tried) + "). Угадывать его форму нельзя: неверная не "
+        "падает, а портит внимание")
+
+
+def _unwrap(runner):
+    """Модель и всё, во что её завернули, от внешнего к настоящему."""
+    get_model = getattr(runner, "get_model", None)
+    if callable(get_model):
+        try:
+            yield "runner.get_model()", get_model()
+        except Exception:
+            pass
+    model = getattr(runner, "model", None)
+    seen = 0
+    while model is not None and seen < 5:
+        yield f"model{'.runnable' * seen}", model
+        model = getattr(model, "runnable", None) or getattr(model, "module", None)
+        seen += 1
+
+
 def stage_runner_class(start_layer: int, end_layer: int, num_layers: int):
     """Исполнитель vLLM, знающий свой срез.
 
@@ -138,13 +184,7 @@ def stage_runner_class(start_layer: int, end_layer: int, num_layers: int):
                                                      get_kv_cache_configs)
             from vllm.v1.core.kv_cache_manager import KVCacheManager
 
-            try:
-                spec = self.model.get_kv_cache_spec()
-            except AttributeError as exc:
-                raise RunnerRefused(
-                    f"модель не рассказывает про свой KV-кэш ({exc}); без этого "
-                    "его форму пришлось бы угадывать, а неверная форма не "
-                    "падает — она портит внимание") from None
+            spec = _kv_spec_of(self)
 
             free, _total = torch.cuda.mem_get_info(self.device.index or 0)
             available = int(free * self.cache_config.gpu_memory_utilization)

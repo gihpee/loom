@@ -99,3 +99,87 @@ def test_без_vllm_отказ_называет_причину(monkeypatch):
     with pytest.raises(RunnerRefused, match="версию"):
         with layer_range(0, 12):
             pass
+
+
+# ---------------------------------------------------- спецификация KV-кэша
+class Wrapper:
+    """Обёртка vLLM: держит модель и НЕ пропускает её методы.
+
+    Ровно так ведёт себя cudagraph-обёртка — обращение падает с
+    «not exists in the runnable of cudagraph wrapper».
+    """
+
+    def __init__(self, runnable) -> None:
+        self.runnable = runnable
+
+    def __getattr__(self, name):
+        raise AttributeError(
+            f"Attribute {name} not exists in the runnable of cudagraph wrapper")
+
+
+class Model:
+    def __init__(self, spec="спецификация") -> None:
+        self.spec = spec
+
+    def get_kv_cache_spec(self):
+        return self.spec
+
+
+def test_обёртка_снимается_а_не_обходится():
+    """У первоисточника тут запасной путь — посчитать форму кэша по конфигу.
+    Мы так не делаем: неверная форма не падает, она портит внимание."""
+    from loom_stage.vllm_runner import _kv_spec_of
+
+    runner = types.SimpleNamespace(model=Wrapper(Model()))
+    assert _kv_spec_of(runner) == "спецификация"
+
+
+def test_несколько_слоёв_обёрток_тоже_снимаются():
+    from loom_stage.vllm_runner import _kv_spec_of
+
+    runner = types.SimpleNamespace(model=Wrapper(Wrapper(Model())))
+    assert _kv_spec_of(runner) == "спецификация"
+
+
+def test_голая_модель_отвечает_сразу():
+    from loom_stage.vllm_runner import _kv_spec_of
+
+    assert _kv_spec_of(types.SimpleNamespace(model=Model())) == "спецификация"
+
+
+def test_путь_через_get_model_предпочтителен():
+    """Он есть у самого vLLM и отдаёт настоящую модель — этим и надо
+    пользоваться, пока он работает."""
+    from loom_stage.vllm_runner import _kv_spec_of
+
+    runner = types.SimpleNamespace(
+        get_model=lambda: Model("из get_model"), model=Wrapper(Model("из обёртки")))
+    assert _kv_spec_of(runner) == "из get_model"
+
+
+def test_сломанный_get_model_не_мешает_остальным():
+    from loom_stage.vllm_runner import _kv_spec_of
+
+    def broken():
+        raise RuntimeError("не сейчас")
+
+    runner = types.SimpleNamespace(get_model=broken, model=Wrapper(Model()))
+    assert _kv_spec_of(runner) == "спецификация"
+
+
+def test_если_никто_не_ответил_отказ_перечисляет_где_смотрели():
+    from loom_stage.vllm_runner import _kv_spec_of
+
+    runner = types.SimpleNamespace(model=Wrapper(Wrapper(Wrapper(object()))))
+    with pytest.raises(RunnerRefused, match="смотрели"):
+        _kv_spec_of(runner)
+
+
+def test_бесконечная_матрёшка_не_вешает():
+    """Обёртка, ссылающаяся на себя, встречается реже, чем хотелось бы."""
+    from loom_stage.vllm_runner import _kv_spec_of
+
+    loop = types.SimpleNamespace()
+    loop.runnable = loop
+    with pytest.raises(RunnerRefused):
+        _kv_spec_of(types.SimpleNamespace(model=loop))
