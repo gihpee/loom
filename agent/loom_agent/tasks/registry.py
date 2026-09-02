@@ -63,6 +63,27 @@ logger = logging.getLogger("loom_agent.tasks.registry")
 RETENTION_S = float(os.environ.get("LOOM_TASK_RETENTION_S", "3600"))
 
 
+def _hand_over(path, isolation) -> None:
+    """Отдать каталог тому, кто будет в него писать.
+
+    Кэш окружений собирает агент, а кэш весов наполняет сама задача — под
+    своим, непривилегированным пользователем. Каталог, созданный агентом,
+    остаётся его собственным, и задача молча не может в него писать: HuggingFace
+    в этом случае не падает, он тихо качает мимо кэша, и заметно это только по
+    времени запуска.
+    """
+    import os
+
+    if isolation.uid is None or isolation.gid is None:
+        return
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+        os.chown(path, isolation.uid, isolation.gid)
+    except OSError as exc:
+        logger.warning("кэш весов %s остался чужим (%s) — задачи будут качать "
+                       "модели каждый раз заново", path, exc)
+
+
 class TaskRegistry:
     def __init__(
         self,
@@ -70,12 +91,18 @@ class TaskRegistry:
         root: Path,
         isolation: Isolation,
         environments: EnvironmentCache,
+        models=None,
         total_gpus: int = 0,
         retention_s: float = RETENTION_S,
     ) -> None:
         self.root = root
         self.isolation = isolation
         self.environments = environments
+        # Кэш весов общий на узел, и писать в него будет сама задача — значит
+        # он должен принадлежать ей, а не агенту.
+        self.models = models
+        if self.models is not None:
+            _hand_over(self.models.root, isolation)
         self.total_gpus = max(0, int(total_gpus))
         self.retention_s = retention_s
         self._tasks: Dict[str, Task] = {}
@@ -168,7 +195,8 @@ class TaskRegistry:
                 deliver_input(directory.inbox(
                     self.isolation, limit_bytes=spec.resources.disk_bytes))
             task = Task(spec, directory, self.isolation, devices, environment,
-                        group=group, channel_url=self.channel_url)
+                        group=group, channel_url=self.channel_url,
+                        models=self.models)
             task.start()
         except TaskRefused:
             self._undo(spec.task_id, directory, environment)
@@ -257,6 +285,7 @@ class TaskRegistry:
                 "gpus_total": self.total_gpus,
                 "gpus_free": len(self.free_devices()),
                 "environments": self.environments.snapshot(),
+                "models": self.models.snapshot() if self.models else None,
             }
 
     # ----------------------------------------------------------------- writes
@@ -276,6 +305,11 @@ class TaskRegistry:
             task.wait(timeout=30)
         self._release_devices(task_id)
         task.directory.remove()
+        # Место освободилось — самое время посмотреть, не пора ли убрать
+        # давние веса. Здесь, а не при запуске: на запуске задача уже ждёт, и
+        # обход кэша добавил бы ей задержку ни за что.
+        if self.models is not None:
+            self.models.sweep()
 
     def drain(self, timeout_s: float, *, reason: str = "this node is restarting") -> bool:
         """Take no new work and let what is running finish.

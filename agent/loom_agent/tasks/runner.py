@@ -46,12 +46,16 @@ class Task:
         environment: Environment = NO_ENVIRONMENT,
         group=None,
         channel_url: str = "",
+        models=None,
     ) -> None:
         self.spec = spec
         self.directory = directory
         self.isolation = isolation
         self.devices = tuple(devices)
         self.environment = environment
+        # Общий на узел кэш весов. Может отсутствовать: без него задача просто
+        # скачает их себе, как раньше.
+        self.models = models
         # Where this task sits in a job spread over several nodes, and how to
         # reach the agent. Both absent for an ordinary one-node task.
         self.group = group
@@ -113,6 +117,22 @@ class Task:
         threading.Thread(target=self._watch, name=f"task-{self.spec.task_id}",
                          daemon=True).start()
 
+    def _model_cache_env(self) -> dict:
+        """Куда задаче складывать скачанные веса.
+
+        Без этого HuggingFace кладёт их в `HOME`, то есть в каталог задачи, и
+        они умирают вместе с ней: одна и та же модель приезжает заново при
+        каждом запуске.
+
+        Задаче в образе не даётся ничего: она видит только свой rootfs, а
+        внешний путь ей ничего не говорит. Показать каталог снаружи можно было
+        бы только монтированием, а это те самые привилегии, которых вся
+        конструкция избегает. Такая задача качает веса себе, как раньше.
+        """
+        if self.models is None or self.directory.rootfs is not None:
+            return {}
+        return self.models.env(str(self.models.root))
+
     def _enter_image(self) -> None:
         """Give this task its own copy of the image it asked for.
 
@@ -160,6 +180,7 @@ class Task:
             # делится, и два таких соседа выедают её вдвоём.
             "LOOM_TASK_CPUS": str(self.spec.resources.cpus),
         }
+        env.update(self._model_cache_env())
         if self.spec.serve_port:
             env["LOOM_SERVE_PORT"] = str(self.spec.serve_port)
         if self.channel_url:

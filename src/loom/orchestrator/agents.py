@@ -206,6 +206,9 @@ class AgentNode:
     gpus_free: int = 0
     tasks_running: int = 0
     env_cache_bytes: int = 0
+    #: Сколько занимают скачанные веса. Растёт быстрее окружений, и владелец
+    #: узла должен видеть, за что отдал диск.
+    model_cache_bytes: int = 0
     peer_id: str = ""
     symmetric_nat: bool = False
     reachable: bool = False
@@ -237,6 +240,7 @@ class AgentNode:
             "environment_kinds": list(self.environment_kinds),
             "tasks_running": self.tasks_running,
             "env_cache_bytes": self.env_cache_bytes,
+            "model_cache_bytes": self.model_cache_bytes,
             "peer_id": self.peer_id,
             "symmetric_nat": self.symmetric_nat,
             "reachable": self.reachable,
@@ -1044,6 +1048,7 @@ class AgentHub:
         node.gpus_free = report.gpus_free
         node.tasks_running = report.tasks_running
         node.env_cache_bytes = report.env_cache_bytes
+        node.model_cache_bytes = report.model_cache_bytes
         peer = report.peer
         node.peer_id = peer.peer_id or node.peer_id
         node.symmetric_nat = peer.symmetric_nat

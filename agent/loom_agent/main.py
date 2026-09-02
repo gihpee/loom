@@ -33,6 +33,7 @@ from loom_agent.p2p.layer import PeerLayer
 from loom_agent.tasks.env import EnvironmentCache
 from loom_agent.tasks.env.cache import BUILDERS as ENVIRONMENT_KINDS
 from loom_agent.tasks.limits import resolve_isolation
+from loom_agent.tasks.models import ModelCache
 from loom_agent.tasks.registry import TaskRegistry
 from loom_agent.update import Updater, mark_healthy
 from loom_agent.control.tasks import TaskCommands
@@ -89,6 +90,7 @@ class Agent:
             root=config.tasks_dir,
             isolation=self.isolation,
             environments=EnvironmentCache(config.envs_dir),
+            models=ModelCache(config.models_dir),
             total_gpus=self.hardware.num_gpus,
         )
         # Inbound direct messages go to the task machinery, which is built
@@ -176,6 +178,7 @@ class Agent:
             gpus_free=snapshot["gpus_free"],
             tasks_running=snapshot["running"],
             env_cache_bytes=snapshot["environments"]["bytes"],
+            model_cache_bytes=(snapshot["models"] or {}).get("bytes", 0),
             # Идёт ли трафик к соседям напрямую. Без этого «конвейер тормозит»
             # и «каждая активация едет длинным путём» выглядят одинаково.
             peer=self.peers.status(),

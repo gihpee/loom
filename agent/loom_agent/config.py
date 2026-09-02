@@ -31,6 +31,12 @@ class Config:
     def envs_dir(self) -> Path:
         return self.root / "envs"
 
+    @property
+    def models_dir(self) -> Path:
+        """Веса. Рядом с окружениями и по той же причине: и то и другое
+        переживает задачу, которая их запросила."""
+        return self.root / "models"
+
 
 def parse_args(argv=None) -> Config:
     parser = argparse.ArgumentParser(prog="loom-agent")

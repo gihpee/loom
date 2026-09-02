@@ -136,6 +136,11 @@ export function Nodes() {
               <div className="value">{gb(current.env_cache_bytes)}<small> GB</small></div>
               <div className="sub">{current.environment_kinds.join(", ") || "—"}</div>
             </div>
+            <div className="card stat">
+              <div className="label">Кэш моделей</div>
+              <div className="value">{gb(current.model_cache_bytes)}<small> GB</small></div>
+              <div className="sub">веса, скачанные один раз на узел</div>
+            </div>
           </div>
 
           <section>
