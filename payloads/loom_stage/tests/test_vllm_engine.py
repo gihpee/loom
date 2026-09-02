@@ -89,6 +89,33 @@ def test_несовпадение_числа_слоёв_отвергается(m
                                num_model_layers=36)
 
 
+def test_конфиг_ставится_раньше_распределённой_группы(monkeypatch):
+    """Свежий vLLM спрашивает конфиг уже внутри `initialize_model_parallel`.
+
+    Поставь его позже — падает на assert'е, в котором про конвейер нет ни
+    слова: «Current vLLM config is not set... or a CustomOp was instantiated at
+    module import time». Порядок этих двух шагов и есть весь смысл теста.
+    """
+    порядок = []
+    monkeypatch.setattr(vllm_engine, "require_cuda", lambda: None)
+    monkeypatch.setattr(vllm_engine, "_build_config", lambda *a, **k: _FakeConfig())
+    monkeypatch.setattr(vllm_engine, "_hold_config",
+                        lambda _c: порядок.append("конфиг"))
+    monkeypatch.setattr(vllm_engine, "_start_distributed",
+                        lambda: порядок.append("группа"))
+    monkeypatch.setattr(vllm_engine, "replace_pipeline_group",
+                        lambda *a, **k: порядок.append("подмена"))
+    monkeypatch.setattr(vllm_engine, "layer_range", _nothing)
+    monkeypatch.setattr(vllm_engine, "_count_layers", lambda _r: 18)
+    monkeypatch.setattr(vllm_engine, "stage_runner_class", lambda *_a: _FakeRunner)
+    monkeypatch.setattr(vllm_engine, "prepare_weights", lambda weights, **_k: weights)
+    monkeypatch.setattr("loom_stage.vllm_patch.allow_missing_ends", lambda **_k: None)
+
+    vllm_engine.load_shard("модель", start_layer=0, end_layer=18,
+                           num_model_layers=36)
+    assert порядок == ["конфиг", "группа", "подмена"]
+
+
 def test_негодный_срез_отвергается_до_загрузки(monkeypatch):
     monkeypatch.setattr(vllm_engine, "require_cuda", lambda: None)
     with pytest.raises(RunnerRefused, match="не помещается"):

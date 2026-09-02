@@ -24,7 +24,14 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from loom.logging_config import get_logger
 from loom.orchestrator.agents import AgentError
-from loom.orchestrator.models import ModelError, describe, split_layers, stage_payload
+from loom.orchestrator.models import (
+    ModelError,
+    describe,
+    split_layers,
+    stage_payload,
+    stage_requirements,
+    vllm_refusal,
+)
 from loom.orchestrator.connectivity import prefer_meshy, verdict
 from loom.orchestrator.payloads import PayloadMissing, ray_payload
 from loom.orchestrator.rendezvous import relay_addrs
@@ -517,6 +524,14 @@ def create_app(*, agents=None, releases=None, keystore=None, config=None,
             # эмбеддинги, так что ей полезнее место.
             chosen = sorted(available, key=lambda n: -n["vram_free_bytes"])[:stages]
 
+        if engine == "vllm":
+            # Проверяется каждый выбранный узел, а не первый: конвейер встанет
+            # ровно настолько, насколько встанет его худшая стадия, и узнать,
+            # какая именно, лучше сейчас.
+            refusals = [reason for reason in (vllm_refusal(n) for n in chosen) if reason]
+            if refusals:
+                return _error(409, "; ".join(refusals))
+
         weights = [n["vram_free_bytes"] for n in chosen] if raw.get("by_vram", True) else None
         try:
             ranges = split_layers(model.num_layers, len(chosen), weights)
@@ -551,9 +566,8 @@ def create_app(*, agents=None, releases=None, keystore=None, config=None,
                 serve_port=1,
                 # Веса модели качает сама стадия — сюда едет только её код.
                 inputs=payload,
-                environment={"kind": "python", "requirements": [
-                    "torch", "transformers", "safetensors", "huggingface-hub",
-                ] + (["vllm"] if engine == "vllm" else [])},
+                environment={"kind": "python",
+                             "requirements": stage_requirements(engine)},
                 # Без потолка: стадия живёт, пока модель развёрнута.
                 timeout_s=raw.get("timeout_s") or 30 * 24 * 3600,
                 env={"HF_TOKEN": os.environ.get("HF_TOKEN", "")} if os.environ.get("HF_TOKEN") else None,

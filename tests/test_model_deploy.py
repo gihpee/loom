@@ -155,3 +155,132 @@ def test_vllm_без_карты_отвергается_до_загрузки_в�
                                     json=deploy_body(engine="vllm", device="cpu"))
     assert answer.status_code == 400
     assert "только на cuda" in answer.json()["error"]["message"]
+
+
+# ------------------------------------------------------------- vLLM и драйвер
+@pytest.mark.parametrize("version, expected", [
+    ("12.4", (12, 4)),
+    ("12", (12, 0)),
+    ("12.6.1", (12, 6)),
+    ("", None),
+    ("неизвестно", None),
+    ("12.x", None),
+])
+def test_разбор_версии_cuda(version, expected):
+    """Не разобрали — None, а не догадка: догадка тут стоит развёрнутой
+    группы, которая упадёт через десять минут."""
+    from loom.orchestrator.models import cuda_tuple
+
+    assert cuda_tuple(version) == expected
+
+
+def node(cuda="12.8", node_id="nv3") -> dict:
+    return {"node_id": node_id, "cuda_version": cuda}
+
+
+def test_свежий_драйвер_пропускает_vllm():
+    from loom.orchestrator.models import vllm_refusal
+
+    assert vllm_refusal(node("12.8")) == ""
+    assert vllm_refusal(node("12.6")) == ""
+
+
+def test_старый_драйвер_отвергается_с_названной_причиной():
+    """Под cu124 нет сборки torch, которую требует vLLM; pip доставит её с
+    PyPI поверх правильной, и упадёт это только при обращении к карте."""
+    from loom.orchestrator.models import vllm_refusal
+
+    reason = vllm_refusal(node("12.4"))
+    assert "12.4" in reason and "12.6" in reason
+    assert "nv3" in reason
+    assert "transformers" in reason      # что делать вместо
+
+
+def test_узел_без_карты_отвергается():
+    from loom.orchestrator.models import vllm_refusal
+
+    assert "не сообщил версию CUDA" in vllm_refusal(node(""))
+
+
+def test_развёртывание_на_старом_драйвере_отвергается(stand, monkeypatch):
+    """Оператор узнаёт об этом до запуска, а не из «CUDA initialization:
+    driver is too old» через десять минут загрузки весов."""
+    from loom.orchestrator.models import ModelInfo
+
+    orchestrator, _agent = stand
+    nodes = orchestrator.hub.node_list()
+    monkeypatch.setattr(orchestrator.hub, "node_list",
+                        lambda: [{**n, "cuda_version": "12.4"} for n in nodes])
+    # Сеть здесь не при чём: config.json подменён, чтобы проверка драйвера
+    # осталась единственным, из-за чего этот запрос может не пройти.
+    monkeypatch.setattr("loom.api.app.describe",
+                        lambda repo, **kw: ModelInfo(repo=repo, num_layers=36))
+    answer = api(orchestrator).post("/admin/deploy",
+                                    json=deploy_body(repo="Qwen/Qwen3-4B",
+                                                     engine="vllm"))
+    assert answer.status_code == 409
+    assert "12.6" in answer.json()["error"]["message"]
+
+
+# --------------------------------------------------------- версия движка
+def test_vllm_ставится_с_версией():
+    """Отпечаток окружения на узле считается от СТРОК требований. `vllm` без
+    версии даёт один отпечаток для любой: узел, собравший окружение месяц
+    назад, не обновится никогда, а соседний соберёт сегодняшний — и две стадии
+    одного конвейера окажутся на разных версиях под одним именем каталога."""
+    from loom.orchestrator.models import stage_requirements
+
+    packages = stage_requirements("vllm")
+    pinned = [name for name in packages if name.startswith("vllm")]
+    assert pinned and "==" in pinned[0], packages
+
+
+def test_переносимому_движку_vllm_не_ставится():
+    """Это гигабайты и полчаса на узел — за то, чем он не будет считать."""
+    from loom.orchestrator.models import stage_requirements
+
+    assert not any(name.startswith("vllm") for name in stage_requirements("torch"))
+
+
+def test_торч_под_vllm_пинится_той_версией_которую_он_требует():
+    """Иначе первый проход агента поставит torch с индекса по драйверу, а vLLM
+    вторым проходом стянет другую версию с PyPI поверх неё. Каталог окружения
+    останется с именем cu128, а внутри окажется чужое колесо, и падать это
+    будет не на установке, а при первом обращении к карте."""
+    from loom.orchestrator.models import VLLM_TORCH, stage_requirements
+
+    packages = stage_requirements("vllm")
+    assert "torch" not in packages, "непинованный torch затянет подмену обратно"
+    for pinned in VLLM_TORCH:
+        assert pinned in packages
+        assert "==" in pinned
+
+
+def test_торч_остаётся_без_версии():
+    """Агент выбирает сборку по драйверу узла, и наборы версий на индексах
+    cu124/cu126/cu128 разные: пин, годный для одного, сделал бы неустановимым
+    другой."""
+    from loom.orchestrator.models import stage_requirements
+
+    assert "torch" in stage_requirements("torch")
+
+
+def test_смена_пина_меняет_окружение_узла():
+    """Иначе узлы тихо останутся на старой версии: другого механизма
+    обновления тут нет."""
+    import sys
+    from pathlib import Path
+
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "agent"))
+    from loom_agent.tasks.spec import EnvSpec
+
+    from loom.orchestrator.models import stage_requirements
+
+    from loom.orchestrator.models import VLLM_PIN
+
+    packages = stage_requirements("vllm")
+    now = EnvSpec(kind="python", requirements=tuple(packages)).fingerprint()
+    # Тот же список, но с другой версией vLLM — какой бы ни был пин сейчас.
+    bumped = [VLLM_PIN + ".1" if name == VLLM_PIN else name for name in packages]
+    later = EnvSpec(kind="python", requirements=tuple(bumped)).fingerprint()
+    assert now != later

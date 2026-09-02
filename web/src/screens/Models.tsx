@@ -73,6 +73,25 @@ function Pipeline({ group }: { group: Group }) {
   );
 }
 
+/** Минимальная CUDA для vLLM.
+ *
+ * Он требует конкретную версию torch, а сборки torch лежат на индексах по
+ * версиям CUDA: под 12.4 последняя — 2.6.0, нужной там нет вовсе. Значение
+ * повторяет MIN_CUDA_FOR_VLLM оркестратора: он всё равно откажет, но узнать
+ * об этом до нажатия дешевле.
+ */
+const MIN_CUDA_VLLM = "12.6";
+
+function canVllm(version: string): boolean {
+  const parts = (version || "").trim().split(".");
+  const major = Number(parts[0]);
+  const minor = Number(parts[1] ?? 0);
+  // Не разобрали — значит нельзя: догадка тут стоит развёрнутой группы,
+  // которая упадёт через десять минут.
+  if (!Number.isFinite(major) || !Number.isFinite(minor) || !parts[0]) return false;
+  return major > 12 || (major === 12 && minor >= 6);
+}
+
 function Deploy({ nodes, onClose, onDone }: {
   nodes: Node[]; onClose: () => void; onDone: () => void;
 }) {
@@ -112,11 +131,22 @@ function Deploy({ nodes, onClose, onDone }: {
 
   const takers = nodes.filter((n) => n.accepts_tasks);
   const count = picked.length || Number(stages) || 1;
+  // Под CUDA ниже 12.6 нет сборки torch, которую требует vLLM: узел поставит
+  // его «успешно», подменив torch сборкой с PyPI, и упадёт это только при
+  // первом обращении к карте, через десять минут после начала загрузки весов.
+  // Оркестратор проверяет то же самое, но здесь видно, КАКИЕ узлы мешают.
+  const stale = takers.filter((n) => !canVllm(n.cuda_version));
+  const involved = picked.length
+    ? takers.filter((n) => picked.includes(n.node_id))
+    : takers;
+  const blocking = involved.filter((n) => !canVllm(n.cuda_version));
   // vLLM без карты не поднимается вовсе. Сказать это здесь, а не дать
   // оркестратору отказать после нажатия: сочетание видно на экране целиком,
   // и объяснять его лучше рядом с тем, что его создало.
-  const clash = engine === "vllm" && device !== "cuda"
-    ? "vLLM работает только на cuda" : "";
+  const clash = engine !== "vllm" ? ""
+    : device !== "cuda" ? "vLLM работает только на cuda"
+    : blocking.length ? `${blocking.map((n) => n.node_id + " (CUDA " +
+        (n.cuda_version || "?") + ")").join(", ")} — нужна CUDA ${MIN_CUDA_VLLM}` : "";
 
   return (
     <Modal title="Развернуть модель" onClose={onClose} footer={
@@ -153,7 +183,10 @@ function Deploy({ nodes, onClose, onDone }: {
                  : "работает везде, в том числе на cpu; параллельные запросы делят одну карту по очереди")}>
           <select value={engine} onChange={(e) => setEngine(e.target.value)}>
             <option value="torch">transformers — переносимый</option>
-            <option value="vllm">vLLM — батчинг, только cuda</option>
+            <option value="vllm"
+                    disabled={involved.length > 0 && blocking.length === involved.length}>
+              vLLM — батчинг, CUDA {MIN_CUDA_VLLM}+
+            </option>
           </select>
         </Field>
       </div>
@@ -170,7 +203,10 @@ function Deploy({ nodes, onClose, onDone }: {
       </div>
 
       <div className="form-grid two">
-        <Field label="Узлы" hint="ничего не выбрано — возьмёт самые свободные">
+        <Field label="Узлы"
+               hint={stale.length
+                 ? `нет vLLM на: ${stale.map((n) => n.node_id).join(", ")} — драйвер старше CUDA ${MIN_CUDA_VLLM}`
+                 : "ничего не выбрано — возьмёт самые свободные"}>
           <select multiple size={4} value={picked}
                   onChange={(e) => setPicked(
                     Array.from(e.target.selectedOptions, (o) => o.value))}>

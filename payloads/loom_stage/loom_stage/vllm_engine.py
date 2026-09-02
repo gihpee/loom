@@ -222,9 +222,17 @@ def load_shard(model_path: str, *, start_layer: int, end_layer: int,
                max_batched_tokens: int = 16384) -> LoadedShard:
     """Собрать модель из одних только наших слоёв.
 
-    Порядок шагов не переставляется: заплаты ложатся до всякой загрузки,
-    группа конвейера подменяется после того, как vLLM собрал свою, а срез
-    навязывается только на время самой загрузки.
+    Порядок шагов не переставляется, и каждый стоит там, где стоит:
+
+    1. заплаты — до всякой загрузки;
+    2. конфиг ставится текущим ДО распределённой группы. Свежий vLLM спрашивает
+       конфиг уже внутри `initialize_model_parallel`, и без него падает на
+       assert'е, в котором про конвейер нет ни слова: «Current vLLM config is
+       not set... or a CustomOp was instantiated at module import time». Более
+       ранние версии конфиг там не трогают, так что поставить его раньше —
+       строго безопаснее, чем позже;
+    3. группа конвейера подменяется после того, как vLLM собрал свою;
+    4. срез слоёв навязывается только на время самой загрузки.
     """
     from loom_stage import vllm_patch
 
@@ -237,8 +245,6 @@ def load_shard(model_path: str, *, start_layer: int, end_layer: int,
                                  end_layer=end_layer, is_first=is_first,
                                  is_last=is_last, dtype=dtype)
     vllm_patch.allow_missing_ends(is_first=is_first, is_last=is_last)
-    _start_distributed()
-    replace_pipeline_group(start_layer, end_layer, num_model_layers)
 
     utilisation = DEFAULT_UTILISATION
     if vram_quota_bytes > 0:
@@ -255,8 +261,11 @@ def load_shard(model_path: str, *, start_layer: int, end_layer: int,
                            utilisation=utilisation, block_size=block_size,
                            max_sequences=max_sequences,
                            max_batched_tokens=max_batched_tokens)
-
     _hold_config(config)
+
+    _start_distributed()
+    replace_pipeline_group(start_layer, end_layer, num_model_layers)
+
     runner = stage_runner_class(start_layer, end_layer, num_model_layers)(
         vllm_config=config, device=config.device_config.device)
     with layer_range(start_layer, end_layer):
