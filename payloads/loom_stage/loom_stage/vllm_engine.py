@@ -46,10 +46,152 @@ logger = logging.getLogger("loom_stage.vllm_engine")
 # ровно тот способ получить это исключение через неделю.
 _CONFIG = None
 
-# Сколько памяти карты отдать под веса и KV-кэш, когда квоты не назвали.
-# Не 0.9, как у vLLM по умолчанию: узел чужой, и на нём живёт не только эта
-# задача — рядом может стоять вторая стадия того же кластера.
-DEFAULT_UTILISATION = 0.7
+# Потолок доли карты. Не размер запроса, а именно потолок: выше него vLLM не
+# оставляет места под собственные буферы, а на чужом узле рядом живёт ещё
+# кто-то — вторая стадия того же кластера, например.
+MAX_UTILISATION = 0.9
+
+# Запас поверх весов и кэша: активации шага, буферы связи, фрагментация. Число
+# грубое, и точнее его сделать нельзя — оно зависит от длины батча, которую мы
+# узнаем только в работе. Занизить его хуже, чем завысить: нехватка вылезет
+# посреди запроса, а не при загрузке.
+OVERHEAD_BYTES = 2 * 1024 ** 3
+
+
+def dtype_bytes(dtype: str) -> int:
+    """Байт на число. Неизвестное имя — отказ, а не догадка: ошибка вдвое даёт
+    вдвое неверный размер кэша, и узел либо не поднимется, либо пообещает
+    вдвое больше, чем сможет."""
+    known = {"float16": 2, "fp16": 2, "half": 2, "bfloat16": 2, "bf16": 2,
+             "float32": 4, "fp32": 4, "float": 4,
+             "float8": 1, "fp8": 1, "int8": 1}
+    size = known.get((dtype or "").strip().lower())
+    if size is None:
+        raise RunnerRefused(
+            f"не знаю, сколько байт занимает {dtype!r}; посчитать размер "
+            f"KV-кэша нечем. Известные: {', '.join(sorted(known))}")
+    return size
+
+
+def kv_bytes_per_token(config, *, layers: int, dtype: str) -> int:
+    """Сколько байт KV-кэша стоит один токен на ЭТОЙ стадии.
+
+    Ключи и значения, на каждый слой среза, по числу KV-голов. Голов именно
+    KV, а не внимания: у моделей с GQA их в несколько раз меньше, и считать по
+    головам внимания значило бы завысить кэш вчетверо и не поднять стадию там,
+    где памяти хватало.
+    """
+    heads = (getattr(config, "num_key_value_heads", None)
+             or getattr(config, "num_attention_heads", None))
+    attention_heads = getattr(config, "num_attention_heads", None) or 0
+    hidden = getattr(config, "hidden_size", None) or 0
+    head_dim = getattr(config, "head_dim", None) or (
+        hidden // attention_heads if attention_heads else 0)
+    if not heads or not head_dim:
+        raise RunnerRefused(
+            "в конфиге модели нет числа KV-голов или размера головы "
+            f"(num_key_value_heads={heads}, head_dim={head_dim}); посчитать "
+            "размер кэша нечем")
+    # 2 — ключи и значения.
+    return 2 * int(heads) * int(head_dim) * dtype_bytes(dtype) * max(0, layers)
+
+
+@dataclass
+class Plan:
+    """Сколько карты просить и что за это обещано."""
+
+    utilisation: float
+    max_sequences: int
+    bytes_needed: int
+    #: Почему получилось столько — уходит в лог, чтобы число не выглядело
+    #: взявшимся ниоткуда.
+    why: str
+
+
+def plan_memory(*, per_token: int, weights_bytes: int, total_bytes: int,
+                budget_bytes: int, max_sequences: int,
+                max_model_len: int) -> Plan:
+    """Сколько карты нужно под обещанную ёмкость — и что делать, если столько нет.
+
+    Считаем от обещания: `max_sequences` последовательностей по
+    `max_model_len` токенов каждая. Это верхняя граница, и брать её надо
+    целиком: кэш выделяется заранее, и «в среднем хватит» здесь означает, что
+    в худшем случае запрос упрётся в нехватку блоков посреди ответа.
+
+    Не влезает — уменьшаем обещание, а не берём меньше кэша под то же число.
+    Иначе узел принимал бы запросы, которые не может досчитать: голова видит
+    свой потолок, а блоки кончаются у стадии, и заметно это станет уже в
+    работе.
+    """
+    budget = max(0, min(budget_bytes, int(total_bytes * MAX_UTILISATION)))
+    for_cache = budget - weights_bytes - OVERHEAD_BYTES
+    per_sequence = per_token * max(1, max_model_len)
+    if for_cache < per_sequence:
+        raise RunnerRefused(
+            f"на карте нет места даже под одну последовательность: под кэш "
+            f"остаётся {for_cache / 1024**3:.1f} ГБ, а одна длиной "
+            f"{max_model_len} требует {per_sequence / 1024**3:.1f} ГБ. "
+            "Уменьшите длину контекста или дайте стадии меньше слоёв")
+
+    fits = min(max_sequences, for_cache // per_sequence)
+    needed = weights_bytes + OVERHEAD_BYTES + fits * per_sequence
+    utilisation = min(MAX_UTILISATION, needed / max(1, total_bytes))
+    why = (f"{fits} последовательностей по {max_model_len} токенов = "
+           f"{fits * per_sequence / 1024**3:.1f} ГБ кэша, веса "
+           f"{weights_bytes / 1024**3:.1f} ГБ, запас "
+           f"{OVERHEAD_BYTES / 1024**3:.1f} ГБ — итого "
+           f"{needed / 1024**3:.1f} ГБ из {total_bytes / 1024**3:.1f}")
+    if fits < max_sequences:
+        why += (f"; просили {max_sequences}, но столько не помещается — "
+                "узел обещает меньше, а не берёт кэш меньше обещанного")
+    return Plan(utilisation=utilisation, max_sequences=int(fits),
+                bytes_needed=int(needed), why=why)
+
+
+def plan_for_shard(model_path: str, *, layers: int, dtype: str,
+                   vram_quota_bytes: int, max_sequences: int,
+                   max_model_len: int) -> "Plan":
+    """Сколько карты попросит эта стадия.
+
+    Считается от того, что она обещает обслужить, а не берётся долей наугад.
+    vLLM выделяет KV-кэш заранее и на всю отведённую долю, так что
+    фиксированные «70% карты» означали бы, что стадия крошечной модели
+    занимает столько же, сколько огромной, и соседу на этом узле места не
+    остаётся.
+    """
+    from transformers import AutoConfig
+
+    total = card_bytes()
+    return plan_memory(
+        per_token=kv_bytes_per_token(AutoConfig.from_pretrained(model_path),
+                                     layers=layers, dtype=dtype),
+        weights_bytes=weights_size(model_path),
+        total_bytes=total,
+        budget_bytes=vram_quota_bytes if vram_quota_bytes > 0 else total,
+        max_sequences=max_sequences, max_model_len=max_model_len)
+
+
+def card_bytes() -> int:
+    """Сколько всего памяти на карте. Отдельной функцией — чтобы расчёт можно
+    было проверить там, где карты нет."""
+    import torch
+
+    return int(torch.cuda.get_device_properties(0).total_memory)
+
+
+def weights_size(model_path: str) -> int:
+    """Сколько весит срез на диске. Оценка весов в памяти — по файлам, которые
+    стадия и будет читать: они уже урезаны до её слоёв."""
+    import os
+
+    total = 0
+    try:
+        for name in os.listdir(model_path):
+            if name.endswith((".safetensors", ".bin")):
+                total += os.path.getsize(os.path.join(model_path, name))
+    except OSError:
+        return 0
+    return total
 
 
 @dataclass
@@ -64,6 +206,9 @@ class LoadedShard:
     is_last: bool
     dtype: str
     runner: object
+    #: Сколько последовательностей стадия реально может держать — после того,
+    #: как под них нашлось место. Может быть меньше запрошенного.
+    max_sequences: int = 0
 
     def as_dict(self) -> dict:
         return {
@@ -72,6 +217,7 @@ class LoadedShard:
             "first": self.is_first,
             "last": self.is_last,
             "dtype": self.dtype,
+            "мест": self.max_sequences,
         }
 
 
@@ -246,19 +392,15 @@ def load_shard(model_path: str, *, start_layer: int, end_layer: int,
                                  is_last=is_last, dtype=dtype)
     vllm_patch.allow_missing_ends(is_first=is_first, is_last=is_last)
 
-    utilisation = DEFAULT_UTILISATION
-    if vram_quota_bytes > 0:
-        import torch
-
-        total = torch.cuda.get_device_properties(0).total_memory
-        # Доля карты, а не байты: vLLM меряет именно так. Потолок 0.95 —
-        # выше него он не оставляет места под собственные буферы.
-        utilisation = min(0.95, max(0.05, vram_quota_bytes / max(1, total)))
-        logger.info("квота %.1f ГБ на карте %.1f ГБ — беру %.2f",
-                    vram_quota_bytes / 1024**3, total / 1024**3, utilisation)
+    plan = plan_for_shard(model_path, layers=end_layer - start_layer,
+                          dtype=dtype, vram_quota_bytes=vram_quota_bytes,
+                          max_sequences=max_sequences,
+                          max_model_len=max_model_len)
+    logger.info("память: %s; беру %.2f карты", plan.why, plan.utilisation)
+    max_sequences = plan.max_sequences
 
     config = _build_config(model_path, dtype=dtype, max_model_len=max_model_len,
-                           utilisation=utilisation, block_size=block_size,
+                           utilisation=plan.utilisation, block_size=block_size,
                            max_sequences=max_sequences,
                            max_batched_tokens=max_batched_tokens)
     _hold_config(config)
@@ -281,7 +423,8 @@ def load_shard(model_path: str, *, start_layer: int, end_layer: int,
     logger.info("загружено слоёв: %s", built or "не удалось сосчитать")
     return LoadedShard(start_layer=start_layer, end_layer=end_layer,
                        num_layers=num_model_layers, is_first=is_first,
-                       is_last=is_last, dtype=dtype, runner=runner)
+                       is_last=is_last, dtype=dtype, runner=runner,
+                       max_sequences=max_sequences)
 
 
 def step(shard: LoadedShard, sequences, *, incoming=None, first_step: bool):
@@ -309,8 +452,40 @@ def step(shard: LoadedShard, sequences, *, incoming=None, first_step: bool):
     answer = runner.execute_model(scheduled, incoming if not shard.is_first else None)
 
     if shard.is_last:
-        return None, _logits_from(runner, answer, expected=len(batch))
+        # Копией и ДО закрытия шага: сэмплер vLLM правит логиты на месте
+        # (делит на температуру, режет по top-p), а выбирать токен мы будем
+        # сами и по своим правилам — иначе один и тот же промпт даёт разные
+        # ответы в зависимости от того, каким движком считали.
+        logits = _logits_from(runner, answer, expected=len(batch)).clone()
+        _finish_step(runner)
+        return None, logits
     return _hidden_from(runner, answer), None
+
+
+def _finish_step(runner) -> None:
+    """Закрыть шаг так, как того требует эта версия vLLM.
+
+    С 0.14 шаг последней стадии разделён надвое: `execute_model` считает
+    логиты, кладёт их во временное состояние и возвращает **None**, а забрать
+    результат и очистить это состояние обязан `sample_tokens`.
+
+    Не позвать его — значит оставить состояние непустым. Текущий шаг при этом
+    проходит целиком: логиты лежат в состоянии, мы их оттуда и берём. Падает
+    СЛЕДУЮЩИЙ, на «State error: sample_tokens() must be called after
+    execute_model() returns None» — и по этому тексту не видно ни того, что
+    виноват предыдущий шаг, ни того, что первый токен уже успел уехать
+    клиенту.
+
+    Одиночной проверкой это не ловится вовсе: один шаг всегда проходит.
+
+    Результат `sample_tokens` не нужен — токен выбираем мы. Зовём ради того,
+    чтобы движок вернулся в состояние, из которого можно считать дальше.
+    """
+    finish = getattr(runner, "sample_tokens", None)
+    if finish is None or getattr(runner, "execute_model_state", None) is None:
+        # Версии до 0.14 отдают всё одним вызовом, закрывать нечего.
+        return
+    finish(None)
 
 
 class VllmEngine:
@@ -344,6 +519,10 @@ class VllmEngine:
                                 max_sequences=max_requests)
         self.is_first = self.shard.is_first
         self.is_last = self.shard.is_last
+        # Сколько мест нашлось под кэш. Голова раздаёт по этому числу, а не по
+        # тому, что просили: обещать больше, чем помещается, — это принимать
+        # запросы, которые упрутся в нехватку блоков посреди ответа.
+        self.capacity = self.shard.max_sequences or max_requests
         self._live: set = set()
 
     # ------------------------------------------------------------ счёт

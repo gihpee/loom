@@ -64,6 +64,10 @@ def test_несовпадение_числа_слоёв_отвергается(m
     всей модели. Её молчаливый провал даёт стадию, которая считает всё и ест
     всю карту, не сказав ни слова."""
     monkeypatch.setattr(vllm_engine, "require_cuda", lambda: None)
+    monkeypatch.setattr(vllm_engine, "plan_for_shard",
+                        lambda *a, **k: vllm_engine.Plan(
+                            utilisation=0.5, max_sequences=8,
+                            bytes_needed=0, why="в тесте"))
     monkeypatch.setattr(vllm_engine, "_start_distributed", lambda: None)
     monkeypatch.setattr(vllm_engine, "replace_pipeline_group",
                         lambda *a, **k: None)
@@ -98,6 +102,10 @@ def test_конфиг_ставится_раньше_распределённой
     """
     порядок = []
     monkeypatch.setattr(vllm_engine, "require_cuda", lambda: None)
+    monkeypatch.setattr(vllm_engine, "plan_for_shard",
+                        lambda *a, **k: vllm_engine.Plan(
+                            utilisation=0.5, max_sequences=8,
+                            bytes_needed=0, why="в тесте"))
     monkeypatch.setattr(vllm_engine, "_build_config", lambda *a, **k: _FakeConfig())
     monkeypatch.setattr(vllm_engine, "_hold_config",
                         lambda _c: порядок.append("конфиг"))
@@ -473,3 +481,70 @@ def test_промпты_без_токенов_отвергаются():
 
     with pytest.raises(vllm_engine.RunnerRefused, match="ни одного токена"):
         vllm_engine._parse_prompts(";;")
+
+
+# --------------------------------------------------- двухфазный шаг vLLM
+class _Logits:
+    def __init__(self, rows=1, vocab=7):
+        self.shape = (rows, vocab)
+        self.copied = False
+
+    def clone(self):
+        made = _Logits(*self.shape)
+        made.copied = True
+        return made
+
+
+class _TwoPhaseRunner:
+    """Исполнитель vLLM 0.14: шаг разделён надвое."""
+
+    def __init__(self, rows=1):
+        self.execute_model_state = types.SimpleNamespace(logits=_Logits(rows))
+        self.sampled = 0
+
+    def sample_tokens(self, _grammar):
+        if self.execute_model_state is None:
+            raise AssertionError("позвали, когда закрывать было нечего")
+        self.execute_model_state = None
+        self.sampled += 1
+
+
+def _shard(runner, *, is_last=True):
+    return vllm_engine.LoadedShard(
+        start_layer=18, end_layer=36, num_layers=36, is_first=False,
+        is_last=is_last, dtype="bfloat16", runner=runner)
+
+
+def test_шаг_закрывается_и_следующий_проходит(monkeypatch, sequence_module):
+    """Не закрыть шаг — значит уронить СЛЕДУЮЩИЙ на «State error», уже после
+    того, как первый токен уехал клиенту. Одиночной проверкой не ловится."""
+    runner = _TwoPhaseRunner()
+    monkeypatch.setattr("loom_stage.vllm_batch.prefill", lambda *a, **k: "батч")
+    monkeypatch.setattr("loom_stage.vllm_batch.decode", lambda *a, **k: "батч")
+    monkeypatch.setattr(runner, "execute_model", lambda *a, **k: None, raising=False)
+
+    from loom_stage.scheduler import Sequence
+
+    vllm_engine.step(_shard(runner), [Sequence("a", [1, 2, 3])],
+                     incoming="тензоры", first_step=True)
+    assert runner.execute_model_state is None and runner.sampled == 1
+
+
+def test_логиты_забираются_копией(monkeypatch, sequence_module):
+    """Сэмплер vLLM правит их на месте, а выбирать токен мы будем сами."""
+    runner = _TwoPhaseRunner()
+    monkeypatch.setattr("loom_stage.vllm_batch.prefill", lambda *a, **k: "батч")
+    monkeypatch.setattr(runner, "execute_model", lambda *a, **k: None, raising=False)
+
+    from loom_stage.scheduler import Sequence
+
+    _hidden, logits = vllm_engine.step(_shard(runner), [Sequence("a", [1])],
+                                       incoming="тензоры", first_step=True)
+    assert logits.copied
+
+
+def test_старая_версия_закрывать_нечего():
+    """До 0.14 всё отдавалось одним вызовом."""
+    vllm_engine._finish_step(types.SimpleNamespace())          # нет sample_tokens
+    vllm_engine._finish_step(types.SimpleNamespace(sample_tokens=None,
+                                                   execute_model_state=None))

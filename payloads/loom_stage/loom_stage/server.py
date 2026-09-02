@@ -607,6 +607,12 @@ class Handler(BaseHTTPRequestHandler):
                         STATE["head"].snapshot()
                         if ready and STATE.get("head") is not None else None
                     ),
+                    # Сколько запросов эта стадия способна держать. У стадий
+                    # одного конвейера числа разные — их считает каждая по
+                    # своему срезу, — и наименьшее и есть ёмкость конвейера.
+                    "capacity": (
+                        getattr(STATE["engine"], "capacity", None) if ready else None
+                    ),
                     # None until enough steps have been seen; the planner then
                     # keeps using its roofline estimate instead of a warm-up
                     # number.
@@ -895,9 +901,10 @@ def main(argv=None) -> None:
     )
     parser.add_argument(
         "--max-sequences", type=int,
-        default=int(os.environ.get("LOOM_MAX_SEQUENCES", "64")),
+        default=int(os.environ.get("LOOM_MAX_SEQUENCES", "16")),
         help="сколько запросов держать одновременно; сверх этого — честный "
-             "отказ, а не вытеснение чужого кэша")
+             "отказ, а не вытеснение чужого кэша. Число оплачивается памятью: "
+             "KV-кэш выделяется заранее и на всё обещанное сразу")
     parser.add_argument(
         "--max-batch-tokens", type=int,
         default=int(os.environ.get("LOOM_MAX_BATCH_TOKENS", "8192")),
@@ -970,10 +977,19 @@ def main(argv=None) -> None:
 
     layers = args.end_layer - args.start_layer
     if is_first:
+        # Мест ровно столько, сколько нашлось под кэш у ЭТОЙ стадии. Про
+        # остальные голова не знает: у стадии с большим срезом их может быть
+        # меньше, и тогда она откажет в блоках — громко, но уже в работе.
+        # Ёмкость каждой видна в /health, свести их — отдельная работа.
+        places = min(args.max_sequences, getattr(engine, "capacity", 0)
+                     or args.max_sequences)
+        if places < args.max_sequences:
+            logger.info("мест под запросы: %d вместо %d — столько поместилось "
+                        "в KV-кэш", places, args.max_sequences)
         STATE["head"] = pipeline.Head(
             engine, num_stages=args.num_stages, send=relay,
             eos_ids=STATE["eos_token_ids"], timeout_s=args.stage_timeout_s,
-            scheduler=Scheduler(max_sequences=args.max_sequences,
+            scheduler=Scheduler(max_sequences=places,
                                 max_batch_tokens=args.max_batch_tokens),
             on_step=lambda ms, size: SPEED.record(ms, layers))
         STATE["head"].start()

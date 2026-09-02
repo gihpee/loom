@@ -43,6 +43,9 @@ class ShardExecutor:
         self.shard = shard
         self.spec = shard.spec
         self.max_requests = max_requests
+        # Кэш здесь растёт по мере надобности, а не выделяется заранее, так
+        # что мест ровно столько, сколько разрешили.
+        self.capacity = max_requests
         self._states: Dict[str, RequestState] = {}
         self._lock = threading.RLock()
         # transformers renamed the cache kwarg (`past_key_value` -> `past_key_values`)
