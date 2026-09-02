@@ -214,12 +214,33 @@ def stage_runner_class(start_layer: int, end_layer: int, num_layers: int):
             configs = get_kv_cache_configs(vllm_config=self.vllm_config,
                                            kv_cache_specs=[spec],
                                            available_memory=[available])
+
+            # У кэша две половины, и путать их нельзя.
+            #
+            # РАБОЧАЯ живёт в исполнителе: она выделяет сами тензоры и
+            # связывает их со слоями внимания, попутно собирая attn_groups.
+            # Без неё модель грузится, кэш «есть», а первый же шаг падает на
+            #     IndexError: list index out of range
+            # в attn_groups[0] — и по этому сообщению не догадаться, что
+            # пропущен целый шаг инициализации.
+            #
+            # ПЛАНИРОВЩИКОВАЯ — это менеджер блоков: он решает, кому какие
+            # блоки выдать, и именно его зовёт наша сборка батча.
+            settle = getattr(self, "initialize_kv_cache", None)
+            if settle is None:
+                raise RunnerRefused(
+                    "исполнитель не умеет initialize_kv_cache — без неё слои "
+                    "внимания останутся без кэша, и первый же шаг упадёт")
+            settle(configs[0])
+
             self.kv_cache_config = generate_scheduler_kv_cache_config(configs)
             self.kv_cache_manager = KVCacheManager(
                 kv_cache_config=self.kv_cache_config, max_model_len=max_model_len,
                 enable_caching=False, use_eagle=False, log_stats=False,
                 enable_kv_cache_events=False, dcp_world_size=1,
                 hash_block_size=block_size)
+            logger.info("кэш разложен: групп внимания %d",
+                        len(getattr(self, "attn_groups", []) or []))
             return self.kv_cache_manager
 
         # --------------------------------------------------------- шаг

@@ -205,3 +205,22 @@ def test_бесконечная_матрёшка_не_вешает():
     loop.runnable = loop
     with pytest.raises(RunnerRefused):
         _kv_spec_of(types.SimpleNamespace(model=loop))
+
+
+def test_рабочая_половина_кэша_обязательна():
+    """Со стенда: кэш построен, модель загружена, а первый шаг падает на
+
+        IndexError: list index out of range   (в attn_groups[0])
+
+    Потому что рабочая половина — та, что выделяет тензоры и связывает их со
+    слоями внимания, — не была вызвана вовсе. По сообщению об этом не
+    догадаться: оно про пустой список, а не про пропущенный шаг.
+    """
+    import inspect
+
+    from loom_stage import vllm_runner
+
+    source = inspect.getsource(vllm_runner)
+    assert "initialize_kv_cache" in source, "рабочая половина кэша не заводится"
+    # И планировщиковая тоже: без неё нечем выдавать блоки под батч.
+    assert "KVCacheManager" in source
