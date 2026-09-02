@@ -70,13 +70,14 @@ def test_несовпадение_числа_слоёв_отвергается(m
     monkeypatch.setattr(vllm_engine, "_build_config", lambda *a, **k: _FakeConfig())
     monkeypatch.setattr(vllm_engine, "layer_range", _nothing)
     monkeypatch.setattr(vllm_engine, "_count_layers", lambda _r: 36)
+    monkeypatch.setattr(vllm_engine, "stage_runner_class",
+                        lambda *_a: _FakeRunner)
 
     # Именно атрибут модуля, а не запись в sys.modules: `from loom_stage
     # import vllm_patch` берёт атрибут пакета, и подмена через sys.modules
     # работала, только пока модуль не был импортирован кем-то ещё.
     monkeypatch.setattr("loom_stage.vllm_patch.allow_missing_ends",
                         lambda **_k: None)
-    _fake_gpu_runner(monkeypatch)
 
     with pytest.raises(RunnerRefused, match="просили 18 слоёв"):
         vllm_engine.load_shard("модель", start_layer=0, end_layer=18,
@@ -100,17 +101,146 @@ def _nothing(*_a, **_k):
     return contextlib.nullcontext()
 
 
-def _fake_gpu_runner(monkeypatch):
-    module = types.ModuleType("vllm.v1.worker.gpu_model_runner")
+class _FakeRunner:
+    """Исполнитель, который «загрузился», но собрал не тот срез."""
 
-    class GPUModelRunner:
-        def __init__(self, **_kwargs):
-            self.model = None
+    def __init__(self, **_kwargs):
+        self.model = None
 
-        def load_model(self):
-            pass
+    def load_model(self):
+        pass
 
-    module.GPUModelRunner = GPUModelRunner
-    for name in ("vllm", "vllm.v1", "vllm.v1.worker"):
-        monkeypatch.setitem(sys.modules, name, types.ModuleType(name))
-    monkeypatch.setitem(sys.modules, "vllm.v1.worker.gpu_model_runner", module)
+    def prepare_cache(self, **_kwargs):
+        return None
+
+
+# ---------------------------------------------------------------- уборка
+def test_уборка_разбирает_что_подняла(monkeypatch):
+    разобрано = []
+    state = types.ModuleType("vllm.distributed.parallel_state")
+    state.destroy_model_parallel = lambda: разобрано.append("модель")
+    state.destroy_distributed_environment = lambda: разобрано.append("окружение")
+    distributed = types.ModuleType("vllm.distributed")
+    distributed.parallel_state = state
+    monkeypatch.setitem(sys.modules, "vllm", types.ModuleType("vllm"))
+    monkeypatch.setitem(sys.modules, "vllm.distributed", distributed)
+    monkeypatch.setitem(sys.modules, "vllm.distributed.parallel_state", state)
+
+    torch = types.ModuleType("torch")
+    torch.distributed = types.SimpleNamespace(
+        is_initialized=lambda: True,
+        destroy_process_group=lambda: разобрано.append("torch"))
+    monkeypatch.setitem(sys.modules, "torch", torch)
+
+    vllm_engine.shutdown()
+    assert разобрано == ["модель", "окружение", "torch"]
+
+
+def test_уборка_не_падает_когда_разбирать_нечего(monkeypatch):
+    """Падать на уборке — худшее, что можно сделать с процессом, который и
+    так уходит: настоящая причина ухода потеряется."""
+    for name in list(sys.modules):
+        if name.startswith("vllm"):
+            monkeypatch.delitem(sys.modules, name, raising=False)
+    real = __import__
+
+    def guarded(name, *args, **kwargs):
+        if name.startswith("vllm"):
+            raise ImportError(name)
+        return real(name, *args, **kwargs)
+
+    monkeypatch.setattr("builtins.__import__", guarded)
+    vllm_engine.shutdown()      # молча
+
+
+# ------------------------------------------------------------------- шаг
+class Intermediate:
+    """Стенд-ин для vllm.sequence.IntermediateTensors."""
+
+
+@pytest.fixture
+def sequence_module(monkeypatch):
+    module = types.ModuleType("vllm.sequence")
+    module.IntermediateTensors = Intermediate
+    monkeypatch.setitem(sys.modules, "vllm", types.ModuleType("vllm"))
+    monkeypatch.setitem(sys.modules, "vllm.sequence", module)
+    return module
+
+
+def test_тензоры_найдутся_как_бы_версия_их_ни_отдала(sequence_module):
+    """Версии отличаются: одна возвращает их прямо, другая кладёт в состояние
+    исполнителя. Обе должны пройти."""
+    прямо = Intermediate()
+    assert vllm_engine._hidden_from(types.SimpleNamespace(), прямо) is прямо
+
+    в_состоянии = Intermediate()
+    runner = types.SimpleNamespace(
+        execute_model_state=types.SimpleNamespace(intermediate_tensors=в_состоянии))
+    assert vllm_engine._hidden_from(runner, object()) is в_состоянии
+
+
+def test_если_тензоров_нет_нигде_отказ_называет_что_пришло(sequence_module):
+    """Гадать нельзя: молча вернуть None значит отправить дальше по конвейеру
+    пустоту, и разбираться в этом будут на последней стадии."""
+    with pytest.raises(RunnerRefused, match="вернул dict"):
+        vllm_engine._hidden_from(types.SimpleNamespace(), {})
+
+
+def test_логиты_ищутся_и_в_ответе_и_в_состоянии():
+    ответ = types.SimpleNamespace(logits="прямо")
+    assert vllm_engine._logits_from(types.SimpleNamespace(), ответ) == "прямо"
+
+    runner = types.SimpleNamespace(
+        execute_model_state=types.SimpleNamespace(logits="в состоянии"))
+    assert vllm_engine._logits_from(runner, object()) == "в состоянии"
+
+
+def test_если_логитов_нет_отказ_называет_что_пришло():
+    with pytest.raises(RunnerRefused, match="вернул int"):
+        vllm_engine._logits_from(types.SimpleNamespace(execute_model_state=None), 7)
+
+
+def test_неголовной_стадии_без_тензоров_считать_нечего(monkeypatch, sequence_module):
+    """Иначе она посчитает мусор из неинициализированного буфера и отдаст его
+    дальше — молча."""
+    shard = vllm_engine.LoadedShard(
+        start_layer=18, end_layer=36, num_layers=36, is_first=False,
+        is_last=True, dtype="bfloat16", runner=types.SimpleNamespace())
+    monkeypatch.setattr("loom_stage.vllm_batch.prefill", lambda *a, **k: "батч")
+    monkeypatch.setattr("loom_stage.vllm_batch.decode", lambda *a, **k: "батч")
+
+    with pytest.raises(RunnerRefused, match="тензоры от предыдущей не пришли"):
+        vllm_engine.step(shard, [object()], incoming=None, first_step=True)
+
+
+# ------------------------------------------------- тензоры через файл
+def test_тензоры_переживают_дорогу_через_файл(tmp_path, monkeypatch):
+    """Складываются они нашим форматом провода — тем самым, которым поедут
+    между машинами. Проверить его тут ничего не стоит, а разойдись он с
+    ожиданием — стадия получит мусор и посчитает его молча."""
+    import torch
+
+    from loom_stage import vllm_engine as engine
+
+    tensors = {
+        "hidden_states": torch.randn(3, 8, dtype=torch.bfloat16),
+        "residual": torch.randn(3, 8, dtype=torch.bfloat16),
+    }
+    path = str(tmp_path / "hidden.bin")
+    engine._save_hidden(tensors, path)
+
+    restored = {}
+    import json
+
+    from loom_stage import wire
+
+    layout = json.loads((tmp_path / "hidden.bin.json").read_text())
+    blob = engine.pathlib_read(path)
+    for name, where in layout.items():
+        piece = blob[where["at"]:where["at"] + where["size"]]
+        restored[name] = wire.from_wire(torch, piece, where["shape"], where["dtype"])
+
+    assert sorted(restored) == ["hidden_states", "residual"]
+    for name, original in tensors.items():
+        assert torch.equal(restored[name], original), name
+        assert restored[name].dtype == original.dtype, "dtype не должен расширяться"

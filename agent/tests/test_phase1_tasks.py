@@ -584,3 +584,46 @@ def test_лимиты_задачи_попадают_в_лог(registry, caplog):
     said = [r.getMessage() for r in caplog.records if "limits:" in r.getMessage()]
     assert said, "агент не сказал, с какими лимитами пошла задача"
     assert "потоков" in said[0] and "ядер видно" in said[0]
+
+
+def test_задача_видна_переписи_пока_собирается_окружение(tmp_path, isolation):
+    """Со стенда: задача с установкой vLLM исчезла через 90 секунд с «узел
+    больше не держит эту задачу», хотя агент ровно в это время её окружение и
+    собирал. Логов нет, длительность 0.0s, и ни одна сторона не жалуется.
+
+    Между «взяли» и «пошла» лежит сборка окружения — десятки минут. Всё это
+    время узел задачей занят, и перепись обязана её упоминать.
+    """
+    import threading
+
+    from loom_agent.tasks.env import EnvironmentCache
+    from loom_agent.tasks.registry import TaskRegistry
+
+    строим = threading.Event()
+    отпустить = threading.Event()
+
+    class SlowCache(EnvironmentCache):
+        def acquire(self, spec):
+            строим.set()
+            отпустить.wait(30)
+            return super().acquire(spec)
+
+    reg = TaskRegistry(root=tmp_path / "tasks", isolation=isolation,
+                       environments=SlowCache(tmp_path / "envs"),
+                       total_gpus=1, retention_s=60.0)
+    submitting = threading.Thread(
+        target=lambda: reg.submit(spec("медленная", [sys.executable, "-c", "pass"])),
+        daemon=True)
+    submitting.start()
+    try:
+        assert строим.wait(10), "сборка окружения не началась"
+        assert "медленная" in reg.claimed(), "задачи нет в переписи узла"
+        assert reg.snapshot()["running"] == 1, "узел показывает себя свободным"
+    finally:
+        отпустить.set()
+        submitting.join(timeout=30)
+        reg.stop_all()
+
+    # А когда пошла — она в переписи как обычная задача, и дважды её там нет.
+    assert reg.claimed() == []
+    assert [t.spec.task_id for t in reg.list()] == ["медленная"]

@@ -229,13 +229,31 @@ class TaskRegistry:
         with self._lock:
             return list(self._tasks.values())
 
+    def claimed(self) -> List[str]:
+        """Задачи, взятые, но ещё не запущенные.
+
+        Между «взяли» и «пошла» лежит сборка окружения — на vLLM это десятки
+        минут. Всё это время задача держит карты и диск, то есть узел ею
+        занят, а в `_tasks` её ещё нет.
+
+        Без этого списка перепись узла её не упоминает, и оркестратор, сверяя
+        свой список с переписью, считает задачу пропавшей — пока агент ровно в
+        эту секунду ставит для неё torch. Снаружи это выглядит так: задача
+        мгновенно «gone», логов нет, и ни одна сторона не жалуется.
+        """
+        with self._lock:
+            return [task_id for task_id in self._claimed if task_id not in self._tasks]
+
     def snapshot(self) -> dict:
         with self._lock:
             running = [t for t in self._tasks.values() if not t.finished]
+            claimed = [t for t in self._claimed if t not in self._tasks]
             return {
                 "unusable": self.unusable,
-                "tasks": len(self._tasks),
-                "running": len(running),
+                "tasks": len(self._tasks) + len(claimed),
+                # Взятая задача уже держит карты, и узел ею занят — считать её
+                # простаивающей значит показывать в панели свободу, которой нет.
+                "running": len(running) + len(claimed),
                 "gpus_total": self.total_gpus,
                 "gpus_free": len(self.free_devices()),
                 "environments": self.environments.snapshot(),

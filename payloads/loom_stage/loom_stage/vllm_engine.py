@@ -28,7 +28,8 @@ import logging
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
-from loom_stage.vllm_runner import RunnerRefused, layer_range, replace_pipeline_group, stage_role
+from loom_stage.vllm_runner import (RunnerRefused, layer_range, replace_pipeline_group,
+                                    stage_role, stage_runner_class)
 
 logger = logging.getLogger("loom_stage.vllm_engine")
 
@@ -172,11 +173,11 @@ def load_shard(model_path: str, *, start_layer: int, end_layer: int,
                            max_sequences=max_sequences,
                            max_batched_tokens=max_batched_tokens)
 
-    from vllm.v1.worker.gpu_model_runner import GPUModelRunner
-
-    runner = GPUModelRunner(vllm_config=config, device=config.device_config.device)
+    runner = stage_runner_class(start_layer, end_layer, num_model_layers)(
+        vllm_config=config, device=config.device_config.device)
     with layer_range(start_layer, end_layer):
         runner.load_model()
+    runner.prepare_cache(block_size=block_size, max_model_len=max_model_len)
 
     built = _count_layers(runner)
     wanted = end_layer - start_layer
@@ -188,6 +189,90 @@ def load_shard(model_path: str, *, start_layer: int, end_layer: int,
     return LoadedShard(start_layer=start_layer, end_layer=end_layer,
                        num_layers=num_model_layers, is_first=is_first,
                        is_last=is_last, dtype=dtype, runner=runner)
+
+
+def step(shard: LoadedShard, sequences, *, incoming=None, first_step: bool):
+    """Один шаг движка над батчем, который выбрали снаружи.
+
+    Возвращает то же, что и собственный исполнитель стадии: скрытые состояния
+    на всех стадиях кроме последней, логиты — на последней. Различать их
+    вызывающему не нужно.
+    """
+    from loom_stage import vllm_batch
+
+    runner = shard.runner
+    form = vllm_batch.prefill if first_step else vllm_batch.decode
+    scheduled = form(list(sequences), runner)
+
+    if not shard.is_first and incoming is None:
+        raise RunnerRefused(
+            "неголовной стадии нечего считать: тензоры от предыдущей не пришли")
+    answer = runner.execute_model(scheduled, incoming if not shard.is_first else None)
+
+    if shard.is_last:
+        return None, _logits_from(runner, answer)
+    return _hidden_from(runner, answer), None
+
+
+def _hidden_from(runner, answer):
+    """Промежуточные тензоры, как их отдала эта версия vLLM.
+
+    Версии отличаются: одна возвращает их прямо, другая складывает в состояние
+    исполнителя. Гадать не будем — если не нашли, скажем, ЧТО получили, чтобы
+    первый же прогон на узле это назвал.
+    """
+    from vllm.sequence import IntermediateTensors
+
+    if isinstance(answer, IntermediateTensors):
+        return answer
+    for name in ("intermediate_tensors", "hidden_states"):
+        found = getattr(answer, name, None) or getattr(
+            getattr(runner, "execute_model_state", None), name, None)
+        if isinstance(found, IntermediateTensors):
+            return found
+    raise RunnerRefused(
+        f"шаг не отдал промежуточных тензоров, а вернул {type(answer).__name__}; "
+        "в этой версии vLLM они лежат где-то ещё")
+
+
+def _logits_from(runner, answer):
+    """Логиты последней стадии."""
+    state = getattr(runner, "execute_model_state", None)
+    for source in (answer, state):
+        found = getattr(source, "logits", None)
+        if found is not None:
+            return found
+    raise RunnerRefused(
+        f"шаг не отдал логитов, а вернул {type(answer).__name__}; "
+        "в этой версии vLLM они лежат где-то ещё")
+
+
+def shutdown() -> None:
+    """Разобрать распределённое окружение.
+
+    Без этого torch на выходе жалуется на утечку — и жалуется по делу: группа
+    держит дескрипторы и разделяемую память. Для одиночной проверки это
+    безобидно, а для стадии, которая перезапускается по кругу при неудачном
+    старте, нет.
+
+    Ни один шаг не обязателен: разбираем то, что поднялось, и молчим про
+    остальное. Падать на уборке — худшее, что можно сделать с процессом,
+    который и так уходит.
+    """
+    try:
+        from vllm.distributed import parallel_state
+
+        parallel_state.destroy_model_parallel()
+        parallel_state.destroy_distributed_environment()
+    except Exception:
+        logger.debug("разбор группы vLLM не прошёл", exc_info=True)
+    try:
+        import torch
+
+        if torch.distributed.is_initialized():
+            torch.distributed.destroy_process_group()
+    except Exception:
+        logger.debug("разбор группы torch не прошёл", exc_info=True)
 
 
 def _count_layers(runner) -> int:
@@ -212,34 +297,127 @@ def _count_layers(runner) -> int:
     return 0
 
 
+def _one_prompt(shard: LoadedShard, prompt_ids: List[int], *, incoming=None):
+    """Один prefill над одной последовательностью. Ровно то, чем проверяется
+    веха 2: батч из одного — частный случай батча, а не отдельный путь."""
+    from loom_stage.vllm_batch import Sequence
+
+    sequence = Sequence(request_id="проверка", prompt_ids=list(prompt_ids))
+    return step(shard, [sequence], incoming=incoming, first_step=True)
+
+
+def _save_hidden(tensors, path: str) -> dict:
+    """Сложить промежуточные тензоры в файл нашим же форматом провода.
+
+    Через `wire`, а не pickle: это тот самый формат, которым они поедут между
+    машинами, и проверить его заодно — бесплатно.
+    """
+    import json
+
+    import torch
+
+    from loom_stage import wire
+
+    saved = {}
+    blob = bytearray()
+    for name, tensor in tensors.items():
+        data, shape, dtype = wire.to_wire(torch, tensor)
+        saved[name] = {"at": len(blob), "size": len(data), "shape": shape,
+                       "dtype": dtype}
+        blob.extend(data)
+    with open(path, "wb") as handle:
+        handle.write(blob)
+    with open(path + ".json", "w") as handle:
+        json.dump(saved, handle)
+    return saved
+
+
+def _load_hidden(path: str, device):
+    """Обратно, в тензоры на карте."""
+    import json
+
+    import torch
+
+    from loom_stage import wire
+    from vllm.sequence import IntermediateTensors
+
+    with open(path + ".json") as handle:
+        layout = json.load(handle)
+    blob = pathlib_read(path)
+    restored = {}
+    for name, where in layout.items():
+        piece = blob[where["at"]:where["at"] + where["size"]]
+        restored[name] = wire.from_wire(torch, piece, where["shape"],
+                                        where["dtype"]).to(device)
+    return IntermediateTensors(restored)
+
+
+def pathlib_read(path: str) -> bytes:
+    with open(path, "rb") as handle:
+        return handle.read()
+
+
 def main(argv: Optional[List[str]] = None) -> int:
-    """Проверка на узле: загрузить срез и сказать, что вышло."""
+    """Проверка на узле.
+
+    Без аргументов про тензоры — только загрузка (веха 1). С `--dump-hidden`
+    прогоняет промпт и складывает промежуточные тензоры в файл; с
+    `--load-hidden` поднимает следующую стадию, читает их и печатает логиты.
+
+    Двумя прогонами, а не одним процессом: группа конвейера у vLLM глобальная,
+    и две стадии рядом дрались бы за неё. Заодно проверяется формат провода —
+    тот самый, которым тензоры поедут между машинами.
+    """
     import argparse
     import json
 
     parser = argparse.ArgumentParser(
         prog="loom_stage.vllm_engine",
-        description="Загрузить срез слоёв через vLLM и рассказать, что вышло")
+        description="Загрузить срез слоёв через vLLM и, по желанию, прогнать шаг")
     parser.add_argument("--weights", required=True, help="путь или репозиторий")
     parser.add_argument("--start-layer", type=int, required=True)
     parser.add_argument("--end-layer", type=int, required=True)
     parser.add_argument("--num-model-layers", type=int, required=True)
     parser.add_argument("--dtype", default="bfloat16")
     parser.add_argument("--vram-quota-bytes", type=int, default=0)
+    parser.add_argument("--prompt-ids", default="",
+                        help="через запятую; без них шаг не делается")
+    parser.add_argument("--dump-hidden", default="",
+                        help="куда сложить промежуточные тензоры")
+    parser.add_argument("--load-hidden", default="",
+                        help="откуда их взять — для стадии, которая не первая")
     args = parser.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    answer: dict = {}
     try:
         shard = load_shard(args.weights, start_layer=args.start_layer,
                            end_layer=args.end_layer,
                            num_model_layers=args.num_model_layers,
                            dtype=args.dtype,
                            vram_quota_bytes=args.vram_quota_bytes)
+        answer.update(shard.as_dict())
+
+        if args.prompt_ids:
+            ids = [int(piece) for piece in args.prompt_ids.split(",") if piece.strip()]
+            incoming = (_load_hidden(args.load_hidden, shard.runner.device)
+                        if args.load_hidden else None)
+            hidden, logits = _one_prompt(shard, ids, incoming=incoming)
+            if hidden is not None:
+                answer["отдала"] = "скрытые состояния"
+                answer["тензоры"] = sorted(hidden.tensors)
+                if args.dump_hidden:
+                    answer["сложено"] = _save_hidden(hidden.tensors, args.dump_hidden)
+            if logits is not None:
+                answer["отдала"] = "логиты"
+                answer["форма логитов"] = list(getattr(logits, "shape", []))
     except RunnerRefused as exc:
         print(f"не вышло: {exc}")
         return 2
-    print(json.dumps(shard.as_dict(), ensure_ascii=False, indent=2))
+    finally:
+        shutdown()
+    print(json.dumps(answer, ensure_ascii=False, indent=2, default=str))
     return 0
 
 

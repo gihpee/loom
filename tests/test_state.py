@@ -210,3 +210,17 @@ def test_отпущенная_задача_не_воскресает(tmp_path):
 
     hub.on_telemetry(telemetry("node-a", {task.task_id: "done"}))
     assert task.task_id not in hub.tasks
+
+
+def test_собирающаяся_задача_не_считается_пропавшей(tmp_path):
+    """Другая сторона той же поломки: узел докладывает задачу как
+    provisioning, и сводить её как пропавшую нельзя — она просто ещё не
+    запущена."""
+    hub = hub_with(tmp_path / "state.json")
+    connect(hub)
+    task = hub.submit(command=["sleep", "1000"], resources={"gpus": 1})
+    task.submitted_at = time.time() - ADOPTION_GRACE_S - 1
+
+    hub.on_telemetry(telemetry("node-a", {task.task_id: "provisioning"}))
+    assert hub.tasks[task.task_id].state == "provisioning"
+    assert not hub.tasks[task.task_id].finished

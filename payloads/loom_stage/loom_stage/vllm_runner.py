@@ -101,6 +101,84 @@ def coordinator_for(start_layer: int, end_layer: int, num_layers: int):
     return StageGroupCoordinator
 
 
+def stage_runner_class(start_layer: int, end_layer: int, num_layers: int):
+    """Исполнитель vLLM, знающий свой срез.
+
+    Собирается внутри функции по той же причине, что и координатор: базовый
+    тип живёт в vLLM, а модуль обязан импортироваться и там, где его нет.
+
+    Добавляет к штатному ровно две вещи — заведение KV-кэша под наши слои и
+    шаг, умеющий принять и отдать промежуточные тензоры.
+    """
+    from vllm.v1.worker.gpu_model_runner import GPUModelRunner
+
+    is_first, is_last = stage_role(start_layer, end_layer, num_layers)
+
+    class StageRunner(GPUModelRunner):
+        start_layer_index = start_layer
+        end_layer_index = end_layer
+        is_first_stage = is_first
+        is_last_stage = is_last
+
+        def __init__(self, *args, **kwargs) -> None:
+            super().__init__(*args, **kwargs)
+            self._incoming = None
+
+        # ------------------------------------------------------- KV-кэш
+        def prepare_cache(self, *, block_size: int, max_model_len: int):
+            """Завести кэш под наши слои и только под них.
+
+            Спецификацию спрашиваем у самой модели: сколько голов и какого
+            размера — знает она, а угадывать это по конфигу значит однажды
+            угадать неверно и получить кэш не той формы. Такая ошибка не
+            падает, она портит внимание.
+            """
+            import torch
+            from vllm.v1.core.kv_cache_utils import (generate_scheduler_kv_cache_config,
+                                                     get_kv_cache_configs)
+            from vllm.v1.core.kv_cache_manager import KVCacheManager
+
+            try:
+                spec = self.model.get_kv_cache_spec()
+            except AttributeError as exc:
+                raise RunnerRefused(
+                    f"модель не рассказывает про свой KV-кэш ({exc}); без этого "
+                    "его форму пришлось бы угадывать, а неверная форма не "
+                    "падает — она портит внимание") from None
+
+            free, _total = torch.cuda.mem_get_info(self.device.index or 0)
+            available = int(free * self.cache_config.gpu_memory_utilization)
+            logger.info("под KV-кэш: %.1f ГБ из %.1f ГБ свободных",
+                        available / 1024**3, free / 1024**3)
+
+            configs = get_kv_cache_configs(vllm_config=self.vllm_config,
+                                           kv_cache_specs=[spec],
+                                           available_memory=[available])
+            self.kv_cache_config = generate_scheduler_kv_cache_config(configs)
+            self.kv_cache_manager = KVCacheManager(
+                kv_cache_config=self.kv_cache_config, max_model_len=max_model_len,
+                enable_caching=False, use_eagle=False, log_stats=False,
+                enable_kv_cache_events=False, dcp_world_size=1,
+                hash_block_size=block_size)
+            return self.kv_cache_manager
+
+        # --------------------------------------------------------- шаг
+        def incoming_buffer(self):
+            """Куда лягут тензоры от предыдущей стадии.
+
+            Заводится один раз и переиспользуется: буфер размером с самый
+            большой батч, и создавать его на каждый шаг значит выделять
+            гигабайты в горячем пути.
+            """
+            if self._incoming is None:
+                self._incoming = self.model.make_empty_intermediate_tensors(
+                    batch_size=self.max_num_tokens,
+                    dtype=self.model_config.dtype, device=self.device)
+            return self._incoming
+
+    return StageRunner
+
+
 def replace_pipeline_group(start_layer: int, end_layer: int, num_layers: int) -> None:
     """Подменить группу конвейера на ту, что считает по слоям.
 

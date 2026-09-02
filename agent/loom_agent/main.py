@@ -188,6 +188,11 @@ class Agent:
                 exit_code=status["exit_code"] or 0, error=status["error"],
                 devices=list(status["devices"]), seconds=status["seconds"],
             )
+        # Взятые, но ещё не запущенные — тоже наши. Перепись без них означает
+        # «этой задачи у меня нет», и оркестратор списывает её как пропавшую,
+        # пока мы ставим для неё окружение.
+        for task_id in self.tasks.claimed():
+            report.tasks.add(task_id=task_id, state="provisioning")
         return agent_pb2.AgentMessage(telemetry=report)
 
     def _heartbeat_loop(self) -> None:
