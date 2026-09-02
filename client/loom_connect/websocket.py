@@ -59,11 +59,21 @@ class WebSocketUpstream(Upstream):
 def opener(url: str, token: str):
     """Сделать функцию, открывающую новый канал. По одному на TCP-соединение."""
     async def connect() -> Upstream:
+        import ssl
+
         from websockets.asyncio.client import connect as ws_connect
 
         headers = {TOKEN_HEADER: token} if token else {}
-        socket = await ws_connect(url, additional_headers=headers,
-                                  max_size=None, open_timeout=30)
+        try:
+            socket = await ws_connect(url, additional_headers=headers,
+                                      max_size=None, open_timeout=30)
+        except ssl.SSLError as exc:
+            # «wrong version number» означает ровно одно: на том конце обычный
+            # HTTP, а мы пришли с TLS. Сообщение OpenSSL про это не говорит, и
+            # искать причину идут в сертификаты.
+            raise ConnectionError(
+                f"на {url} отвечает не TLS — похоже, оркестратор без https. "
+                f"Добавьте --insecure ({exc})") from None
         return WebSocketUpstream(socket)
 
     return connect

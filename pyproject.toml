@@ -8,6 +8,12 @@ dependencies = [
     "protobuf>=5.29",
     "fastapi>=0.110",
     "uvicorn>=0.29",
+    # Реализация WebSocket для uvicorn. Не роскошь: без неё он отвечает на
+    # upgrade-запрос кодом 404 — с предупреждением в лог и без единого намёка
+    # на стороне клиента, что дело в отсутствующем пакете, а не в маршруте.
+    # Отдельным пакетом, а не uvicorn[standard]: тот тянет uvloop, httptools,
+    # watchfiles и PyYAML, ни один из которых здесь не нужен.
+    "websockets>=13",
 ]
 
 [project.optional-dependencies]

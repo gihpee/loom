@@ -37,3 +37,10 @@ def test_неascii_токен_отвергается_внятно(capsys):
 
     assert main(["1.2.3.4:8000", "group-a", "--token", "токен"]) == 2
     assert "скопирован с лишним" in capsys.readouterr().err
+
+
+def test_голый_адрес_с_insecure_идёт_по_ws():
+    """Панель без TLS печатает команду с --insecure; без него клиент упирается
+    в «WRONG_VERSION_NUMBER» — сообщение про TLS там, где TLS нет."""
+    assert endpoint("1.2.3.4:8080", "g", insecure=True) == \
+        "ws://1.2.3.4:8080/connect/g"

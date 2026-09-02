@@ -38,6 +38,23 @@ def _error(status: int, message: str, kind: str = "invalid_request_error") -> JS
                         content={"error": {"message": message, "type": kind}})
 
 
+# Причина закрытия WebSocket ограничена 123 байтами, и кириллица занимает по
+# два на букву. Длинный текст не обрезается сам, а роняет закрытие — то есть
+# пропадает ровно то объяснение, ради которого писался.
+CLOSE_REASON_BYTES = 123
+
+
+def _reason(text: str) -> str:
+    """Причина закрытия, укладывающаяся в кадр."""
+    raw = text.encode()
+    if len(raw) <= CLOSE_REASON_BYTES:
+        return text
+    # Место под многоточие резервируется: само оно занимает три байта, и без
+    # этого обрезка ровно по лимиту его же и переполняет.
+    tail = "…".encode()
+    return raw[:CLOSE_REASON_BYTES - len(tail)].decode(errors="ignore") + "…"
+
+
 def _inputs_of(raw: dict) -> dict:
     """Файлы, которые едут вместе с задачей. Base64, потому что тело — JSON.
 
@@ -649,14 +666,15 @@ def create_app(*, agents=None, releases=None, keystore=None, config=None,
         token = socket.headers.get("x-loom-admin-token", "")
         if forbidden(token):
             # 1008 — «политика»: клиент увидит причину, а не молчаливый обрыв.
-            await socket.close(code=1008, reason="invalid admin token")
+            await socket.close(code=1008, reason=_reason("invalid admin token"))
             return
         if agents is None:
-            await socket.close(code=1011, reason="this orchestrator runs no agents")
+            await socket.close(code=1011,
+                               reason=_reason("this orchestrator runs no agents"))
             return
         record = agents.groups.get(group_id)
         if record is None:
-            await socket.close(code=1008, reason=f"нет группы {group_id!r}")
+            await socket.close(code=1008, reason=_reason(f"нет группы {group_id!r}"))
             return
         head = record.tasks.get(0, "")
         try:
@@ -666,16 +684,14 @@ def create_app(*, agents=None, releases=None, keystore=None, config=None,
         except (AgentError, ValueError, TypeError):
             port = 0
         if not port:
-            await socket.close(
-                code=1011,
-                reason="кластер не назвал порт для подключения: он ещё "
-                       "собирается или поднят без ray[client]")
+            await socket.close(code=1011, reason=_reason(
+                "кластер не назвал порт: собирается или поднят без ray[client]"))
             return
 
         try:
             tunnel = agents.open_tunnel(head, port)
         except AgentError as exc:
-            await socket.close(code=1011, reason=str(exc)[:120])
+            await socket.close(code=1011, reason=_reason(str(exc)))
             return
         await socket.accept()
         await _pipe(socket, tunnel)

@@ -44,7 +44,12 @@ with open(os.path.join(os.environ["LOOM_TASK_OUT"], "answer.txt"), "w") as f:
  *  Токен НЕ подставляется намеренно. Он даёт право исполнять код на чужих
  *  машинах, а эта команда попадёт и в скриншот, и в историю чата. */
 function connectCommand(group: Group): string {
-  return `loom-connect ${location.host} ${group.group_id} --token <ваш токен>`;
+  // --insecure, когда панель открыта по http: клиент иначе пойдёт по wss и
+  // упрётся в «WRONG_VERSION_NUMBER» — сообщение про TLS, из которого не
+  // следует, что TLS тут просто нет.
+  const plain = location.protocol === "http:" ? " --insecure" : "";
+  return `loom-connect ${location.host} ${group.group_id}`
+    + ` --token <ваш токен>${plain}`;
 }
 
 /** Как этот узел даётся соседям.
