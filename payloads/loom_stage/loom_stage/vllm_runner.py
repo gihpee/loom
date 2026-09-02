@@ -188,7 +188,6 @@ def stage_runner_class(start_layer: int, end_layer: int, num_layers: int):
 
         def __init__(self, *args, **kwargs) -> None:
             super().__init__(*args, **kwargs)
-            self._incoming = None
 
         # ------------------------------------------------------- KV-кэш
         def prepare_cache(self, *, block_size: int, max_model_len: int):
@@ -244,18 +243,36 @@ def stage_runner_class(start_layer: int, end_layer: int, num_layers: int):
             return self.kv_cache_manager
 
         # --------------------------------------------------------- шаг
-        def incoming_buffer(self):
-            """Куда лягут тензоры от предыдущей стадии.
+        def execute_model(self, scheduler_output, intermediate_tensors=None,
+                          *args, **kwargs):
+            """Шаг модели. Перед ним — буфер под входящие тензоры.
 
-            Заводится один раз и переиспользуется: буфер размером с самый
-            большой батч, и создавать его на каждый шаг значит выделять
-            гигабайты в горячем пути.
+            vLLM не принимает их напрямую: он копирует пришедшее в СВОЙ буфер
+            и нарезает по размеру батча. Буфера у неголовной стадии нет, пока
+            его не завели, и шаг падает на
+
+                assert self.intermediate_tensors is not None
+
+            — утверждении, из которого не следует, что кто-то должен был этот
+            буфер выделить.
             """
-            if self._incoming is None:
-                self._incoming = self.model.make_empty_intermediate_tensors(
-                    batch_size=self.max_num_tokens,
-                    dtype=self.model_config.dtype, device=self.device)
-            return self._incoming
+            if not self.is_first_stage:
+                self._ensure_incoming()
+            return super().execute_model(scheduler_output, intermediate_tensors,
+                                         *args, **kwargs)
+
+        def _ensure_incoming(self):
+            """Завести буфер один раз и переиспользовать.
+
+            Он размером с самый большой батч, и создавать его на каждом шаге
+            значило бы выделять гигабайты в горячем пути.
+            """
+            if getattr(self, "intermediate_tensors", None) is not None:
+                return
+            self.intermediate_tensors = self.model.make_empty_intermediate_tensors(
+                batch_size=self.max_num_tokens,
+                dtype=self.model_config.dtype, device=self.device)
+            logger.info("буфер под входящие тензоры заведён")
 
     return StageRunner
 

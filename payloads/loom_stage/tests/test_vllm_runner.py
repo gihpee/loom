@@ -224,3 +224,23 @@ def test_рабочая_половина_кэша_обязательна():
     assert "initialize_kv_cache" in source, "рабочая половина кэша не заводится"
     # И планировщиковая тоже: без неё нечем выдавать блоки под батч.
     assert "KVCacheManager" in source
+
+
+def test_буфер_под_входящие_заводится_до_шага():
+    """Со стенда: вторая стадия упала на
+
+        assert self.intermediate_tensors is not None
+
+    — утверждении, из которого не следует, что буфер кто-то должен был
+    выделить. vLLM не принимает тензоры напрямую: он копирует их в свой
+    буфер и нарезает по размеру батча.
+    """
+    import inspect
+
+    from loom_stage import vllm_runner
+
+    source = inspect.getsource(vllm_runner)
+    assert "_ensure_incoming" in source
+    assert "make_empty_intermediate_tensors" in source
+    # И только у неголовной: первой входящие тензоры не приходят вовсе.
+    assert "if not self.is_first_stage:" in source
