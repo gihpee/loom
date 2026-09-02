@@ -316,10 +316,18 @@ class TaskCommands:
         try:
             ports = {int(rank): [int(p) for p in plist]
                      for rank, plist in (body.get("ports") or {}).items()}
+            # Порты, до которых может дотянуться ОРКЕСТРАТОР, когда до задачи
+            # приходят снаружи. Соседним рангам они не нужны, и поэтому в
+            # раскладке для них места нет — а разрешение всё равно требуется.
+            external = [int(p) for p in (body.get("external") or [])]
         except (TypeError, ValueError) as exc:
             raise TaskRefused(f"раскладка портов не читается: {exc}") from None
-        if not ports:
+        if not ports and not external:
             raise TaskRefused("в раскладке нет ни одного порта")
+        if external:
+            self._allow_inbound(external)
+        if not ports:
+            return {"listening": 0, "ranks": [], "external": len(external)}
 
         remote: Dict[int, str] = {}
         for rank, member in group.members.items():

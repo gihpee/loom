@@ -727,9 +727,16 @@ def create_app(*, agents=None, releases=None, keystore=None, config=None,
             for task in tasks:
                 task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
+            # Причина узла обязана дойти до человека. Без этого канал просто
+            # закрывался, клиент видел таймаут, а объяснение оставалось в логе
+            # агента — там, куда за ним никто не пойдёт.
+            reason = getattr(tunnel, "error", "")
             tunnel.close()
             try:
-                await socket.close()
+                if reason:
+                    await socket.close(code=1011, reason=_reason(reason))
+                else:
+                    await socket.close()
             except RuntimeError:
                 pass
 

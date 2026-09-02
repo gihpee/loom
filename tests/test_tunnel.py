@@ -253,3 +253,25 @@ def test_причина_закрытия_влезает_в_кадр():
     assert _reason("коротко") == "коротко"
     # И остаётся читаемой строкой, а не битым UTF-8.
     _reason(длинная).encode().decode()
+
+
+def test_причина_узла_доходит_до_клиента(stand):
+    """Со стенда: канал открывался и сразу закрывался, клиент видел таймаут,
+    а объяснение оставалось в логе агента.
+
+    Здесь порт намеренно не разрешён — узел откажет, и его текст обязан
+    оказаться в причине закрытия, а не только в его собственном логе.
+    """
+    orchestrator, _agent, echo = stand
+    task_id = running_task(orchestrator, echo.port)
+
+    async def talk():
+        tunnel = orchestrator.hub.open_tunnel(task_id, echo.port)
+        try:
+            assert await tunnel.recv() == b""      # узел отказал
+            return tunnel.error
+        finally:
+            tunnel.close()
+
+    error = orchestrator.call(talk(), timeout=60)
+    assert "не открыт для соседей" in error, error

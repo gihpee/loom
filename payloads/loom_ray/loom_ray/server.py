@@ -95,21 +95,31 @@ def announce(port: int) -> None:
         logger.error("не удалось сообщить агенту про порт %d: %s", port, exc)
 
 
-def ask_forwarding(size: int) -> dict:
-    """Попросить агента сделать порты соседей достижимыми на нашем локалхосте.
+def ask_forwarding(size: int, rank: int) -> dict:
+    """Сказать агенту, что кому открыть.
+
+    Две разные вещи, и путать их нельзя:
+
+    `ports`    — что должны видеть СОСЕДНИЕ РАНГИ. Только для них агент поднимает
+                 слушателей, и только когда ранги на разных машинах.
+    `external` — что может открыть ОРКЕСТРАТОР, когда до кластера приходит
+                 loom-connect. Это клиентский вход, и соседям он не нужен —
+                 из-за чего и не попадал в разрешения вовсе.
 
     Раскладку присылаем МЫ: её определяет версия Ray, а не версия агента.
     Знай её агент — обновление Ray стало бы обновлением всего парка.
-
-    Соседи на этой же машине агента не касаются: их Ray уже слушает эти порты
-    по-настоящему, и он это видит сам.
     """
-    if not AGENT_URL or size < 2:
+    if not AGENT_URL:
         return {"listening": 0}
-    body = json.dumps({"ports": {str(r): p
-                                 for r, p in crossing_for_group(size).items()}})
+    body: dict = {}
+    if size >= 2:
+        body["ports"] = {str(r): p for r, p in crossing_for_group(size).items()}
+    if rank == 0 and STATE["client_port"]:
+        body["external"] = [STATE["client_port"]]
+    if not body:
+        return {"listening": 0}
     request = urllib.request.Request(
-        f"{AGENT_URL}/forward", data=body.encode(), method="POST",
+        f"{AGENT_URL}/forward", data=json.dumps(body).encode(), method="POST",
         headers={"Content-Type": "application/json", "X-Loom-Task": TASK_ID})
     with urllib.request.urlopen(request, timeout=60) as answer:
         return json.loads(answer.read() or b"{}")
@@ -180,15 +190,13 @@ def main(argv=None) -> int:
     code = 0
     try:
         STATE["phase"] = "прошу проброс портов"
-        bridged = ask_forwarding(args.size)
+        if args.rank == 0:
+            STATE["client_port"] = cluster.client_port(args.size)
+        bridged = ask_forwarding(args.size, args.rank)
         if bridged.get("listening"):
             logger.info("агент слушает %d чужих портов для рангов %s",
                         bridged["listening"], bridged.get("ranks"))
         STATE["phase"] = "поднимаю ray"
-        # Порт клиентского входа — до старта: оркестратор спрашивает его у
-        # /health, и знать его надо раньше, чем кластер соберётся.
-        if args.rank == 0:
-            STATE["client_port"] = cluster.client_port(args.size)
         address = cluster.start_node(args.rank, args.size, gpus=args.gpus,
                                      temp_dir=temp_dir)
         STATE["phase"] = "жду остальные ранги"

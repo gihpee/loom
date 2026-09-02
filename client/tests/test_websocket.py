@@ -84,3 +84,28 @@ async def test_неверный_токен_закрывает_соединени
     причину в своём коде."""
     url, _seen = echo_server
     assert await through(url, "0000deadbeef", b"x", want=1) == b""
+
+
+@pytest.mark.asyncio
+async def test_причина_отказа_доходит_до_человека(caplog):
+    """Со стенда: канал открывался и сразу закрывался, клиент видел таймаут
+    ray.init, а объяснение оставалось в логе агента — там, куда за ним никто
+    не пойдёт."""
+    import logging
+
+    from websockets.asyncio.server import serve
+
+    async def refuse(socket):
+        await socket.close(code=1011, reason="порт 29607 не открыт для соседей")
+
+    server = await serve(refuse, "127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+    try:
+        with caplog.at_level(logging.ERROR, logger="loom_connect"):
+            await through(f"ws://127.0.0.1:{port}/connect/g", "token", b"x", want=1)
+    finally:
+        server.close()
+        await server.wait_closed()
+
+    сказано = " ".join(r.getMessage() for r in caplog.records)
+    assert "не открыт для соседей" in сказано, "причина не дошла до клиента"

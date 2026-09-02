@@ -10,7 +10,11 @@ from __future__ import annotations
 
 from urllib.parse import quote
 
+import logging
+
 from loom_connect.tunnel import Upstream
+
+logger = logging.getLogger("loom_connect")
 
 # Заголовок с токеном, а не параметр в адресе: параметры оседают в логах
 # прокси и в истории команд, а токен даёт право исполнять код на чужой машине.
@@ -43,11 +47,26 @@ class WebSocketUpstream(Upstream):
         await self.socket.send(data)
 
     async def recv(self) -> bytes:
-        message = await self.socket.recv()
+        try:
+            message = await self.socket.recv()
+        except Exception:
+            # Закрытие с причиной — единственное место, где до человека
+            # доходит, ПОЧЕМУ кластер не принял. Молча вернуть пустое значит
+            # оставить его с таймаутом и без объяснения.
+            self._say_why()
+            return b""
         # Текстовый кадр здесь означает, что на том конце не тоннель, а,
         # например, страница ошибки прокси. Отдаём пустое: для вызывающего это
         # «поток кончился», и соединение закроется, а не зависнет.
         return message if isinstance(message, bytes) else b""
+
+    def _say_why(self) -> None:
+        reason = (getattr(self.socket, "close_reason", "") or "").strip()
+        code = getattr(self.socket, "close_code", None)
+        if reason:
+            logger.error("кластер закрыл канал: %s", reason)
+        elif code not in (1000, 1001, None):
+            logger.error("кластер закрыл канал, код %s", code)
 
     async def close(self) -> None:
         try:
