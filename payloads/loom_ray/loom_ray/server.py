@@ -37,7 +37,8 @@ AGENT_URL = os.environ.get("LOOM_AGENT_URL", "")
 TASK_ID = os.environ.get("LOOM_TASK_ID", "")
 
 STATE: dict = {"ready": False, "phase": "starting", "nodes": 0, "size": 0,
-               "error": "", "client_port": 0}
+               "error": "", "client_port": 0,
+               "python": "%d.%d" % sys.version_info[:2], "ray": ""}
 _STOP = threading.Event()
 
 
@@ -66,6 +67,12 @@ class Handler(BaseHTTPRequestHandler):
             # версия Ray, и знать её оркестратору значит обновлять его вместе
             # с ней. Ноль означает «внешнего входа нет».
             "client_port": STATE["client_port"],
+            # Чем поднят кластер. Ray Client требует, чтобы у клиента
+            # совпадали и минорная версия Python, и версия Ray — иначе он
+            # падает на «Starting Ray client server failed», где про версии
+            # нет ни слова. Пусть их видно, а не угадывается.
+            "python": STATE["python"],
+            "ray": STATE["ray"],
         })
 
     def _json(self, code: int, body: dict) -> None:
@@ -192,6 +199,7 @@ def main(argv=None) -> int:
         STATE["phase"] = "прошу проброс портов"
         if args.rank == 0:
             STATE["client_port"] = cluster.client_port(args.size)
+        STATE["ray"] = cluster.ray_version()
         bridged = ask_forwarding(args.size, args.rank)
         if bridged.get("listening"):
             logger.info("агент слушает %d чужих портов для рангов %s",

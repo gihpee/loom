@@ -40,6 +40,7 @@ export interface StageHealth {
     status: string;
     layers?: [number, number] | null;   // стадия инференса
     nodes?: number; size?: number; error?: string;   // ранг Ray
+    client_port?: number; python?: string; ray?: string;
   } | null;
 }
 

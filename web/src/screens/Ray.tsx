@@ -98,6 +98,7 @@ function Cluster({ group, nodes, onStop, onForget }: {
   } as StageHealth));
   const alive = ranks.filter((r) => r.ready).length;
   const byId = new Map(nodes.map((n) => [n.node_id, n]));
+  const head = ranks.find((r) => r.rank === 0);
   // Пара пойдёт через реле, если ни один из двоих не принимает входящие и
   // хоть у кого-то симметричный NAT. Для Ray это заметно дороже, чем для
   // конвейера: через тот же путь идёт весь его обмен, а не 8 КБ на токен.
@@ -139,6 +140,14 @@ function Cluster({ group, nodes, onStop, onForget }: {
               <code>ray.init("ray://127.0.0.1:10001")</code> у себя
             </span>
           </div>
+          {head?.stage?.python && (
+            // Ray Client падает на несовпадении версий сообщением, где про
+            // версии нет ни слова. Пусть они будут видны заранее.
+            <div className="sub" style={{ margin: 0 }}>
+              у себя нужны те же: <b>Python {head.stage.python}</b>
+              {head.stage.ray && <> и <code>ray[client]=={head.stage.ray}</code></>}
+            </div>
+          )}
         </div>
       )}
 

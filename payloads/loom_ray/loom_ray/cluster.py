@@ -173,6 +173,16 @@ def client_server_available() -> bool:
         return False
 
 
+def ray_version() -> str:
+    """Версия Ray, которой поднят кластер. Клиенту нужна такая же."""
+    try:
+        import ray
+
+        return str(ray.__version__)
+    except Exception:
+        return ""
+
+
 def client_port(size: int, *, base: int = 0, stride: int = 0) -> int:
     """Порт, на котором кластер принимает клиентов. Ноль — не принимает."""
     if not client_server_available():
