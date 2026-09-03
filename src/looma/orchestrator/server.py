@@ -113,7 +113,7 @@ async def run() -> None:
             fleet = Deployments(database)
             if await accounts.count() == 0:
                 logger.warning("в базе нет ни одной учётной записи — заведите "
-                               "администратора: scripts/create_admin.py")
+                               "администратора: python -m looma.accounts.bootstrap <почта>")
         except DatabaseUnavailable as exc:
             # Не падаем: узлы и уже развёрнутые модели важнее кабинета, и
             # оркестратор без базы всё ещё умеет ими управлять.
