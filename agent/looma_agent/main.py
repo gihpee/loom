@@ -27,7 +27,12 @@ from looma_agent import __version__
 from looma_agent.config import Config, parse_args
 from looma_agent.control.client import ControlClient
 from looma_agent.control.handlers import CommandHandlers
-from looma_agent.hwinfo import cuda_driver_version, detect_hardware, free_vram_bytes
+from looma_agent.hwinfo import (
+    cuda_driver_version,
+    detect_hardware,
+    disk_bytes,
+    free_vram_bytes,
+)
 from looma_agent.identity import BadJoinKey, default_node_id, parse_join_key
 from looma_agent.p2p.layer import PeerLayer
 from looma_agent.tasks.env import EnvironmentCache
@@ -170,6 +175,9 @@ class Agent:
 
     def _telemetry(self) -> agent_pb2.AgentMessage:
         snapshot = self.tasks.snapshot()
+        # Про том, где лежат кэши и задачи, а не про машину: вытеснение считает
+        # квоты именно от него.
+        free_disk, total_disk = disk_bytes(self.config.root)
         report = agent_pb2.Telemetry(
             node_id=self.node_id,
             vram_free_bytes=self.hardware.vram_free_bytes,
@@ -179,6 +187,8 @@ class Agent:
             tasks_running=snapshot["running"],
             env_cache_bytes=snapshot["environments"]["bytes"],
             model_cache_bytes=(snapshot["models"] or {}).get("bytes", 0),
+            disk_free_bytes=free_disk,
+            disk_total_bytes=total_disk,
             # Идёт ли трафик к соседям напрямую. Без этого «конвейер тормозит»
             # и «каждая активация едет длинным путём» выглядят одинаково.
             peer=self.peers.status(),

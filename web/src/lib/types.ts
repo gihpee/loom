@@ -4,6 +4,7 @@ export interface Node {
   gpus_total: number; gpus_free: number; vram_free_bytes: number; host_ram_gb: number;
   accepts_tasks: boolean; refusal: string; environment_kinds: string[];
   tasks_running: number; env_cache_bytes: number; model_cache_bytes: number;
+  disk_free_bytes: number; disk_total_bytes: number;
   connected_at: number; seconds_since_seen: number;
   peer_id: string; symmetric_nat: boolean; reachable: boolean;
   direct: number; relayed: number; direct_share: number; link_rtt_ms: number;

@@ -209,6 +209,10 @@ class AgentNode:
     #: Сколько занимают скачанные веса. Растёт быстрее окружений, и владелец
     #: узла должен видеть, за что отдал диск.
     model_cache_bytes: int = 0
+    #: Место на томе узла. Ноль означает «этот агент ещё не умеет о нём
+    #: рассказывать», а не «диск кончился» — различать это должен показывающий.
+    disk_free_bytes: int = 0
+    disk_total_bytes: int = 0
     peer_id: str = ""
     symmetric_nat: bool = False
     reachable: bool = False
@@ -241,6 +245,8 @@ class AgentNode:
             "tasks_running": self.tasks_running,
             "env_cache_bytes": self.env_cache_bytes,
             "model_cache_bytes": self.model_cache_bytes,
+            "disk_free_bytes": self.disk_free_bytes,
+            "disk_total_bytes": self.disk_total_bytes,
             "peer_id": self.peer_id,
             "symmetric_nat": self.symmetric_nat,
             "reachable": self.reachable,
@@ -1049,6 +1055,8 @@ class AgentHub:
         node.tasks_running = report.tasks_running
         node.env_cache_bytes = report.env_cache_bytes
         node.model_cache_bytes = report.model_cache_bytes
+        node.disk_free_bytes = report.disk_free_bytes
+        node.disk_total_bytes = report.disk_total_bytes
         peer = report.peer
         node.peer_id = peer.peer_id or node.peer_id
         node.symmetric_nat = peer.symmetric_nat

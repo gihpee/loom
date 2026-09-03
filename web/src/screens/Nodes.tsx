@@ -141,6 +141,18 @@ export function Nodes() {
               <div className="value">{gb(current.model_cache_bytes)}<small> GB</small></div>
               <div className="sub">веса, скачанные один раз на узел</div>
             </div>
+            <div className="card stat">
+              <div className="label">Диск</div>
+              {/* Ноль означает «агент ещё не умеет о нём рассказывать», а не
+                  «места нет»: старая версия это поле просто не заполняет, и
+                  показывать её как заполненный под завязку узел — врать. */}
+              <div className="value">
+                {current.disk_total_bytes
+                  ? <>{gb(current.disk_free_bytes)}<small> из {gb(current.disk_total_bytes)} GB</small></>
+                  : <small>агент не сообщает</small>}
+              </div>
+              <div className="sub">том с кэшами и задачами</div>
+            </div>
           </div>
 
           <section>
