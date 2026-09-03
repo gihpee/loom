@@ -1,6 +1,7 @@
 import { gb } from "../lib/format";
 import type { Connect, Group, Node, Task, VersionMap } from "../lib/types";
 import { Badge, Empty, ErrorLine, Stat, StateBadge, usePoll } from "../components";
+import { Topology, strandOf, type NodeState } from "./Topology";
 
 /** Экран, которого не было: что вообще происходит, одним взглядом.
  *  Оператор открывает панель, чтобы понять «всё ли в порядке», а не чтобы
@@ -25,6 +26,21 @@ export function Overview({ go }: { go: (screen: string) => void }) {
   const models = (groups.data?.groups ?? []).filter((g) => g.label);
   const versions = Object.keys(release.data?.versions ?? {});
 
+  // Чьё держит каждый узел. Из групп: имя у группы есть только у модели, у
+  // арендованного кластера его нет — по этому и различаем, не заводя третьего
+  // источника правды.
+  const held = new Map<string, NodeState>();
+  for (const g of groups.data?.groups ?? []) {
+    const state: NodeState = g.label ? "inference" : "rented";
+    for (const rank of g.ranks ?? []) {
+      if (rank.node_id && held.get(rank.node_id) !== "rented") {
+        held.set(rank.node_id, state);
+      }
+    }
+  }
+  const strands = list.map((n) => strandOf(n, held));
+  const lost = strands.filter((s) => s.state === "lost").length;
+
   const problems: { text: string; where: string }[] = [];
   if (connect.data?.severity === "warn")
     problems.push({ text: connect.data.warning ?? "адрес недостижим снаружи — узлы не подключатся",
@@ -48,6 +64,19 @@ export function Overview({ go }: { go: (screen: string) => void }) {
       </header>
 
       <ErrorLine error={nodes.error} />
+
+      {list.length > 0 && (
+        <section className="topo">
+          <Topology strands={strands} />
+          <div className="topo-legend">
+            <span><i data-state="idle" />простаивает</span>
+            <span><i data-state="inference" />инференс</span>
+            <span><i data-state="rented" />у клиента</span>
+            <span><i data-state="updating" />обновляется</span>
+            {lost > 0 && <span><i data-state="lost" />замолчал ({lost})</span>}
+          </div>
+        </section>
+      )}
 
       <section>
         <div className="grid stats">

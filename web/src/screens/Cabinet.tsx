@@ -4,10 +4,11 @@
  * пользуется. А кластер арендует сам, вытесняя при нехватке узлов базовую
  * загрузку и оплачивая часы, пока держит ресурс.
  */
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
-  Badge, Button, Empty, ErrorLine, Field, Modal, Stat, useAction, usePoll, useToast,
+  Badge, Button, Empty, ErrorLine, Field, Modal, useAction, usePoll, useToast,
 } from "../components";
+import { useWoven } from "../components/Weave";
 import { send, type Who } from "../lib/api";
 
 interface KeyRow {
@@ -20,6 +21,7 @@ interface LeaseLine {
 }
 interface TokenLine { model: string; prompt: number; completion: number }
 interface Usage { leases: LeaseLine[]; tokens: TokenLine[] }
+interface NodeRow { state: "free" | "inference" | "rented" | "mine" | "busy"; gpus: number }
 interface Cluster {
   id: number; group_id: string; label: string; nodes: number; gpus: number;
   opened_at: string; alive: boolean;
@@ -32,6 +34,7 @@ const money = (kopecks: number, currency: string) =>
 export function Cabinet({ who }: { who: Who }) {
   const usage = usePoll<Usage>("/api/usage", 15000);
   const clusters = usePoll<{ clusters: Cluster[] }>("/api/compute", 10000);
+  const capacity = usePoll<{ nodes: NodeRow[] }>("/api/capacity", 12000);
   const keys = usePoll<{ keys: KeyRow[] }>("/api/keys", 20000);
   const [renting, setRenting] = useState(false);
   const [fresh, setFresh] = useState("");
@@ -58,11 +61,26 @@ export function Cabinet({ who }: { who: Who }) {
       </header>
 
       <div className="grid stats">
-        <Stat label="Потрачено" value={money(spent, currency)} />
-        <Stat label="Сейчас работает" value={running} sub="аренд" />
-        <Stat label="Токенов выдано"
-              value={tokens.reduce((s, t) => s + t.completion, 0).toLocaleString("ru-RU")} />
+        <div className="glass lead">
+          <div className="label">Потрачено</div>
+          <div className="value">{money(spent, currency)}</div>
+          <div className="sub">по факту, без списаний</div>
+        </div>
+        <div className="glass">
+          <div className="label">Сейчас работает</div>
+          <div className="value">{running}</div>
+          <div className="sub">аренд</div>
+        </div>
+        <div className="glass">
+          <div className="label">Токенов выдано</div>
+          <div className="value">
+            {tokens.reduce((s, t) => s + t.completion, 0).toLocaleString("ru-RU")}
+          </div>
+          <div className="sub">без потоковых</div>
+        </div>
       </div>
+
+      <Fabric nodes={capacity.data?.nodes ?? []} />
 
       <Clusters clusters={clusters} onChanged={() => { clusters.refresh(); usage.refresh(); }} />
 
@@ -115,10 +133,111 @@ export function Cabinet({ who }: { who: Who }) {
       <Keys keys={keys} fresh={fresh} setFresh={setFresh} />
 
       {renting && (
-        <RentCluster onClose={() => setRenting(false)}
-                     onDone={() => { usage.refresh(); clusters.refresh(); }} />
+        <RentCluster nodes={capacity.data?.nodes ?? []}
+                     onClose={() => setRenting(false)}
+                     onDone={() => { usage.refresh(); clusters.refresh(); capacity.refresh(); }} />
       )}
     </div>
+  );
+}
+
+/** Занятость сети полосами-нитями. Не украшение: отсюда видно, хватит ли
+ *  свободных узлов или придётся подвинуть модели платформы. */
+/** Ключ показывается один раз: в базе только хэш. Он ткётся при появлении и
+ *  затыкается обратно при закрытии — исчезновение должно выглядеть
+ *  необратимым, потому что оно и есть необратимое. */
+/** Что произойдёт с сетью при этой аренде. Числа настоящие: сколько свободно
+ *  сейчас и скольких придётся подвинуть. Текст остаётся — виджет его
+ *  иллюстрирует, а не заменяет. */
+function Displacement({ nodes, want }: { nodes: NodeRow[]; want: number }) {
+  const free = nodes.filter((n) => n.state === "free").length;
+  const short = Math.max(0, want - free);
+
+  // Показываем ровно то, что произойдёт: сначала берутся свободные, потом —
+  // столько узлов из-под инференса, скольких не хватило. Если рисовать только
+  // свободные, картинка спорит с текстом под ней, где сказано «снимем ещё N».
+  let takeFree = Math.min(want, free);
+  let takeBusy = short;
+  const preview = nodes.map((n) => {
+    if (n.state === "free" && takeFree > 0) { takeFree--; return "mine"; }
+    if (n.state === "inference" && takeBusy > 0) { takeBusy--; return "displaced"; }
+    return n.state;
+  });
+  return (
+    <div style={{ marginTop: 16 }}>
+      <div className="fabric">
+        {preview.map((state, i) => (
+          <div key={i} className="fabric-row" data-state={state} />
+        ))}
+      </div>
+      <p className="sub" style={{ marginTop: 12 }}>
+        {nodes.length === 0
+          ? "Пока нет ни одного подключённого узла."
+          : short === 0
+            ? `Свободных узлов хватает: ${free} из ${nodes.length}.`
+            : `Свободно ${free}, не хватает ${short}. Платформа снимет столько же
+               своих моделей и вернёт их, когда аренда закончится.`}
+        {" "}Счёт идёт всё время, пока кластер держит ресурс.
+      </p>
+    </div>
+  );
+}
+
+function FreshKey({ value, onDone }: { value: string; onDone: () => void }) {
+  const toast = useToast();
+  const { ref, weave, unweave } = useWoven(false);
+
+  useEffect(() => {
+    // Кадр на «зев»: направляющие расходятся, и только потом идёт уто́к.
+    const id = setTimeout(weave, 90);
+    return () => clearTimeout(id);
+  }, [weave]);
+
+  const close = () => {
+    unweave();
+    setTimeout(onDone, 620);   // ровно столько идёт обратный проход
+  };
+
+  return (
+    <div className="notice">
+      <p><b>Сохраните ключ сейчас — он больше не будет показан.</b></p>
+      <div className="key-woven">
+        <div ref={ref} className="weave-reveal"><code>{value}</code></div>
+      </div>
+      <div style={{ display: "flex", gap: 8 }}>
+        <Button size="sm" onClick={() => {
+          navigator.clipboard?.writeText(value); toast("ok", "скопирован");
+        }}>скопировать</Button>
+        <Button size="sm" kind="ghost" onClick={close}>убрать</Button>
+      </div>
+    </div>
+  );
+}
+
+function Fabric({ nodes }: { nodes: NodeRow[] }) {
+  if (nodes.length === 0) return null;
+  const free = nodes.filter((n) => n.state === "free").length;
+  const mine = nodes.filter((n) => n.state === "mine").length;
+  const under = nodes.filter((n) => n.state === "inference").length;
+  return (
+    <section>
+      <h2>Сеть</h2>
+      <div className="glass">
+        <div className="label">{nodes.length} узлов · {free} свободно</div>
+        <div className="fabric">
+          {nodes.map((n, i) => (
+            <div key={i} className="fabric-row" data-state={n.state}
+                 title={`${n.gpus} GPU`} />
+          ))}
+        </div>
+        <div className="fabric-legend">
+          <span><i style={{ background: "var(--teal-dim)" }} />свободен</span>
+          <span><i style={{ background: "rgba(31,191,168,.5)" }} />под инференсом ({under})</span>
+          <span><i style={{ background: "var(--teal-bright)" }} />ваш ({mine})</span>
+          <span><i style={{ background: "rgba(234,245,242,.16)" }} />занят другим</span>
+        </div>
+      </div>
+    </section>
   );
 }
 
@@ -167,7 +286,6 @@ function Keys({ keys, fresh, setFresh }: {
   keys: ReturnType<typeof usePoll<{ keys: KeyRow[] }>>;
   fresh: string; setFresh: (v: string) => void;
 }) {
-  const toast = useToast();
   const action = useAction(() => keys.refresh());
   const rows = (keys.data?.keys ?? []).filter((k) => !k.revoked_at);
 
@@ -183,15 +301,7 @@ function Keys({ keys, fresh, setFresh }: {
       <div className="tools">
         <Button size="sm" onClick={create} disabled={action.busy}>Создать ключ</Button>
       </div>
-      {fresh && (
-        <div className="notice">
-          <p><b>Сохраните ключ сейчас — он больше не будет показан.</b></p>
-          <code className="mono">{fresh}</code>
-          <Button size="sm" onClick={() => { navigator.clipboard?.writeText(fresh); toast("ok", "скопирован"); }}>
-            скопировать
-          </Button>
-        </div>
-      )}
+      {fresh && <FreshKey value={fresh} onDone={() => setFresh("")} />}
       {rows.length === 0 ? (
         <Empty title="Ключей нет">Ключ подписывает запросы к инференсу.</Empty>
       ) : (
@@ -222,7 +332,9 @@ function Keys({ keys, fresh, setFresh }: {
   );
 }
 
-function RentCluster({ onClose, onDone }: { onClose: () => void; onDone: () => void }) {
+function RentCluster({ nodes, onClose, onDone }: {
+  nodes: NodeRow[]; onClose: () => void; onDone: () => void;
+}) {
   const toast = useToast();
   const action = useAction(() => { onDone(); onClose(); });
   const [size, setSize] = useState("2");
@@ -257,11 +369,7 @@ function RentCluster({ onClose, onDone }: { onClose: () => void; onDone: () => v
                  onChange={(e) => setHours(e.target.value)} />
         </Field>
       </div>
-      <p className="sub" style={{ marginTop: 14 }}>
-        Свободных узлов может не хватить — тогда платформа снимет часть своих
-        моделей и вернёт их, когда аренда закончится. Счёт идёт за всё время,
-        пока кластер держит ресурс.
-      </p>
+      <Displacement nodes={nodes} want={Number(size) || 1} />
     </Modal>
   );
 }

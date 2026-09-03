@@ -118,7 +118,13 @@ export function Release() {
               </thead>
               <tbody>
                 {list.map((n) => (
-                  <tr key={n.node_id}>
+                  <tr key={n.node_id}
+                      // Проход утка́ по списку: строка светится, пока узел
+                      // тянет и ставит релиз, и гаснет, когда он это сделал.
+                      // Только на время настоящей раскатки — постоянная
+                      // анимация в приборной доске мешает читать состояние.
+                      data-weft={["fetching", "downloaded"].includes(n.update_state)
+                                 ? "on" : undefined}>
                     <td><code>{n.node_id}</code></td>
                     <td>
                       <code>{n.agent_version}</code>

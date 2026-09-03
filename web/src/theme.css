@@ -2,26 +2,45 @@
 :root {
   color-scheme: dark;
 
-  /* Поверхности: четыре уровня, каждый на шаг светлее предыдущего. */
-  --bg:        #0b0d11;
-  --surface:   #12151b;
-  --raised:    #171b23;
-  --overlay:   #1c212b;
-  --line:      #242a35;
-  --line-soft: #1b202a;
+  /* --- база: чёрный с холодным бирюзовым подтоном -------------------------
+     Не нейтральный серый: подтон связывает поверхность с акцентом, и без него
+     бирюзовое свечение выглядит наклеенным на чужой фон. */
+  --bg-void:           #060a0a;
+  --bg-surface:        #0c1414;
+  --bg-surface-raised: #101c1c;
+
+  /* Приглушённый, а не неоновый. Дорогое свечение получается низкой
+     насыщенностью и большим радиусом, а не яркостью: неон читается как
+     предупреждение, а не как акцент. */
+  --teal-core:   #1fbfa8;
+  --teal-bright: #4fe8ce;
+  --teal-dim:    rgba(31, 191, 168, .14);
+
+  --ink-100: #eaf5f2;
+  --ink-60:  rgba(234, 245, 242, .6);
+
+  /* Поверхности: четыре уровня, каждый на шаг светлее предыдущего.
+     Имена оставлены прежними — на них опираются все экраны; значения теперь
+     идут от базы выше, чтобы палитра была одна на три поверхности. */
+  --bg:        var(--bg-void);
+  --surface:   var(--bg-surface);
+  --raised:    var(--bg-surface-raised);
+  --overlay:   #14201f;
+  --line:      #172422;
+  --line-soft: #101a19;
 
   /* Текст: три веса важности вместо одного серого на всё. */
-  --text:      #e6e9ef;
-  --text-dim:  #9aa3b2;
-  --text-mute: #5f6878;
+  --text:      var(--ink-100);
+  --text-dim:  rgba(234, 245, 242, .6);
+  --text-mute: rgba(234, 245, 242, .34);
 
   /* Смысл, а не палитра: цвет означает состояние. */
   /* Бирюза, а не сине-фиолетовый: последний узнаётся как «цвет по умолчанию»
      любого дашборда, а этот идёт от знака Looma и связывает панель с лендингом.
      Он же достаточно далёк от ok/warn/bad, чтобы действие не путалось с
      состоянием. */
-  --accent:      #45c8c0;
-  --accent-soft: #45c8c022;
+  --accent:      var(--teal-core);
+  --accent-soft: rgba(31, 191, 168, .14);
   --ok:          #3ecf8e;
   --ok-soft:     #3ecf8e1f;
   --warn:        #e5b95c;
@@ -33,8 +52,12 @@
   --s1: 4px; --s2: 8px; --s3: 12px; --s4: 16px; --s5: 24px; --s6: 32px;
   --r1: 6px; --r2: 10px; --r3: 14px;
 
-  --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, sans-serif;
-  --mono: ui-monospace, SFMono-Regular, "JetBrains Mono", Menlo, monospace;
+  /* Пара намеренно инженерная. Space Grotesk — заголовки и крупные числа: его
+     геометрия читается как собранное из частей, что и нужно теме станка.
+     Plex — текст и данные; моноширинный уже привычный язык приборной панели. */
+  --display: "Space Grotesk", "IBM Plex Sans", -apple-system, "Segoe UI", sans-serif;
+  --sans: "IBM Plex Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
 
   --shadow: 0 8px 28px rgba(0, 0, 0, .5);
 }
@@ -91,7 +114,8 @@ a:hover { text-decoration: underline; }
   display: flex; align-items: flex-start; gap: var(--s4);
   margin-bottom: var(--s5);
 }
-.page > header h1 { font-size: 19px; font-weight: 600; letter-spacing: -.02em; }
+.page > header h1 { font-family: var(--display); font-size: 20px;
+                    font-weight: 600; letter-spacing: -.02em; }
 .page > header p { color: var(--text-dim); font-size: 13px; margin-top: 2px; }
 .page > header .actions { margin-left: auto; display: flex; gap: var(--s2); }
 
@@ -116,7 +140,7 @@ section > h2 {
   color: var(--text-mute); font-size: 11px; text-transform: uppercase;
   letter-spacing: .05em;
 }
-.stat .value {
+.stat .value { font-family: var(--display);
   font-size: 26px; font-weight: 600; letter-spacing: -.02em; margin-top: 6px;
   font-variant-numeric: tabular-nums;
 }
@@ -285,125 +309,174 @@ pre.block.tall { max-height: 420px; }
 }
 
 /* ------------------------------------------------------------------ лендинг
-   Единственная публичная поверхность. Своя палитра — бирюза знака, а не
-   служебные цвета панели: панель это инструмент, лендинг это лицо.
+   Единственная публичная поверхность. Панель — инструмент, лендинг — лицо;
+   плотность у них разная намеренно.
 
-   Плиток нет намеренно. Карточка с рамкой — способ не принимать решение о
-   иерархии: всё в ней выглядит одинаково важным. Здесь иерархию держат размер,
-   вес и воздух, а рамка появляется только там, где две вещи стоят рядом и их
-   надо разделить. */
+   Карточки здесь есть, но не одинаковые: вес держат размер, глубина свечения и
+   то, насколько факт близок к ядру продукта. Одна тень и один радиус на всём —
+   ровно то ощущение «набора для SaaS», из-за которого интерфейс кажется
+   скудным. */
 .landing {
-  --lp-ink:    #eef4f6;
-  --lp-dim:    #93a8b4;
-  --lp-deep:   #080d11;
-  --lp-line:   #17242c;
-  --lp-teal:   #45c8c0;
-  --lp-glow:   #78f0e6;
-  background: var(--lp-deep);
-  color: var(--lp-ink);
+  background: var(--bg-void);
+  color: var(--ink-100);
   min-height: 100vh;
   font-size: 16px;
   line-height: 1.6;
+  position: relative;
 }
-.lp-wrap { max-width: 1060px; margin: 0 auto; padding: 0 28px; }
+.lp-wrap { max-width: 1080px; margin: 0 auto; padding: 0 28px; position: relative; }
 
-.lp-top { position: sticky; top: 0; z-index: 5;
-          background: rgba(8, 13, 17, .82); backdrop-filter: blur(10px);
-          border-bottom: 1px solid transparent; transition: border-color .3s; }
-.lp-nav { display: flex; align-items: center; justify-content: space-between; height: 64px; }
-.lp-brand { display: flex; align-items: center; gap: 11px; color: var(--lp-teal);
+/* Станок на фоне всей страницы: полотно ткётся прокруткой, поэтому холст
+   закреплён, а не прокручивается вместе с секциями. */
+.loom { position: fixed; inset: 0; width: 100%; height: 100%;
+        pointer-events: none; z-index: 0;
+        /* Слева гасим: там текст, и нити под ним превращают заголовок в кашу. */
+        mask-image: linear-gradient(90deg, transparent 4%, rgba(0,0,0,.35) 26%, #000 52%);
+        -webkit-mask-image: linear-gradient(90deg, transparent 4%, rgba(0,0,0,.35) 26%, #000 52%); }
+/* Исключение обязательно: без него правило перебивает `fixed` у холста, тот
+   становится потоковым, `height: 100%` считается от авто-высоты родителя и
+   даёт ноль — полотно просто исчезает, не оставив следа в консоли. */
+.landing > *:not(.loom) { position: relative; z-index: 1; }
+
+.lp-top { position: sticky; top: 0; z-index: 6;
+          background: rgba(6, 10, 10, .72); backdrop-filter: blur(12px);
+          border-bottom: 1px solid var(--line); }
+.lp-nav { display: flex; align-items: center; justify-content: space-between; height: 62px; }
+.lp-brand { display: flex; align-items: center; gap: 10px; color: var(--teal-core);
             text-decoration: none; }
-.lp-brand span { color: var(--lp-ink); font-size: 14.5px; font-weight: 600;
-                 letter-spacing: .01em; }
-.lp-nav nav { display: flex; align-items: center; gap: 24px; }
-.lp-nav a { color: var(--lp-dim); text-decoration: none; font-size: 14px;
+.lp-brand span { color: var(--ink-100); font-family: var(--display);
+                 font-size: 14.5px; font-weight: 600; }
+.lp-nav nav { display: flex; align-items: center; gap: 22px; }
+.lp-nav a { color: var(--ink-60); text-decoration: none; font-size: 14px;
             transition: color .18s; }
-.lp-nav a:hover { color: var(--lp-ink); }
-.lp-enter { color: var(--lp-teal) !important; }
+.lp-nav a:hover { color: var(--ink-100); }
+.lp-enter { color: var(--teal-core) !important; }
 
-/* ---------------------------------------------------------------- первый экран */
-.lp-hero { position: relative; overflow: hidden; padding: 132px 0 116px; }
-.weave { position: absolute; inset: 0; width: 100%; height: 100%;
-         pointer-events: none; opacity: .9;
-         mask-image: linear-gradient(90deg, transparent, #000 22%, #000 78%, transparent); }
-.lp-hero-body { position: relative; }
-.lp-kicker { color: var(--lp-teal); font-size: 12px; font-weight: 600;
-             letter-spacing: .2em; text-transform: uppercase; margin-bottom: 22px;
-             animation: rise .7s cubic-bezier(.2,.7,.2,1) both; }
-.lp-hero h1 { font-size: clamp(42px, 7vw, 76px); line-height: 1.02;
-              letter-spacing: -.035em; font-weight: 800; margin-bottom: 26px;
-              animation: rise .8s cubic-bezier(.2,.7,.2,1) .06s both; }
-.lp-lead { max-width: 46ch; color: var(--lp-dim); font-size: 18px;
-           animation: rise .8s cubic-bezier(.2,.7,.2,1) .14s both; }
-.lp-cta { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 38px;
-          animation: rise .8s cubic-bezier(.2,.7,.2,1) .22s both; }
-@keyframes rise { from { opacity: 0; transform: translateY(14px); } }
+/* --------------------------------------------------------------- первый экран */
+.lp-hero { padding: 150px 0 128px; }
+.lp-hero h1 { font-family: var(--display); font-size: clamp(44px, 7.4vw, 82px);
+              line-height: 1; letter-spacing: -.04em; font-weight: 700;
+              margin-bottom: 26px;
+              animation: rise .8s cubic-bezier(.2,.7,.2,1) both; }
+.lp-lead { max-width: 44ch; color: var(--ink-60); font-size: 18px;
+           animation: rise .8s cubic-bezier(.2,.7,.2,1) .1s both; }
+.lp-cta { margin-top: 36px; animation: rise .8s cubic-bezier(.2,.7,.2,1) .18s both; }
+@keyframes rise { from { opacity: 0; transform: translateY(16px); } }
 
-.lp-primary, .lp-secondary {
-  text-decoration: none; border-radius: 9px; padding: 13px 28px;
-  font-weight: 600; font-size: 15px; display: inline-block;
-  transition: transform .16s cubic-bezier(.2,.7,.2,1), background .16s, box-shadow .16s;
+/* Две точки, на которые отзывается полотно. Подчёркивание живое: наведение
+   что-то меняет на фоне, и связь должна быть заметна. */
+.lp-point { color: var(--ink-100); text-decoration: none; position: relative;
+            border-bottom: 1px solid var(--teal-dim); transition: border-color .2s; }
+.lp-point[data-lit="true"] { border-bottom-color: var(--teal-bright);
+                             color: var(--teal-bright); }
+
+.lp-primary {
+  display: inline-block; text-decoration: none; border-radius: 10px;
+  padding: 13px 30px; font-weight: 600; font-size: 15px;
+  font-family: var(--display);
+  background: linear-gradient(180deg, var(--teal-bright), var(--teal-core));
+  color: #03211d;
+  box-shadow: 0 0 0 0 rgba(31, 191, 168, .4), 0 10px 30px -14px rgba(31, 191, 168, .8);
+  transition: transform .16s cubic-bezier(.2,.7,.2,1), box-shadow .2s;
 }
-.lp-primary { background: var(--lp-teal); color: #04211f;
-              box-shadow: 0 0 0 0 rgba(69, 200, 192, .5); }
 .lp-primary:hover { transform: translateY(-2px);
-                    box-shadow: 0 10px 30px -10px rgba(69, 200, 192, .6); }
-.lp-secondary { color: var(--lp-ink); border: 1px solid var(--lp-line); }
-.lp-secondary:hover { border-color: var(--lp-teal); transform: translateY(-2px); }
+                    box-shadow: 0 0 34px -6px rgba(79, 232, 206, .55); }
 
 /* ------------------------------------------------------------------- разделы */
-.lp-section { padding: 96px 0; }
-.lp-h2 { font-size: clamp(13px, 1.6vw, 14px); font-weight: 600; letter-spacing: .18em;
-         text-transform: uppercase; color: var(--lp-teal); margin-bottom: 40px; }
+.lp-section { padding: 104px 0; }
+.lp-h2 { font-family: var(--display); font-size: clamp(26px, 3.4vw, 38px);
+         font-weight: 600; letter-spacing: -.03em; margin-bottom: 14px; }
+.lp-sub { color: var(--ink-60); max-width: 52ch; margin-bottom: 40px; }
+.lp-section .lp-h2 + .lp-surfaces,
+.lp-section .lp-h2 + .lp-facts { margin-top: 40px; }
 
-.reveal { opacity: 0; transform: translateY(18px);
-          transition: opacity .6s cubic-bezier(.2,.7,.2,1),
-                      transform .6s cubic-bezier(.2,.7,.2,1); }
-.reveal[data-seen="true"] { opacity: 1; transform: none; }
-
-/* Две возможности. Не карточки: разделены линией и воздухом, а имя сервиса —
-   крупным, потому что именно его ищут глазами. */
-.lp-products { display: grid; gap: 0;
-               grid-template-columns: repeat(auto-fit, minmax(330px, 1fr)); }
-.lp-product { padding: 34px 34px 34px 0; position: relative; height: 100%; }
-.lp-products > .reveal + .reveal .lp-product { padding-left: 34px; }
-.lp-products > .reveal + .reveal .lp-product::before {
-  content: ""; position: absolute; left: 0; top: 8px; bottom: 8px; width: 1px;
-  background: linear-gradient(180deg, transparent, var(--lp-line) 20%,
-                              var(--lp-line) 80%, transparent);
+/* Две поверхности: не одинаковые. Инференс — ядро предложения, поэтому шире и
+   со свечением; кластер рядом, спокойнее. */
+.lp-surfaces { display: grid; gap: 20px;
+               grid-template-columns: 1.25fr 1fr; align-items: start; }
+@media (max-width: 880px) { .lp-surfaces { grid-template-columns: 1fr; } }
+.lp-surface { background: var(--bg-surface); border: 1px solid var(--line);
+              border-radius: 18px; padding: 34px; overflow: hidden;
+              transition: transform .3s cubic-bezier(.2,.7,.2,1),
+                          border-color .3s, box-shadow .3s; }
+.lp-surface:hover { transform: translateY(-3px);
+                    border-color: rgba(31, 191, 168, .35); }
+.card--featured {
+  border: 1px solid var(--teal-core);
+  box-shadow: 0 0 40px -10px rgba(31, 191, 168, .35);
+  background: linear-gradient(180deg, var(--bg-surface-raised), var(--bg-surface));
 }
-.lp-product h3 { font-size: clamp(30px, 4vw, 42px); font-weight: 800;
-                 letter-spacing: -.03em; line-height: 1.05; margin-bottom: 14px; }
-.lp-line { font-size: 17px; color: var(--lp-ink); margin-bottom: 12px; }
-.lp-detail { color: var(--lp-dim); font-size: 15px; max-width: 42ch; }
-.lp-product ul { list-style: none; padding: 0; margin: 22px 0 0;
+.card--featured:hover { box-shadow: 0 0 56px -8px rgba(31, 191, 168, .5); }
+.lp-surface h3 { font-family: var(--display); font-size: clamp(28px, 3.6vw, 40px);
+                 font-weight: 700; letter-spacing: -.03em; line-height: 1.05;
+                 margin-bottom: 14px; }
+.lp-line { font-size: 17px; color: var(--ink-100); margin-bottom: 10px; }
+.lp-detail { color: var(--ink-60); font-size: 15px; }
+.lp-surface ul { list-style: none; padding: 0; margin: 22px 0 0;
                  display: flex; flex-wrap: wrap; gap: 8px; }
-.lp-product li { font-size: 13px; color: var(--lp-dim); border: 1px solid var(--lp-line);
-                 border-radius: 999px; padding: 5px 13px; transition: border-color .2s, color .2s; }
-.lp-product:hover li { border-color: rgba(69, 200, 192, .35); color: var(--lp-ink); }
-.lp-id { display: block; margin-top: 22px; font-size: 12.5px; color: var(--lp-teal);
-         opacity: .55; transition: opacity .2s; letter-spacing: .02em; }
-.lp-product:hover .lp-id { opacity: 1; }
+.lp-surface li { font-family: var(--mono); font-size: 12px; color: var(--ink-60);
+                 border: 1px solid var(--line); border-radius: 6px; padding: 5px 10px;
+                 transition: border-color .25s, color .25s; }
+.lp-surface:hover li { border-color: rgba(31, 191, 168, .3); color: var(--ink-100); }
+.lp-id { display: block; margin-top: 24px; font-family: var(--mono);
+         font-size: 12.5px; color: var(--teal-core); opacity: .6;
+         transition: opacity .25s; }
+.lp-surface:hover .lp-id { opacity: 1; }
 
-/* ----------------------------------------------------------------- почему */
-.lp-why { border-top: 1px solid var(--lp-line); border-bottom: 1px solid var(--lp-line);
-          background: rgba(255, 255, 255, .012); }
-.lp-why-grid { display: grid; gap: 40px;
-               grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); }
-.lp-why-item h3 { font-size: 18px; font-weight: 700; margin-bottom: 8px;
-                  letter-spacing: -.01em; }
-.lp-why-item p { color: var(--lp-dim); font-size: 14.5px; }
+/* Факты об устройстве: три карточки разного размера. Глубина свечения — по
+   тому, насколько факт близок к ядру, а не по вкусу. */
+.lp-facts { display: grid; gap: 18px;
+            grid-template-columns: repeat(2, 1fr); align-items: start; }
+@media (max-width: 880px) { .lp-facts { grid-template-columns: 1fr; } }
+.lp-fact { background: var(--bg-surface); border: 1px solid var(--line);
+           border-radius: 16px; padding: 28px; overflow: hidden; }
+.lp-fact h3 { font-family: var(--display); font-size: 21px; font-weight: 600;
+              letter-spacing: -.02em; margin-bottom: 10px; }
+.lp-fact p { color: var(--ink-60); font-size: 14.8px; }
+.lp-fact--core { grid-column: 1 / -1; padding: 36px;
+  background: linear-gradient(140deg, var(--bg-surface-raised), var(--bg-surface) 65%);
+  border-color: rgba(31, 191, 168, .22);
+  box-shadow: inset 0 1px 0 rgba(79, 232, 206, .08), 0 0 60px -22px rgba(31, 191, 168, .5); }
+.lp-fact--core h3 { font-size: clamp(24px, 3vw, 30px); }
+.lp-fact--core p { font-size: 16px; max-width: 64ch; }
 
-.lp-final { text-align: left; }
-.lp-final .lp-lead { margin-bottom: 32px; }
+/* ---------------------------------------------------------------------- FAQ */
+.lp-faq-wrap { max-width: 800px; }
+.lp-faq { display: grid; gap: 10px; }
+.lp-q { border: 1px solid var(--line); border-radius: 12px;
+        background: var(--bg-surface); overflow: hidden; transition: border-color .25s; }
+.lp-q[data-open="true"] { border-color: rgba(31, 191, 168, .4);
+                          box-shadow: 0 0 30px -14px rgba(31, 191, 168, .55); }
+.lp-q button { width: 100%; display: flex; align-items: center; gap: 16px;
+               background: none; border: none; color: var(--ink-100);
+               font: inherit; text-align: left; padding: 18px 22px; cursor: pointer; }
+.lp-q button span { flex: 1; font-size: 15.5px; }
+.lp-q i { flex: 0 0 auto; width: 11px; height: 11px; position: relative; }
+.lp-q i::before, .lp-q i::after { content: ""; position: absolute; inset: 0;
+  margin: auto; background: var(--teal-core); transition: transform .3s, opacity .3s; }
+.lp-q i::before { width: 11px; height: 1.5px; }
+.lp-q i::after  { width: 1.5px; height: 11px; }
+.lp-q[data-open="true"] i::after { transform: scaleY(0); opacity: 0; }
+.lp-a { display: grid; grid-template-rows: 0fr;
+        transition: grid-template-rows .34s cubic-bezier(.65,0,.35,1); }
+.lp-q[data-open="true"] .lp-a { grid-template-rows: 1fr; }
+.lp-a > p { overflow: hidden; color: var(--ink-60); font-size: 14.8px;
+            padding: 0 22px; }
+.lp-q[data-open="true"] .lp-a > p { padding-bottom: 20px; }
 
-.lp-foot { border-top: 1px solid var(--lp-line); padding: 28px 0; color: var(--lp-teal); }
+/* ------------------------------------------------------------- финальный блок */
+.lp-final { padding: 128px 0 132px; }
+.lp-final h2 { font-family: var(--display); font-size: clamp(30px, 4.4vw, 48px);
+               font-weight: 700; letter-spacing: -.035em; margin-bottom: 18px; }
+.lp-final .lp-lead { margin-bottom: 34px; animation: none; }
+
+.lp-foot { border-top: 1px solid var(--line); padding: 26px 0; color: var(--teal-core); }
 .lp-foot .lp-wrap { display: flex; align-items: center; gap: 14px; }
-.lp-foot p { color: var(--lp-dim); font-size: 13px; margin: 0; }
+.lp-foot p { color: var(--ink-60); font-size: 13px; margin: 0; }
 
 @media (prefers-reduced-motion: reduce) {
-  .lp-kicker, .lp-hero h1, .lp-lead, .lp-cta { animation: none; }
-  .reveal { opacity: 1; transform: none; transition: none; }
+  .lp-hero h1, .lp-lead, .lp-cta { animation: none; }
+  .lp-surface, .lp-primary { transition: none; }
 }
 
 /* -------------------------------------------------------------------- вход */
@@ -443,3 +516,173 @@ pre.block.tall { max-height: 420px; }
   justify-items: center; text-align: center; padding: 24px; }
 .denied p { color: var(--text-dim); }
 .loading { min-height: 100vh; background: var(--bg); }
+
+/* --------------------------------------------------------- ткацкий примитив
+   Раскрытие идёт клипом слева направо — это и есть проход утка́, — а по кромке
+   бежит светящийся челнок. Анимируются только clip-path и opacity: width и
+   left заставили бы браузер пересчитывать раскладку на каждом кадре. */
+.weave-reveal {
+  --progress: 0;
+  position: relative;
+  clip-path: inset(0 calc((1 - var(--progress)) * 100%) 0 0);
+  opacity: calc(.25 + var(--progress) * .75);
+  transition: clip-path 620ms cubic-bezier(.65, 0, .35, 1),
+              opacity 420ms ease-out;
+}
+.weave-reveal::after {
+  content: "";
+  position: absolute;
+  top: 0; bottom: 0;
+  left: calc(var(--progress) * 100%);
+  width: 2px;
+  background: var(--teal-bright);
+  box-shadow: 0 0 14px 2px rgba(79, 232, 206, .55);
+  /* Челнок виден только в движении: на нуле его ещё нет, на единице он уже
+     ушёл за край. Синус на CSS не посчитать, поэтому гасим к концу. */
+  opacity: calc(var(--progress) * (1 - var(--progress)) * 4);
+  transition: left 620ms cubic-bezier(.65, 0, .35, 1), opacity 620ms ease-out;
+  pointer-events: none;
+}
+
+/* Зев: направляющие расходятся, освобождая проход. Только там, где раскрытие
+   ещё не случилось. */
+.warp-guides { position: relative; }
+.warp-guides::before {
+  content: "";
+  position: absolute; inset: 0;
+  background: repeating-linear-gradient(90deg,
+    var(--teal-dim) 0 1px, transparent 1px 64px);
+  opacity: .5;
+  transition: opacity .5s;
+  pointer-events: none;
+}
+.warp-guides[data-open="true"]::before { opacity: .18; }
+
+@media (prefers-reduced-motion: reduce) {
+  .weave-reveal { --progress: 1; transition: none; opacity: 1; }
+  .weave-reveal::after { display: none; }
+}
+
+/* ------------------------------------------------------------------ кабинет
+   Стекло, а не плитка. Техника слоями: размытая подложка под карточкой даёт
+   свечение, внутренняя тень — толщину стекла, внешняя — отрыв от фона.
+
+   Внутренняя тень намеренно мягче, чем в оранжевом образце: резкая бирюзовая
+   кромка читается как подсветка ошибки, а не как акцент. Цвет состояния должен
+   оставаться единственным, кто говорит «что-то не так».
+
+   Кабинет остаётся просторным: стекло не повод уплотнять. Это «мои ресурсы»,
+   а не приборная доска — плотность у консоли. */
+.app-shell .grid.stats { gap: var(--s4); }
+
+.glass {
+  position: relative;
+  border-radius: 18px;
+  padding: 22px 24px 24px;
+  background: linear-gradient(152deg,
+              rgba(31, 191, 168, .10) 0%,
+              rgba(16, 28, 28, .72) 46%,
+              rgba(12, 20, 20, .86) 100%);
+  border: 1px solid rgba(31, 191, 168, .16);
+  box-shadow:
+    inset 0 1px 0 rgba(120, 245, 224, .10),   /* блик по верхней кромке */
+    inset -6px 0 18px -12px rgba(79, 232, 206, .45), /* толщина стекла, мягко */
+    0 16px 34px -22px rgba(0, 0, 0, .9);
+  overflow: hidden;
+  isolation: isolate;
+}
+/* Свечение под стеклом: отдельным слоем, чтобы его можно было усилить у
+   карточки, которую нужно выделить, не трогая остальные. */
+.glass::before {
+  content: "";
+  position: absolute;
+  right: -22%; top: -46%;
+  width: 62%; height: 150%;
+  background: radial-gradient(closest-side,
+              rgba(79, 232, 206, .30), rgba(31, 191, 168, .10) 55%, transparent 78%);
+  filter: blur(26px);
+  z-index: -1;
+  transition: opacity .45s, transform .45s cubic-bezier(.2,.7,.2,1);
+}
+.glass:hover::before { transform: translateX(-6%) scale(1.06); }
+.glass .label { color: var(--ink-60); font-family: var(--mono); font-size: 11px;
+                letter-spacing: .09em; text-transform: uppercase; }
+.glass .value { font-family: var(--display); font-size: 32px; font-weight: 600;
+                letter-spacing: -.03em; margin-top: 8px;
+                font-variant-numeric: tabular-nums; }
+.glass .sub { color: var(--ink-60); font-size: 12.5px; margin-top: 4px; }
+/* Выделенная — та же техника, глубже свечение. Не другая карточка. */
+.glass.lead::before { opacity: 1; width: 78%; }
+.glass.lead { border-color: rgba(31, 191, 168, .34); }
+
+/* --------------------------------------------------- полотно узлов сети
+   Не украшение: показывает, что произойдёт при аренде. Каждая полоса — узел,
+   цвет — чьё он держит. */
+.fabric { display: grid; gap: 5px; margin-top: var(--s3); }
+.fabric-row { height: 8px; border-radius: 3px; position: relative; overflow: hidden;
+              background: var(--teal-dim);
+              transition: background .5s cubic-bezier(.65,0,.35,1); }
+.fabric-row[data-state="inference"] { background: rgba(31, 191, 168, .5); }
+.fabric-row[data-state="rented"]    { background: rgba(234, 245, 242, .16); }
+.fabric-row[data-state="mine"]      { background: var(--teal-bright);
+                                      box-shadow: 0 0 14px -2px rgba(79, 232, 206, .7); }
+.fabric-row[data-state="busy"]      { background: rgba(31, 191, 168, .3); }
+/* Узел, который придётся подвинуть. Полосатый, а не просто цветной: это не
+   состояние сети, а предупреждение о том, что сейчас случится. */
+.fabric-row[data-state="displaced"] {
+  background: repeating-linear-gradient(115deg,
+    rgba(79, 232, 206, .75) 0 6px, rgba(31, 191, 168, .22) 6px 12px);
+}
+.fabric-legend { display: flex; flex-wrap: wrap; gap: var(--s4);
+                 margin-top: var(--s3); font-size: 12px; color: var(--ink-60); }
+.fabric-legend i { display: inline-block; width: 16px; height: 6px; border-radius: 2px;
+                   margin-right: 6px; vertical-align: 1px; }
+
+/* ------------------------------------------------------- раскрытие ключа
+   Ключ показывается один раз — в базе только хэш. Он ткётся при показе и
+   затыкается обратно при закрытии: исчезновение должно выглядеть
+   необратимым, потому что оно и есть необратимое. */
+.key-woven { position: relative; overflow: hidden; border-radius: var(--r2);
+             background: var(--bg-surface-raised); border: 1px solid var(--line);
+             padding: 14px 16px; }
+.key-woven .weave-reveal { display: block; }
+.key-woven code { font-family: var(--mono); font-size: 13px; word-break: break-all;
+                  color: var(--teal-bright); }
+
+/* ------------------------------------------------------------------ консоль
+   Приборная доска: суше и плотнее кабинета. Бирюза здесь функциональная —
+   цвет означает состояние, а не украшает. */
+.topo { display: grid; grid-template-columns: minmax(0, 320px) 1fr;
+        gap: var(--s5); align-items: center; }
+@media (max-width: 780px) { .topo { grid-template-columns: 1fr; } }
+.topology { width: 100%; aspect-ratio: 1; max-height: 260px; display: block; }
+.topo-legend { display: grid; gap: var(--s2); font-size: 12px; color: var(--text-dim); }
+.topo-legend i { display: inline-block; width: 14px; height: 2px; margin-right: 8px;
+                 vertical-align: 3px; border-radius: 1px; }
+.topo-legend i[data-state="idle"]      { background: rgba(31, 191, 168, .5); }
+.topo-legend i[data-state="inference"] { background: rgba(79, 232, 206, .9); }
+.topo-legend i[data-state="rented"]    { background: rgba(234, 245, 242, .7); }
+.topo-legend i[data-state="updating"]  { background: var(--warn); }
+.topo-legend i[data-state="lost"]      { background: var(--bad); }
+
+/* Проход утка́ по строке узла — только пока идёт настоящая раскатка. */
+tr[data-weft="on"] { position: relative; }
+tr[data-weft="on"] td:first-child { position: relative; }
+tr[data-weft="on"] td:first-child::before {
+  content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 2px;
+  background: var(--teal-bright);
+  box-shadow: 0 0 10px 1px rgba(79, 232, 206, .6);
+}
+tr[data-weft="on"] { background:
+  linear-gradient(90deg, rgba(79, 232, 206, .10), transparent 55%);
+  animation: weft 1.9s linear infinite; }
+@keyframes weft {
+  from { background-position: -120% 0; }
+  to   { background-position: 220% 0; }
+}
+tr[data-weft="on"] { background-size: 60% 100%; background-repeat: no-repeat; }
+
+@media (prefers-reduced-motion: reduce) {
+  tr[data-weft="on"] { animation: none;
+    background: linear-gradient(90deg, rgba(79, 232, 206, .10), transparent 55%); }
+}

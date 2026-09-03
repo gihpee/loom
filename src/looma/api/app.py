@@ -1057,6 +1057,46 @@ def create_app(*, agents=None, releases=None, keystore=None, config=None,
         return await _start_cluster(raw, account_id=whoami(request).account_id,
                                    by_admin=False)
 
+    @app.get("/api/capacity")
+    async def capacity(request: Request):
+        """Занятость сети — столько, сколько клиенту положено знать.
+
+        Без имён узлов: клиенту незачем знать, на чьей машине он считает, а имя
+        узла — это чужой хост. Отдаём состояния и число карт, чтобы кабинет мог
+        показать, что произойдёт при аренде: свободных не хватит — платформа
+        подвинет свои модели.
+
+        Считается из живого состояния, а не из отдельного счётчика: счётчик
+        разошёлся бы с действительностью в первый же час.
+        """
+        if agents is None:
+            return need_agents()
+        mine_groups, rented_groups = set(), set()
+        if ledger is not None:
+            for row in await ledger.open_leases(resource=COMPUTE):
+                rented_groups.add(row["group_id"])
+                if row["account_id"] == whoami(request).account_id:
+                    mine_groups.add(row["group_id"])
+        inference_groups = set()
+        if deployments is not None:
+            inference_groups = {d.group_id for d in await deployments.list()}
+
+        busy: dict = {}
+        for group_id, record in agents.groups.items():
+            state = ("mine" if group_id in mine_groups
+                     else "rented" if group_id in rented_groups
+                     else "inference" if group_id in inference_groups else "busy")
+            for node_id in getattr(record, "nodes", {}).values():
+                # Своё важнее чужого: узел, который держит клиент, показываем
+                # ему как свой, даже если на нём же что-то ещё.
+                if busy.get(node_id) != "mine":
+                    busy[node_id] = state
+
+        rows = [{"state": busy.get(node["node_id"], "free"),
+                 "gpus": int(node.get("gpus_total") or 0)}
+                for node in agents.node_list() if node.get("accepts_tasks")]
+        return {"nodes": rows}
+
     @app.get("/api/compute")
     async def my_clusters(request: Request):
         """Мои идущие аренды. Только свои: чужие сюда не попадают."""
