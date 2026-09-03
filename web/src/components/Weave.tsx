@@ -16,32 +16,61 @@
  * Срабатывает единожды. Повторное проигрывание при обратном скролле — самый
  * заметный признак анимации ради анимации.
  */
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 
 export const calmMotion = () =>
   typeof matchMedia === "function" &&
   matchMedia("(prefers-reduced-motion: reduce)").matches;
 
-/** Ссылка на узел, который выткётся, когда попадёт в поле зрения. */
+/** Ссылка на узел, который выткётся, когда попадёт в поле зрения.
+ *
+ * Содержимое видно ПО УМОЛЧАНИЮ, а прячет его скрипт — и только затем, чтобы
+ * тут же показать. Обратный порядок (спрятано в CSS, показывает наблюдатель)
+ * выглядит так же ровно до первой причины, по которой наблюдатель не
+ * сработал: вкладка была скрыта, элемент так и не пересёк порог, скрипт не
+ * выполнился. Тогда посетитель видит пустой раздел с одним заголовком, и
+ * виновата в этом анимация, которой там не должно быть вовсе.
+ *
+ * Правило простое: украшение не имеет права прятать содержимое.
+ */
 export function useWeaveReveal<T extends HTMLElement>(threshold = 0.3) {
   const ref = useRef<T>(null);
+  const hidden = useRef(false);
+
+  // Прячем только то, что ещё ниже экрана. Уже видимое не трогаем совсем:
+  // анимировать появление того, на что человек уже смотрит, незачем, а вот
+  // спрятать первый экран в ожидании события, которое может не прийти, —
+  // ровно та ошибка, из-за которой разделы оказывались пустыми.
+  useLayoutEffect(() => {
+    const node = ref.current;
+    if (!node || calmMotion()) return;
+    if (node.getBoundingClientRect().top < window.innerHeight) return;
+    node.style.setProperty("--progress", "0");
+    hidden.current = true;
+  }, []);
 
   useEffect(() => {
     const node = ref.current;
-    if (!node) return;
-    if (calmMotion()) {
-      // Никакого раскрытия: контент просто на месте. Отключать анимацию,
-      // ломая при этом появление, — худший из вариантов.
+    if (!node || !hidden.current) return;
+
+    const show = (animate: boolean) => {
+      if (!hidden.current) return;
+      hidden.current = false;
+      // В скрытой вкладке переходы не идут: они замирают на начальном кадре,
+      // то есть на спрятанном. Тогда показываем разом, без анимации.
+      if (!animate) node.style.transition = "none";
       node.style.setProperty("--progress", "1");
-      return;
-    }
+    };
+
     const eye = new IntersectionObserver(([entry]) => {
-      if (!entry.isIntersecting) return;
-      node.style.setProperty("--progress", "1");
-      eye.disconnect();
+      if (entry.isIntersecting) { show(!document.hidden); eye.disconnect(); }
     }, { threshold });
     eye.observe(node);
-    return () => eye.disconnect();
+
+    // Страховка: если наблюдатель почему-либо не позвал — показываем сами.
+    // Опоздать с появлением несравнимо лучше, чем не появиться никогда.
+    const rescue = setTimeout(() => { show(!document.hidden); eye.disconnect(); }, 2000);
+    return () => { clearTimeout(rescue); eye.disconnect(); };
   }, [threshold]);
 
   return ref;
@@ -70,7 +99,7 @@ export function useWoven(initial = false) {
   const [woven, setWoven] = useState(initial);
   const ref = useRef<HTMLDivElement>(null);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const node = ref.current;
     if (!node) return;
     node.style.setProperty("--progress", woven || calmMotion() ? "1" : "0");

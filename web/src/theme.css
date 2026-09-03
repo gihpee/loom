@@ -522,7 +522,9 @@ pre.block.tall { max-height: 420px; }
    бежит светящийся челнок. Анимируются только clip-path и opacity: width и
    left заставили бы браузер пересчитывать раскладку на каждом кадре. */
 .weave-reveal {
-  --progress: 0;
+  /* Единица, а не ноль: без скрипта содержимое просто видно. Ноль здесь
+     означал бы, что сломанный наблюдатель прячет текст навсегда. */
+  --progress: 1;
   position: relative;
   clip-path: inset(0 calc((1 - var(--progress)) * 100%) 0 0);
   opacity: calc(.25 + var(--progress) * .75);
