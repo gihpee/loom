@@ -5,19 +5,19 @@
   /* --- база: чёрный с холодным бирюзовым подтоном -------------------------
      Не нейтральный серый: подтон связывает поверхность с акцентом, и без него
      бирюзовое свечение выглядит наклеенным на чужой фон. */
-  --bg-void:           #060a0a;
-  --bg-surface:        #0c1414;
-  --bg-surface-raised: #101c1c;
+  --bg-void:           #08151a;
+  --bg-surface:        #0f2129;
+  --bg-surface-raised: #173039;
 
   /* Приглушённый, а не неоновый. Дорогое свечение получается низкой
      насыщенностью и большим радиусом, а не яркостью: неон читается как
      предупреждение, а не как акцент. */
-  --teal-core:   #1fbfa8;
-  --teal-bright: #4fe8ce;
-  --teal-dim:    rgba(31, 191, 168, .14);
+  --teal-core:   #29c6de;
+  --teal-bright: #7cf0ff;
+  --teal-dim:    rgba(41, 198, 222, .14);
 
-  --ink-100: #eaf5f2;
-  --ink-60:  rgba(234, 245, 242, .6);
+  --ink-100: #e8f7fb;
+  --ink-60:  rgba(232, 247, 251, .62);
 
   /* Поверхности: четыре уровня, каждый на шаг светлее предыдущего.
      Имена оставлены прежними — на них опираются все экраны; значения теперь
@@ -25,14 +25,14 @@
   --bg:        var(--bg-void);
   --surface:   var(--bg-surface);
   --raised:    var(--bg-surface-raised);
-  --overlay:   #14201f;
-  --line:      #172422;
-  --line-soft: #101a19;
+  --overlay:   #1c3843;
+  --line:      #21414c;
+  --line-soft: #172f37;
 
   /* Текст: три веса важности вместо одного серого на всё. */
   --text:      var(--ink-100);
-  --text-dim:  rgba(234, 245, 242, .6);
-  --text-mute: rgba(234, 245, 242, .34);
+  --text-dim:  rgba(232, 247, 251, .62);
+  --text-mute: rgba(232, 247, 251, .38);
 
   /* Смысл, а не палитра: цвет означает состояние. */
   /* Бирюза, а не сине-фиолетовый: последний узнаётся как «цвет по умолчанию»
@@ -40,7 +40,7 @@
      Он же достаточно далёк от ok/warn/bad, чтобы действие не путалось с
      состоянием. */
   --accent:      var(--teal-core);
-  --accent-soft: rgba(31, 191, 168, .14);
+  --accent-soft: rgba(41, 198, 222, .14);
   --ok:          #3ecf8e;
   --ok-soft:     #3ecf8e1f;
   --warn:        #e5b95c;
@@ -109,28 +109,29 @@ a:hover { text-decoration: underline; }
 .side .foot { margin-top: auto; display: flex; flex-direction: column; gap: var(--s2); }
 
 .main { overflow: auto; display: flex; flex-direction: column; }
-.page { padding: var(--s5) var(--s6); max-width: 1400px; width: 100%; }
+.page { padding: var(--s6) var(--s6) 56px; max-width: 1400px; width: 100%;
+        display: flex; flex-direction: column; gap: var(--s6); }
 .page > header {
   display: flex; align-items: flex-start; gap: var(--s4);
-  margin-bottom: var(--s5);
 }
 .page > header h1 { font-family: var(--display); font-size: 20px;
                     font-weight: 600; letter-spacing: -.02em; }
 .page > header p { color: var(--text-dim); font-size: 13px; margin-top: 2px; }
 .page > header .actions { margin-left: auto; display: flex; gap: var(--s2); }
 
-section { margin-bottom: var(--s5); }
+section { display: flex; flex-direction: column; gap: var(--s3); }
 section > h2 {
   font-size: 12px; font-weight: 600; color: var(--text-dim);
-  letter-spacing: .04em; text-transform: uppercase; margin-bottom: var(--s3);
+  letter-spacing: .04em; text-transform: uppercase;
   display: flex; align-items: center; gap: var(--s2);
 }
+/* Подпись под заголовком раздела принадлежит заголовку, а не следующему блоку:
+   поднимаем её вплотную, чтобы gap не разрывал пару. */
+section > .sub { color: var(--text-dim); font-size: 13px; max-width: 68ch; }
+section > h2 + .sub { margin-top: calc(var(--s3) * -1 + 2px); }
 
 /* ------------------------------------------------------------ примитивы */
-.card {
-  background: var(--surface); border: 1px solid var(--line);
-  border-radius: var(--r2); padding: var(--s4);
-}
+.card { border-radius: var(--r2); padding: var(--s4); }
 .card.pad0 { padding: 0; }
 .grid { display: grid; gap: var(--s3); }
 .grid.stats { grid-template-columns: repeat(auto-fit, minmax(168px, 1fr)); }
@@ -331,15 +332,15 @@ pre.block.tall { max-height: 420px; }
 .loom { position: fixed; inset: 0; width: 100%; height: 100%;
         pointer-events: none; z-index: 0;
         /* Слева гасим: там текст, и нити под ним превращают заголовок в кашу. */
-        mask-image: linear-gradient(90deg, transparent 4%, rgba(0,0,0,.35) 26%, #000 52%);
-        -webkit-mask-image: linear-gradient(90deg, transparent 4%, rgba(0,0,0,.35) 26%, #000 52%); }
+        mask-image: linear-gradient(90deg, rgba(0,0,0,.25) 0%, rgba(0,0,0,.6) 22%, #000 46%);
+        -webkit-mask-image: linear-gradient(90deg, rgba(0,0,0,.25) 0%, rgba(0,0,0,.6) 22%, #000 46%); }
 /* Исключение обязательно: без него правило перебивает `fixed` у холста, тот
    становится потоковым, `height: 100%` считается от авто-высоты родителя и
    даёт ноль — полотно просто исчезает, не оставив следа в консоли. */
 .landing > *:not(.loom) { position: relative; z-index: 1; }
 
 .lp-top { position: sticky; top: 0; z-index: 6;
-          background: rgba(6, 10, 10, .72); backdrop-filter: blur(12px);
+          background: rgba(8, 21, 26, .68); backdrop-filter: blur(16px) saturate(140%);
           border-bottom: 1px solid var(--line); }
 .lp-nav { display: flex; align-items: center; justify-content: space-between; height: 62px; }
 .lp-brand { display: flex; align-items: center; gap: 10px; color: var(--teal-core);
@@ -353,7 +354,7 @@ pre.block.tall { max-height: 420px; }
 .lp-enter { color: var(--teal-core) !important; }
 
 /* --------------------------------------------------------------- первый экран */
-.lp-hero { padding: 150px 0 128px; }
+.lp-hero { padding: 118px 0 82px; }
 .lp-hero h1 { font-family: var(--display); font-size: clamp(44px, 7.4vw, 82px);
               line-height: 1; letter-spacing: -.04em; font-weight: 700;
               margin-bottom: 26px;
@@ -376,37 +377,38 @@ pre.block.tall { max-height: 420px; }
   font-family: var(--display);
   background: linear-gradient(180deg, var(--teal-bright), var(--teal-core));
   color: #03211d;
-  box-shadow: 0 0 0 0 rgba(31, 191, 168, .4), 0 10px 30px -14px rgba(31, 191, 168, .8);
+  box-shadow: 0 0 0 0 rgba(41, 198, 222, .4), 0 10px 30px -14px rgba(41, 198, 222, .8);
   transition: transform .16s cubic-bezier(.2,.7,.2,1), box-shadow .2s;
 }
 .lp-primary:hover { transform: translateY(-2px);
-                    box-shadow: 0 0 34px -6px rgba(79, 232, 206, .55); }
+                    box-shadow: 0 0 34px -6px rgba(124, 240, 255, .55); }
 
 /* ------------------------------------------------------------------- разделы */
-.lp-section { padding: 104px 0; }
+.lp-section { padding: 68px 0; }
 .lp-h2 { font-family: var(--display); font-size: clamp(26px, 3.4vw, 38px);
          font-weight: 600; letter-spacing: -.03em; margin-bottom: 14px; }
-.lp-sub { color: var(--ink-60); max-width: 52ch; margin-bottom: 40px; }
+.lp-sub { color: var(--ink-60); max-width: 52ch; margin-bottom: 26px; }
 .lp-section .lp-h2 + .lp-surfaces,
-.lp-section .lp-h2 + .lp-facts { margin-top: 40px; }
+.lp-section .lp-h2 + .lp-facts { margin-top: 26px; }
 
 /* Две поверхности: не одинаковые. Инференс — ядро предложения, поэтому шире и
    со свечением; кластер рядом, спокойнее. */
 .lp-surfaces { display: grid; gap: 20px;
                grid-template-columns: 1.25fr 1fr; align-items: start; }
 @media (max-width: 880px) { .lp-surfaces { grid-template-columns: 1fr; } }
-.lp-surface { background: var(--bg-surface); border: 1px solid var(--line);
-              border-radius: 18px; padding: 34px; overflow: hidden;
+.lp-surface { border-radius: 18px; padding: 34px; overflow: hidden;
               transition: transform .3s cubic-bezier(.2,.7,.2,1),
                           border-color .3s, box-shadow .3s; }
 .lp-surface:hover { transform: translateY(-3px);
-                    border-color: rgba(31, 191, 168, .35); }
+                    border-color: rgba(41, 198, 222, .35); }
 .card--featured {
-  border: 1px solid var(--teal-core);
-  box-shadow: 0 0 40px -10px rgba(31, 191, 168, .35);
-  background: linear-gradient(180deg, var(--bg-surface-raised), var(--bg-surface));
+  border-color: rgba(124, 240, 255, .42);
+  box-shadow:
+    inset 0 1px 0 rgba(150, 244, 255, .22),
+    0 0 52px -14px rgba(41, 198, 222, .55),
+    0 18px 42px -28px rgba(0, 0, 0, .8);
 }
-.card--featured:hover { box-shadow: 0 0 56px -8px rgba(31, 191, 168, .5); }
+.card--featured:hover { box-shadow: 0 0 56px -8px rgba(41, 198, 222, .5); }
 .lp-surface h3 { font-family: var(--display); font-size: clamp(28px, 3.6vw, 40px);
                  font-weight: 700; letter-spacing: -.03em; line-height: 1.05;
                  margin-bottom: 14px; }
@@ -417,7 +419,7 @@ pre.block.tall { max-height: 420px; }
 .lp-surface li { font-family: var(--mono); font-size: 12px; color: var(--ink-60);
                  border: 1px solid var(--line); border-radius: 6px; padding: 5px 10px;
                  transition: border-color .25s, color .25s; }
-.lp-surface:hover li { border-color: rgba(31, 191, 168, .3); color: var(--ink-100); }
+.lp-surface:hover li { border-color: rgba(41, 198, 222, .3); color: var(--ink-100); }
 .lp-id { display: block; margin-top: 24px; font-family: var(--mono);
          font-size: 12.5px; color: var(--teal-core); opacity: .6;
          transition: opacity .25s; }
@@ -428,25 +430,25 @@ pre.block.tall { max-height: 420px; }
 .lp-facts { display: grid; gap: 18px;
             grid-template-columns: repeat(2, 1fr); align-items: start; }
 @media (max-width: 880px) { .lp-facts { grid-template-columns: 1fr; } }
-.lp-fact { background: var(--bg-surface); border: 1px solid var(--line);
-           border-radius: 16px; padding: 28px; overflow: hidden; }
+.lp-fact { border-radius: 16px; padding: 28px; overflow: hidden; }
 .lp-fact h3 { font-family: var(--display); font-size: 21px; font-weight: 600;
               letter-spacing: -.02em; margin-bottom: 10px; }
 .lp-fact p { color: var(--ink-60); font-size: 14.8px; }
 .lp-fact--core { grid-column: 1 / -1; padding: 36px;
-  background: linear-gradient(140deg, var(--bg-surface-raised), var(--bg-surface) 65%);
-  border-color: rgba(31, 191, 168, .22);
-  box-shadow: inset 0 1px 0 rgba(79, 232, 206, .08), 0 0 60px -22px rgba(31, 191, 168, .5); }
+  border-color: rgba(124, 240, 255, .26);
+  box-shadow:
+    inset 0 1px 0 rgba(150, 244, 255, .2),
+    0 0 66px -26px rgba(41, 198, 222, .55),
+    0 18px 42px -28px rgba(0, 0, 0, .8); }
 .lp-fact--core h3 { font-size: clamp(24px, 3vw, 30px); }
 .lp-fact--core p { font-size: 16px; max-width: 64ch; }
 
 /* ---------------------------------------------------------------------- FAQ */
 .lp-faq-wrap { max-width: 800px; }
 .lp-faq { display: grid; gap: 10px; }
-.lp-q { border: 1px solid var(--line); border-radius: 12px;
-        background: var(--bg-surface); overflow: hidden; transition: border-color .25s; }
-.lp-q[data-open="true"] { border-color: rgba(31, 191, 168, .4);
-                          box-shadow: 0 0 30px -14px rgba(31, 191, 168, .55); }
+.lp-q { border-radius: 12px; overflow: hidden; transition: border-color .25s; }
+.lp-q[data-open="true"] { border-color: rgba(41, 198, 222, .4);
+                          box-shadow: 0 0 30px -14px rgba(41, 198, 222, .55); }
 .lp-q button { width: 100%; display: flex; align-items: center; gap: 16px;
                background: none; border: none; color: var(--ink-100);
                font: inherit; text-align: left; padding: 18px 22px; cursor: pointer; }
@@ -465,7 +467,7 @@ pre.block.tall { max-height: 420px; }
 .lp-q[data-open="true"] .lp-a > p { padding-bottom: 20px; }
 
 /* ------------------------------------------------------------- финальный блок */
-.lp-final { padding: 128px 0 132px; }
+.lp-final { padding: 84px 0 88px; }
 .lp-final h2 { font-family: var(--display); font-size: clamp(30px, 4.4vw, 48px);
                font-weight: 700; letter-spacing: -.035em; margin-bottom: 18px; }
 .lp-final .lp-lead { margin-bottom: 34px; animation: none; }
@@ -497,11 +499,21 @@ pre.block.tall { max-height: 420px; }
 .signin-fine { color: var(--text-mute); font-size: 12.5px; margin: 0; }
 
 /* ---------------------------------------------------------------- кабинет */
-.app-shell { min-height: 100vh; background: var(--bg); }
+/* Стеклу нужно, что размывать. На лендинге за ним холст со станком, а в панели
+   не было ничего — отсюда и матовость. Подложка закреплена: она не едет при
+   прокрутке, и карточки скользят по свету, а не тащат его за собой. */
+.app-shell { min-height: 100vh; background-color: var(--bg);
+  background-image:
+    radial-gradient(58% 44% at 82% 4%,  rgba(41, 198, 222, .13), transparent 70%),
+    radial-gradient(46% 40% at 8% 94%,  rgba(124, 240, 255, .08), transparent 70%),
+    radial-gradient(70% 50% at 50% 46%, rgba(41, 198, 222, .05), transparent 72%);
+  background-attachment: fixed; }
 .app-top { display: flex; align-items: center; justify-content: space-between;
   height: 58px; padding: 0 var(--s5); border-bottom: 1px solid var(--line); }
 .app-brand { color: var(--text); text-decoration: none; font-weight: 700;
-             letter-spacing: .03em; }
+             letter-spacing: .03em; display: flex; align-items: center; gap: 9px; }
+.app-brand svg { color: var(--accent); flex: 0 0 auto; }
+.brand svg { color: var(--accent); flex: 0 0 auto; }
 .app-top nav { display: flex; align-items: center; gap: var(--s4); }
 .app-top nav a { color: var(--text-dim); text-decoration: none; font-size: 14px; }
 .app-top nav a:hover { color: var(--text); }
@@ -518,32 +530,67 @@ pre.block.tall { max-height: 420px; }
 .loading { min-height: 100vh; background: var(--bg); }
 
 /* --------------------------------------------------------- ткацкий примитив
-   Раскрытие идёт клипом слева направо — это и есть проход утка́, — а по кромке
-   бежит светящийся челнок. Анимируются только clip-path и opacity: width и
-   left заставили бы браузер пересчитывать раскладку на каждом кадре. */
+   Карточка не выезжает сбоку — её снимают с полотна. Три такта:
+
+   1. Заправка. Карточки ещё нет: есть кусок голой основы, плоский на фоне.
+   2. Проход утка́. Холст выводит нить от полотна к левой кромке карточки, и
+      ровно в этот момент начинает открываться клип. Челнок идёт слева направо,
+      за ним остаётся уже сотканное; перед ним — ещё сетка нитей.
+   3. Съём. Ткань становится предметом: приподнимается и обретает стекло.
+
+   Всё это — одна величина. --progress объявлен через @property, то есть это
+   настоящее число, а не подстановка текста: браузер сам плавно ведёт от нуля к
+   единице, и клип, подъём, сетка и челнок едут синхронно от одних часов. Те же
+   часы уходят в холст событием, поэтому нить и карточка — одно движение, а не
+   два похожих. */
+@property --progress {
+  syntax: "<number>";
+  inherits: false;
+  initial-value: 1;
+}
+
 .weave-reveal {
   /* Единица, а не ноль: без скрипта содержимое просто видно. Ноль здесь
      означал бы, что сломанный наблюдатель прячет текст навсегда. */
   --progress: 1;
+  --lead: 260ms;    /* подвод нити: столько холст тянет её к кромке */
+  --sweep: 760ms;   /* сам проход утка́ */
   position: relative;
+  transition: --progress var(--sweep) cubic-bezier(.65, 0, .35, 1) var(--lead);
   clip-path: inset(0 calc((1 - var(--progress)) * 100%) 0 0);
-  opacity: calc(.25 + var(--progress) * .75);
-  transition: clip-path 620ms cubic-bezier(.65, 0, .35, 1),
-              opacity 420ms ease-out;
+  /* Съём с полотна: пока ткань на станке — она лежит в плоскости фона. */
+  transform: translateY(calc((1 - var(--progress)) * 14px));
+  opacity: calc(.1 + var(--progress) * .9);
 }
+
+/* Голая основа: то, чем карточка была до утка́. Видна узкой полосой перед
+   челноком — там, где ткань ещё не легла. Слева от него сетки уже нет. */
+.weave-reveal::before {
+  content: "";
+  position: absolute; inset: 0;
+  border-radius: inherit;
+  z-index: 2; pointer-events: none;
+  background:
+    repeating-linear-gradient(90deg, rgba(124, 240, 255, .40) 0 1px, transparent 1px 8px),
+    repeating-linear-gradient(0deg,  rgba(124, 240, 255, .16) 0 1px, transparent 1px 8px);
+  mask-image: linear-gradient(90deg,
+    transparent calc(var(--progress) * 122% - 32%), #000 calc(var(--progress) * 122% - 3%));
+  -webkit-mask-image: linear-gradient(90deg,
+    transparent calc(var(--progress) * 122% - 32%), #000 calc(var(--progress) * 122% - 3%));
+  opacity: calc(1 - var(--progress) * var(--progress));
+}
+
+/* Челнок на кромке. Гаснет к обоим концам: на нуле он ещё не вошёл, на
+   единице уже ушёл за край. */
 .weave-reveal::after {
   content: "";
-  position: absolute;
-  top: 0; bottom: 0;
+  position: absolute; top: -2px; bottom: -2px;
   left: calc(var(--progress) * 100%);
-  width: 2px;
-  background: var(--teal-bright);
-  box-shadow: 0 0 14px 2px rgba(79, 232, 206, .55);
-  /* Челнок виден только в движении: на нуле его ещё нет, на единице он уже
-     ушёл за край. Синус на CSS не посчитать, поэтому гасим к концу. */
+  width: 3px; z-index: 3; pointer-events: none;
+  background: linear-gradient(180deg, transparent,
+              var(--teal-bright) 14%, #e6fcff 50%, var(--teal-bright) 86%, transparent);
+  box-shadow: 0 0 24px 5px rgba(124, 240, 255, .55);
   opacity: calc(var(--progress) * (1 - var(--progress)) * 4);
-  transition: left 620ms cubic-bezier(.65, 0, .35, 1), opacity 620ms ease-out;
-  pointer-events: none;
 }
 
 /* Зев: направляющие расходятся, освобождая проход. Только там, где раскрытие
@@ -561,8 +608,8 @@ pre.block.tall { max-height: 420px; }
 .warp-guides[data-open="true"]::before { opacity: .18; }
 
 @media (prefers-reduced-motion: reduce) {
-  .weave-reveal { --progress: 1; transition: none; opacity: 1; }
-  .weave-reveal::after { display: none; }
+  .weave-reveal { --progress: 1; transition: none; opacity: 1; transform: none; }
+  .weave-reveal::before, .weave-reveal::after { display: none; }
 }
 
 /* ------------------------------------------------------------------ кабинет
@@ -577,45 +624,43 @@ pre.block.tall { max-height: 420px; }
    а не приборная доска — плотность у консоли. */
 .app-shell .grid.stats { gap: var(--s4); }
 
-.glass {
+/* ------------------------------------------------------------------- стекло
+   Одна техника на весь сайт, иначе «стеклянными» окажутся только те карточки,
+   до которых дошли руки. Слои по порядку: размытие того, что за карточкой,
+   светлый скос по верхней кромке, холодная подсветка изнутри и тень, отрывающая
+   карточку от фона. Матовой заливки нет совсем — она и делала карточки плитками. */
+.glass, .card, .lp-surface, .lp-fact, .lp-q, .key-woven, .signin-card {
   position: relative;
-  border-radius: 18px;
-  padding: 22px 24px 24px;
-  background: linear-gradient(152deg,
-              rgba(31, 191, 168, .10) 0%,
-              rgba(16, 28, 28, .72) 46%,
-              rgba(12, 20, 20, .86) 100%);
-  border: 1px solid rgba(31, 191, 168, .16);
+  background:
+    radial-gradient(118% 96% at 80% -12%, rgba(124, 240, 255, .13), transparent 60%),
+    linear-gradient(152deg, rgba(41, 198, 222, .10) 0%,
+                            rgba(23, 48, 57, .46) 46%,
+                            rgba(15, 33, 41, .54) 100%);
+  backdrop-filter: blur(18px) saturate(140%);
+  -webkit-backdrop-filter: blur(18px) saturate(140%);
+  border: 1px solid rgba(124, 240, 255, .15);
   box-shadow:
-    inset 0 1px 0 rgba(120, 245, 224, .10),   /* блик по верхней кромке */
-    inset -6px 0 18px -12px rgba(79, 232, 206, .45), /* толщина стекла, мягко */
-    0 16px 34px -22px rgba(0, 0, 0, .9);
-  overflow: hidden;
-  isolation: isolate;
+    inset 0 1px 0 rgba(150, 244, 255, .16),
+    inset 0 -22px 44px -38px rgba(124, 240, 255, .55),
+    0 18px 42px -28px rgba(0, 0, 0, .8);
 }
-/* Свечение под стеклом: отдельным слоем, чтобы его можно было усилить у
-   карточки, которую нужно выделить, не трогая остальные. */
-.glass::before {
-  content: "";
-  position: absolute;
-  right: -22%; top: -46%;
-  width: 62%; height: 150%;
-  background: radial-gradient(closest-side,
-              rgba(79, 232, 206, .30), rgba(31, 191, 168, .10) 55%, transparent 78%);
-  filter: blur(26px);
-  z-index: -1;
-  transition: opacity .45s, transform .45s cubic-bezier(.2,.7,.2,1);
+.glass { border-radius: 18px; padding: 22px 24px 24px; overflow: hidden; }
+/* Выделенная — та же техника, глубже свет. Не другая карточка. */
+.glass.lead {
+  border-color: rgba(124, 240, 255, .3);
+  background:
+    radial-gradient(126% 104% at 78% -14%, rgba(124, 240, 255, .22), transparent 62%),
+    linear-gradient(152deg, rgba(41, 198, 222, .15) 0%,
+                            rgba(23, 48, 57, .46) 46%,
+                            rgba(15, 33, 41, .54) 100%);
 }
-.glass:hover::before { transform: translateX(-6%) scale(1.06); }
 .glass .label { color: var(--ink-60); font-family: var(--mono); font-size: 11px;
                 letter-spacing: .09em; text-transform: uppercase; }
 .glass .value { font-family: var(--display); font-size: 32px; font-weight: 600;
                 letter-spacing: -.03em; margin-top: 8px;
                 font-variant-numeric: tabular-nums; }
 .glass .sub { color: var(--ink-60); font-size: 12.5px; margin-top: 4px; }
-/* Выделенная — та же техника, глубже свечение. Не другая карточка. */
-.glass.lead::before { opacity: 1; width: 78%; }
-.glass.lead { border-color: rgba(31, 191, 168, .34); }
+
 
 /* --------------------------------------------------- полотно узлов сети
    Не украшение: показывает, что произойдёт при аренде. Каждая полоса — узел,
@@ -624,16 +669,16 @@ pre.block.tall { max-height: 420px; }
 .fabric-row { height: 8px; border-radius: 3px; position: relative; overflow: hidden;
               background: var(--teal-dim);
               transition: background .5s cubic-bezier(.65,0,.35,1); }
-.fabric-row[data-state="inference"] { background: rgba(31, 191, 168, .5); }
-.fabric-row[data-state="rented"]    { background: rgba(234, 245, 242, .16); }
+.fabric-row[data-state="inference"] { background: rgba(41, 198, 222, .5); }
+.fabric-row[data-state="rented"]    { background: rgba(232, 247, 251, .2); }
 .fabric-row[data-state="mine"]      { background: var(--teal-bright);
-                                      box-shadow: 0 0 14px -2px rgba(79, 232, 206, .7); }
-.fabric-row[data-state="busy"]      { background: rgba(31, 191, 168, .3); }
+                                      box-shadow: 0 0 14px -2px rgba(124, 240, 255, .7); }
+.fabric-row[data-state="busy"]      { background: rgba(41, 198, 222, .3); }
 /* Узел, который придётся подвинуть. Полосатый, а не просто цветной: это не
    состояние сети, а предупреждение о том, что сейчас случится. */
 .fabric-row[data-state="displaced"] {
   background: repeating-linear-gradient(115deg,
-    rgba(79, 232, 206, .75) 0 6px, rgba(31, 191, 168, .22) 6px 12px);
+    rgba(124, 240, 255, .75) 0 6px, rgba(41, 198, 222, .22) 6px 12px);
 }
 .fabric-legend { display: flex; flex-wrap: wrap; gap: var(--s4);
                  margin-top: var(--s3); font-size: 12px; color: var(--ink-60); }
@@ -644,9 +689,7 @@ pre.block.tall { max-height: 420px; }
    Ключ показывается один раз — в базе только хэш. Он ткётся при показе и
    затыкается обратно при закрытии: исчезновение должно выглядеть
    необратимым, потому что оно и есть необратимое. */
-.key-woven { position: relative; overflow: hidden; border-radius: var(--r2);
-             background: var(--bg-surface-raised); border: 1px solid var(--line);
-             padding: 14px 16px; }
+.key-woven { overflow: hidden; border-radius: var(--r2); padding: 14px 16px; }
 .key-woven .weave-reveal { display: block; }
 .key-woven code { font-family: var(--mono); font-size: 13px; word-break: break-all;
                   color: var(--teal-bright); }
@@ -661,8 +704,8 @@ pre.block.tall { max-height: 420px; }
 .topo-legend { display: grid; gap: var(--s2); font-size: 12px; color: var(--text-dim); }
 .topo-legend i { display: inline-block; width: 14px; height: 2px; margin-right: 8px;
                  vertical-align: 3px; border-radius: 1px; }
-.topo-legend i[data-state="idle"]      { background: rgba(31, 191, 168, .5); }
-.topo-legend i[data-state="inference"] { background: rgba(79, 232, 206, .9); }
+.topo-legend i[data-state="idle"]      { background: rgba(41, 198, 222, .5); }
+.topo-legend i[data-state="inference"] { background: rgba(124, 240, 255, .9); }
 .topo-legend i[data-state="rented"]    { background: rgba(234, 245, 242, .7); }
 .topo-legend i[data-state="updating"]  { background: var(--warn); }
 .topo-legend i[data-state="lost"]      { background: var(--bad); }
@@ -673,10 +716,10 @@ tr[data-weft="on"] td:first-child { position: relative; }
 tr[data-weft="on"] td:first-child::before {
   content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 2px;
   background: var(--teal-bright);
-  box-shadow: 0 0 10px 1px rgba(79, 232, 206, .6);
+  box-shadow: 0 0 10px 1px rgba(124, 240, 255, .6);
 }
 tr[data-weft="on"] { background:
-  linear-gradient(90deg, rgba(79, 232, 206, .10), transparent 55%);
+  linear-gradient(90deg, rgba(124, 240, 255, .10), transparent 55%);
   animation: weft 1.9s linear infinite; }
 @keyframes weft {
   from { background-position: -120% 0; }
@@ -686,5 +729,5 @@ tr[data-weft="on"] { background-size: 60% 100%; background-repeat: no-repeat; }
 
 @media (prefers-reduced-motion: reduce) {
   tr[data-weft="on"] { animation: none;
-    background: linear-gradient(90deg, rgba(79, 232, 206, .10), transparent 55%); }
+    background: linear-gradient(90deg, rgba(124, 240, 255, .10), transparent 55%); }
 }

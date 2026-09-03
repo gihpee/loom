@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { signOut, token, whoami, type Who } from "./lib/api";
 import type { Node, Task } from "./lib/types";
-import { Badge, Toasts, usePoll } from "./components";
+import { Badge, Mark, Toasts, usePoll } from "./components";
 import { Accounts } from "./screens/Accounts";
 import { Cabinet } from "./screens/Cabinet";
 import { Keys } from "./screens/Keys";
@@ -56,6 +56,7 @@ function Shell({ who, onLeave }: { who: Who; onLeave: () => void }) {
     <div className="shell">
       <aside className="side">
         <div className="brand">
+          <Mark size={20} />
           <b>looma</b>
           <span>{online ? `${online} online` : "offline"}</span>
         </div>
@@ -151,7 +152,7 @@ function Router() {
   return (
     <div className="app-shell">
       <header className="app-top">
-        <a className="app-brand" href="/">Looma&nbsp;Float</a>
+        <a className="app-brand" href="/"><Mark size={22} /><span>Looma&nbsp;Float</span></a>
         <nav>
           {who.role === "admin" && <a href="/console">Панель</a>}
           <button className="btn ghost sm" onClick={leave}>Выйти</button>

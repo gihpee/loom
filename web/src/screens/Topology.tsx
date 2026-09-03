@@ -25,8 +25,8 @@ export interface Strand {
 }
 
 const TONE: Record<NodeState, string> = {
-  idle:      "31, 191, 168",
-  inference: "79, 232, 206",
+  idle:      "41, 198, 222",
+  inference: "124, 240, 255",
   rented:    "234, 245, 242",
   updating:  "229, 185, 92",
   lost:      "242, 109, 120",
@@ -71,11 +71,11 @@ export function Topology({ strands }: { strands: Strand[] }) {
       // Оркестратор: единственная точка, до которой можно дозвониться.
       ctx.beginPath();
       ctx.arc(cx, cy, 7, 0, Math.PI * 2);
-      ctx.fillStyle = "rgba(79, 232, 206, .9)";
+      ctx.fillStyle = "rgba(124, 240, 255, .9)";
       ctx.fill();
       ctx.beginPath();
       ctx.arc(cx, cy, 13, 0, Math.PI * 2);
-      ctx.strokeStyle = "rgba(31, 191, 168, .35)";
+      ctx.strokeStyle = "rgba(41, 198, 222, .35)";
       ctx.lineWidth = 1;
       ctx.stroke();
 

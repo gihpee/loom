@@ -16,7 +16,7 @@
  * экрану сплетены. Скролл и есть рассказ.
  */
 import { useEffect, useRef } from "react";
-import { calmMotion } from "../components/Weave";
+import { calmMotion, WEFT, type WeftPass } from "../components/Weave";
 
 export type Highlight = "" | "inference" | "compute";
 
@@ -25,6 +25,26 @@ const WARPS = 22;          // нитей основы: структура сам
 const PULSES = 22;         // ограничено намеренно: просадка кадров хуже, чем меньше движения
 
 interface Pulse { row: number; at: number; speed: number; back: boolean }
+
+/** Та же кривая, что у карточки в CSS. Повторена здесь численно, потому что
+ *  нить и клип обязаны идти по одним часам: разойдись они на десяток
+ *  миллисекунд — вместо одного движения читались бы два похожих. */
+function bezier(x1: number, y1: number, x2: number, y2: number) {
+  const cx = 3 * x1, bx = 3 * (x2 - x1) - cx, ax = 1 - cx - bx;
+  const cy = 3 * y1, by = 3 * (y2 - y1) - cy, ay = 1 - cy - by;
+  const at = (t: number) => ((ax * t + bx) * t + cx) * t;
+  const slope = (t: number) => (3 * ax * t + 2 * bx) * t + cx;
+  return (x: number) => {
+    let t = x;
+    for (let i = 0; i < 5; i++) {
+      const d = slope(t);
+      if (Math.abs(d) < 1e-6) break;
+      t -= (at(t) - x) / d;
+    }
+    t = Math.max(0, Math.min(1, t));
+    return ((ay * t + by) * t + cy) * t;
+  };
+}
 
 export function Loom({ progress, highlight }: {
   progress: React.MutableRefObject<number>;
@@ -65,6 +85,20 @@ export function Loom({ progress, highlight }: {
     // нити, а соседние — вытесняется группа узлов, а не случайные.
     const BUNDLE = [5, 6, 7, 8];
     let lift = 0;
+
+    // ------------------------------------------------- снятие с полотна
+    // Карточка перед появлением присылает свой прямоугольник и свои тайминги.
+    // Станок выводит к ней нить, держит её натянутой весь проход утка́ и
+    // отпускает после. Так карточка не «выезжает сбоку», а извлекается отсюда.
+    const passes: (WeftPass & { born: number })[] = [];
+    const ease = bezier(.65, 0, .35, 1);
+    const onWeft = (e: Event) => {
+      const d = (e as CustomEvent<WeftPass>).detail;
+      if (!d || calm) return;
+      if (passes.length >= 5) passes.shift();   // больше пяти нитей — уже каша
+      passes.push({ ...d, born: performance.now() });
+    };
+    window.addEventListener(WEFT, onWeft);
 
     /** Геометрия кадра. Считается один раз за кадр, а не на каждую нить. */
     const frame = () => {
@@ -115,15 +149,15 @@ export function Loom({ progress, highlight }: {
       ctx.lineTo(exit, y);
       const lifted = bundleLift(i) > 0.5;
       ctx.strokeStyle = lifted
-        ? `rgba(79, 232, 206, ${.2 + .25 * lift})`
-        : `rgba(31, 191, 168, ${.10 + .05 * Math.sin(t / 1800 + i)})`;
+        ? `rgba(124, 240, 255, ${.2 + .25 * lift})`
+        : `rgba(41, 198, 222, ${.10 + .05 * Math.sin(t / 1800 + i)})`;
       ctx.lineWidth = 1;
       ctx.stroke();
 
       // Узел: маленький, но всегда виден — он источник нити.
       ctx.beginPath();
       ctx.arc(node.x, node.y, 2.2, 0, Math.PI * 2);
-      ctx.fillStyle = "rgba(79, 232, 206, .5)";
+      ctx.fillStyle = "rgba(124, 240, 255, .5)";
       ctx.fill();
     };
 
@@ -135,7 +169,7 @@ export function Loom({ progress, highlight }: {
         ctx.beginPath();
         ctx.moveTo(x, f.top);
         ctx.lineTo(x, bottom);
-        ctx.strokeStyle = "rgba(31, 191, 168, .09)";
+        ctx.strokeStyle = "rgba(41, 198, 222, .09)";
         ctx.lineWidth = 1;
         ctx.stroke();
       }
@@ -155,7 +189,7 @@ export function Loom({ progress, highlight }: {
           ctx.beginPath();
           ctx.moveTo(x0, y);
           ctx.lineTo(x0 + step, y);
-          ctx.strokeStyle = `rgba(79, 232, 206, ${.10 + .22 * f.p})`;
+          ctx.strokeStyle = `rgba(124, 240, 255, ${.10 + .22 * f.p})`;
           ctx.lineWidth = 1.3;
           ctx.stroke();
         }
@@ -171,8 +205,8 @@ export function Loom({ progress, highlight }: {
       for (const [r, a] of [[Math.max(f.right - f.left, 1) * .75, .16],
                             [Math.max(f.right - f.left, 1) * .38, .12]] as const) {
         const g = ctx.createRadialGradient(cx, cy, 0, cx, cy, r);
-        g.addColorStop(0, `rgba(31, 191, 168, ${a * (0.35 + 0.65 * f.p)})`);
-        g.addColorStop(1, "rgba(31, 191, 168, 0)");
+        g.addColorStop(0, `rgba(41, 198, 222, ${a * (0.35 + 0.65 * f.p)})`);
+        g.addColorStop(1, "rgba(41, 198, 222, 0)");
         ctx.fillStyle = g;
         ctx.fillRect(cx - r, cy - r, r * 2, r * 2);
       }
@@ -202,10 +236,72 @@ export function Loom({ progress, highlight }: {
           yy = y;
         }
         const g = ctx.createRadialGradient(x, yy, 0, x, yy, 7);
-        g.addColorStop(0, "rgba(120, 245, 224, .85)");
-        g.addColorStop(1, "rgba(120, 245, 224, 0)");
+        g.addColorStop(0, "rgba(150, 244, 255, .85)");
+        g.addColorStop(1, "rgba(150, 244, 255, 0)");
         ctx.fillStyle = g;
         ctx.fillRect(x - 7, yy - 7, 14, 14);
+      }
+      ctx.globalCompositeOperation = "source-over";
+    };
+
+    const glow = (x: number, y: number, r: number, a: number) => {
+      const g = ctx.createRadialGradient(x, y, 0, x, y, r);
+      g.addColorStop(0, `rgba(150, 244, 255, ${a})`);
+      g.addColorStop(1, "rgba(150, 244, 255, 0)");
+      ctx.fillStyle = g;
+      ctx.fillRect(x - r, y - r, r * 2, r * 2);
+    };
+
+    const drawPasses = (f: ReturnType<typeof frame>, t: number) => {
+      if (!passes.length) return;
+      ctx.globalCompositeOperation = "lighter";
+      for (let i = passes.length - 1; i >= 0; i--) {
+        const p = passes[i];
+        const age = t - p.born;
+        const done = p.lead + p.sweep;
+        const RELEASE = 320;                    // нить отпускает не мгновенно
+        if (age > done + RELEASE) { passes.splice(i, 1); continue; }
+
+        const midY = (p.top + p.bottom) / 2;
+        // Нить берётся не абы откуда: из ближайшего к карточке ряда полотна.
+        const row = Math.max(0, Math.min(ROWS - 1, Math.round((midY - f.top) / f.rowGap)));
+        const sx = f.left, sy = rowY(f, row);
+        const tx = p.left, ty = midY;
+        const bow = Math.min(150, Math.abs(sx - tx) * .3 + 40);
+        const kx = (sx + tx) / 2, ky = Math.min(sy, ty) - bow;
+
+        const hold = age < p.lead ? age / p.lead
+                   : age < done  ? 1
+                   : 1 - (age - done) / RELEASE;
+        if (hold <= 0) continue;
+
+        const at = (u: number) => {
+          const v = 1 - u;
+          return [v * v * sx + 2 * v * u * kx + u * u * tx,
+                  v * v * sy + 2 * v * u * ky + u * u * ty] as const;
+        };
+
+        const reach = age < p.lead ? ease(age / p.lead) : 1;
+        ctx.beginPath();
+        ctx.moveTo(sx, sy);
+        for (let k = 1; k <= 24; k++) {
+          const [x, y] = at((k / 24) * reach);
+          ctx.lineTo(x, y);
+        }
+        ctx.strokeStyle = `rgba(124, 240, 255, ${.5 * hold})`;
+        ctx.lineWidth = 1.4;
+        ctx.stroke();
+        glow(sx, sy, 17, .45 * hold);           // натяжение в точке съёма
+
+        if (age < p.lead) {
+          const [hx, hy] = at(reach);
+          glow(hx, hy, 13, .85);                // головка бежит по нити
+        } else if (age < done) {
+          // Дальше головка — это челнок: идёт ровно по кромке клипа. Часть её
+          // уже закрыта сотканным, наружу светит та, что ещё впереди.
+          const e = ease((age - p.lead) / p.sweep);
+          glow(tx + (p.right - p.left) * e, ty, 32, .5);
+        }
       }
       ctx.globalCompositeOperation = "source-over";
     };
@@ -224,6 +320,7 @@ export function Loom({ progress, highlight }: {
       for (let i = 0; i < ROWS; i++) drawThread(f, i, t);
       drawWeave(f);
       drawPulses(f, t);
+      drawPasses(f, t);
 
       if (!calm) raf = requestAnimationFrame(draw);
     };
@@ -237,7 +334,11 @@ export function Loom({ progress, highlight }: {
       raf = requestAnimationFrame(draw);
     }
 
-    return () => { cancelAnimationFrame(raf); watch.disconnect(); };
+    return () => {
+      cancelAnimationFrame(raf);
+      watch.disconnect();
+      window.removeEventListener(WEFT, onWeft);
+    };
   }, [progress, highlight]);
 
   return <canvas ref={canvas} className="loom" aria-hidden="true" />;

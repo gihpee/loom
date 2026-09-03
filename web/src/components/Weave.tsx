@@ -33,6 +33,30 @@ export const calmMotion = () =>
  *
  * Правило простое: украшение не имеет права прятать содержимое.
  */
+/** Событие «к этой карточке идёт уто́к». Слушает фоновый станок: он выводит
+ *  нить от полотна к её кромке ровно в том же такте, в каком открывается клип. */
+export const WEFT = "looma:weft";
+
+/** Поставить величину, не проиграв переход к ней.
+ *
+ *  --progress объявлен через @property, то есть переходы по нему настоящие. Из-за
+ *  этого исходное «спрятать» само становится анимацией: карточка на глазах
+ *  расткалась бы обратно и лишь потом ткалась заново. Достаточно было бы ставить
+ *  ноль до первого расчёта стилей, но замер положения карточки этот расчёт как раз
+ *  и вызывает, так что переход гасим явно. */
+function setAtOnce(node: HTMLElement, value: string) {
+  const kept = node.style.transition;
+  node.style.transition = "none";
+  node.style.setProperty("--progress", value);
+  void node.offsetWidth;            // фиксируем без перехода
+  node.style.transition = kept;
+}
+
+export interface WeftPass {
+  left: number; right: number; top: number; bottom: number;
+  lead: number; sweep: number;
+}
+
 export function useWeaveReveal<T extends HTMLElement>(threshold = 0.3) {
   const ref = useRef<T>(null);
   const hidden = useRef(false);
@@ -45,7 +69,7 @@ export function useWeaveReveal<T extends HTMLElement>(threshold = 0.3) {
     const node = ref.current;
     if (!node || calmMotion()) return;
     if (node.getBoundingClientRect().top < window.innerHeight) return;
-    node.style.setProperty("--progress", "0");
+    setAtOnce(node, "0");
     hidden.current = true;
   }, []);
 
@@ -58,7 +82,21 @@ export function useWeaveReveal<T extends HTMLElement>(threshold = 0.3) {
       hidden.current = false;
       // В скрытой вкладке переходы не идут: они замирают на начальном кадре,
       // то есть на спрятанном. Тогда показываем разом, без анимации.
-      if (!animate) node.style.transition = "none";
+      if (!animate) { node.style.transition = "none"; node.style.setProperty("--progress", "1"); return; }
+
+      // Станок ведёт нить к этой карточке, пока идёт --lead, и отпускает её на
+      // --sweep. Тайминги берутся с самого элемента, а не задаются здесь второй
+      // раз: разъехавшись, нить и клип превратились бы в два разных движения.
+      const css = getComputedStyle(node);
+      const ms = (name: string, fallback: number) => {
+        const v = parseFloat(css.getPropertyValue(name));
+        return Number.isFinite(v) ? (css.getPropertyValue(name).includes("ms") ? v : v * 1000) : fallback;
+      };
+      const box = node.getBoundingClientRect();
+      window.dispatchEvent(new CustomEvent(WEFT, { detail: {
+        left: box.left, right: box.right, top: box.top, bottom: box.bottom,
+        lead: ms("--lead", 260), sweep: ms("--sweep", 760),
+      } }));
       node.style.setProperty("--progress", "1");
     };
 
@@ -99,10 +137,15 @@ export function useWoven(initial = false) {
   const [woven, setWoven] = useState(initial);
   const ref = useRef<HTMLDivElement>(null);
 
+  const first = useRef(true);
   useLayoutEffect(() => {
     const node = ref.current;
     if (!node) return;
-    node.style.setProperty("--progress", woven || calmMotion() ? "1" : "0");
+    const value = woven || calmMotion() ? "1" : "0";
+    // Первая установка — состояние, а не движение: ключ не должен затыкаться
+    // обратно на глазах у того, кто его ещё не открывал.
+    if (first.current) { first.current = false; setAtOnce(node, value); return; }
+    node.style.setProperty("--progress", value);
   }, [woven]);
 
   return { ref, woven, weave: () => setWoven(true), unweave: () => setWoven(false) };

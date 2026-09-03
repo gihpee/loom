@@ -256,18 +256,27 @@ export function ErrorLine({ error }: { error: string }) {
   );
 }
 
-/** Знак Looma. Один на все три поверхности: лендинг, кабинет и панель —
- *  человек, пришедший с питча, должен узнать проект. */
+/** Знак Looma: «L», собранная из переплетения. Две нити основы идут вниз, две
+ *  нити утка́ уходят вправо, и в каждом пересечении одна проходит поверх другой —
+ *  отсюда просветы. Нижняя кромка скруглена: там уто́к разворачивается обратно,
+ *  как на настоящей кромке полотна.
+ *
+ *  Цвет берётся из currentColor: знак живёт на трёх поверхностях, и заливать
+ *  его акцентом намертво значило бы чинить его отдельно при каждой смене темы. */
 export function Mark({ size = 32 }: { size?: number }) {
   return (
-    <svg width={size} height={size} viewBox="0 0 52 52" fill="none" aria-hidden="true">
-      <rect x="3" y="3" width="46" height="46" rx="12"
-            stroke="currentColor" strokeWidth="2.5" opacity=".85" />
-      <rect x="13" y="29" width="26" height="7" rx="2"
-            stroke="currentColor" strokeWidth="2" opacity=".6" />
-      <rect x="13" y="19" width="26" height="7" rx="2"
-            stroke="currentColor" strokeWidth="2" opacity=".8" />
-      <rect x="13" y="9" width="26" height="7" rx="2" fill="currentColor" />
+    <svg width={size} height={size} viewBox="0 0 100 100" fill="currentColor"
+         aria-hidden="true">
+      {/* основа: левая нить ныряет под нижний уто́к и выходит скруглённой кромкой */}
+      <rect x="8" y="6" width="20" height="45" />
+      <path d="M8 77 H28 V94 H25 A17 17 0 0 1 8 77 Z" />
+      {/* основа: правая нить ныряет под верхний уто́к */}
+      <rect x="34" y="6" width="20" height="19" />
+      <rect x="34" y="51" width="20" height="43" />
+      {/* уто́к: верхний идёт поверх правой нити, нижний — поверх левой */}
+      <rect x="31" y="28" width="61" height="20" />
+      <rect x="8" y="54" width="23" height="20" />
+      <rect x="57" y="54" width="35" height="20" />
     </svg>
   );
 }
