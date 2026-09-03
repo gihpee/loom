@@ -19,11 +19,13 @@ export function Accounts() {
   const [adding, setAdding] = useState(false);
 
   return (
-    <div className="screen">
+    <div className="page">
       <ErrorLine error={list.error || rates.error} />
-      <header className="screen-head">
-        <h1>Клиенты</h1>
-        <Button kind="primary" onClick={() => setAdding(true)}>Завести запись</Button>
+      <header>
+        <div><h1>Клиенты</h1><p>кто пользуется платформой и по какой цене</p></div>
+        <div className="actions">
+          <Button kind="primary" onClick={() => setAdding(true)}>Завести запись</Button>
+        </div>
       </header>
 
       {(list.data?.accounts ?? []).length === 0 ? (
@@ -31,7 +33,7 @@ export function Accounts() {
           Первую заводят из командной строки: scripts/create_admin.py
         </Empty>
       ) : (
-        <table className="table">
+        <div className="card pad0"><table>
           <thead><tr><th>Почта</th><th>Роль</th><th>Состояние</th><th /></tr></thead>
           <tbody>
             {(list.data?.accounts ?? []).map((a) => (
@@ -53,7 +55,7 @@ export function Accounts() {
               </tr>
             ))}
           </tbody>
-        </table>
+        </table></div>
       )}
 
       <section>
@@ -62,7 +64,7 @@ export function Accounts() {
           В копейках за GPU-час. Ставка запоминается в аренде: поднятая завтра
           цена не перепишет вчерашние счета.
         </p>
-        <div className="cards">
+        <div className="grid stats">
           {(rates.data?.rates ?? []).map((r) => (
             <RateCard key={r.resource} rate={r} onSaved={() => rates.refresh()} />
           ))}

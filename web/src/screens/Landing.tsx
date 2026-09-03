@@ -1,49 +1,155 @@
-/** Публичная главная. Единственная страница, которую видят до входа.
+/** Публичная главная.
  *
- * Стиль наследуется от инвесторского документа и питча: тёмная база, бирюзовый
- * акцент, знак из полос. Бренд уже есть — изобретать второй значило бы, что
- * человек, пришедший с питча на сайт, не узнает проект.
+ * Что здесь НЕ делается и почему. Не пересказывается устройство системы —
+ * человеку, который решает, брать ли мощность, безразлично, как она
+ * оркестрируется. Не обещается «ноль простоя»: провайдеров ещё нет, и говорить
+ * о их выгоде рано. Не перечисляются виды владельцев карт — это внутренняя
+ * сегментация, а не то, что продаётся.
  *
- * Содержание — утверждения из бизнес-документа, и ни одного, которого мы не
- * умеем подтвердить. «Ноль часов простоя» — это про механику базовой загрузки,
- * а не обещание доходности; проверяемые числа рынка помечены источником.
+ * Остаётся одно утверждение и две возможности под ним. Всё остальное —
+ * подробности, которые раскрываются по наведению, а не вываливаются сразу.
  */
+import { useEffect, useRef, useState } from "react";
 import { Mark } from "../components";
 
-const ADVANTAGES = [
+/* ------------------------------------------------------------------ ткань
+   Знак Looma — полосы, ткацкий стан. Отсюда и графика: нити основы, по которым
+   идут импульсы. Это не украшение ради движения: сеть из отдельных машин,
+   собирающаяся в одно полотно, — ровно то, что продаётся, и показать это
+   короче, чем описать. */
+function Weave() {
+  const canvas = useRef<HTMLCanvasElement>(null);
+
+  useEffect(() => {
+    const c = canvas.current;
+    if (!c) return;
+    const ctx = c.getContext("2d");
+    if (!ctx) return;
+
+    const slow = matchMedia("(prefers-reduced-motion: reduce)").matches;
+    let raf = 0;
+    let w = 0, h = 0;
+    const dpr = Math.min(devicePixelRatio || 1, 2);
+
+    const size = () => {
+      w = c.clientWidth; h = c.clientHeight;
+      c.width = w * dpr; c.height = h * dpr;
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    };
+    size();
+    addEventListener("resize", size);
+
+    const LINES = 11;
+    // Импульс на нити: где он, как быстро идёт и насколько ярок.
+    const pulses = Array.from({ length: 16 }, () => ({
+      line: Math.floor(Math.random() * LINES),
+      at: Math.random(),
+      speed: 0.0016 + Math.random() * 0.0032,
+      life: 0.4 + Math.random() * 0.6,
+    }));
+
+    const draw = (t: number) => {
+      ctx.clearRect(0, 0, w, h);
+      const step = h / (LINES - 1);
+
+      for (let i = 0; i < LINES; i++) {
+        const y = i * step;
+        // Лёгкая волна: полотно живое, но не мельтешит.
+        const sway = slow ? 0 : Math.sin(t / 2600 + i * 0.7) * 7;
+        ctx.beginPath();
+        ctx.moveTo(0, y + sway);
+        ctx.bezierCurveTo(w * 0.3, y - sway, w * 0.7, y + sway * 2, w, y - sway);
+        // Нити должны читаться сами по себе: при прежней прозрачности
+        // оставались одни импульсы, и полотно выглядело случайными пятнами.
+        ctx.strokeStyle = `rgba(69, 200, 192, ${0.14 + (i % 3) * 0.06})`;
+        ctx.lineWidth = i % 4 === 0 ? 1.4 : 1;
+        ctx.stroke();
+      }
+
+      for (const p of pulses) {
+        if (!slow) p.at += p.speed;
+        if (p.at > 1) { p.at = 0; p.line = Math.floor(Math.random() * LINES); }
+        const y = p.line * step;
+        const sway = slow ? 0 : Math.sin(t / 2600 + p.line * 0.7) * 7;
+        const x = p.at * w;
+        const yy = y + sway * Math.sin(p.at * Math.PI);
+        // Короткий след вдоль нити, а не круглое пятно: импульс должен
+        // выглядеть идущим ПО нити, иначе связь с ней теряется.
+        const tail = ctx.createLinearGradient(x - 90, 0, x + 10, 0);
+        tail.addColorStop(0, "rgba(120, 240, 230, 0)");
+        tail.addColorStop(1, `rgba(120, 240, 230, ${0.75 * p.life})`);
+        ctx.strokeStyle = tail;
+        ctx.lineWidth = 1.8;
+        ctx.beginPath();
+        ctx.moveTo(Math.max(0, x - 90), yy);
+        ctx.lineTo(x, yy);
+        ctx.stroke();
+
+        const head = ctx.createRadialGradient(x, yy, 0, x, yy, 9);
+        head.addColorStop(0, `rgba(160, 250, 240, ${0.9 * p.life})`);
+        head.addColorStop(1, "rgba(160, 250, 240, 0)");
+        ctx.fillStyle = head;
+        ctx.fillRect(x - 9, yy - 9, 18, 18);
+      }
+      raf = requestAnimationFrame(draw);
+    };
+    raf = requestAnimationFrame(draw);
+
+    return () => { cancelAnimationFrame(raf); removeEventListener("resize", size); };
+  }, []);
+
+  return <canvas ref={canvas} className="weave" aria-hidden="true" />;
+}
+
+/* ------------------------------------------------------- появление по скроллу */
+function useReveal<T extends HTMLElement>() {
+  const ref = useRef<T>(null);
+  const [seen, setSeen] = useState(false);
+  useEffect(() => {
+    const node = ref.current;
+    if (!node) return;
+    const eye = new IntersectionObserver(([e]) => {
+      if (e.isIntersecting) { setSeen(true); eye.disconnect(); }
+    }, { rootMargin: "-60px" });
+    eye.observe(node);
+    return () => eye.disconnect();
+  }, []);
+  return { ref, seen };
+}
+
+function Reveal({ children, delay = 0 }: { children: React.ReactNode; delay?: number }) {
+  const { ref, seen } = useReveal<HTMLDivElement>();
+  return (
+    <div ref={ref} className="reveal" data-seen={seen}
+         style={{ transitionDelay: `${delay}ms` }}>
+      {children}
+    </div>
+  );
+}
+
+const PRODUCTS = [
   {
-    title: "GPU не простаивает ни часа",
-    text: "Пока прямого клиента нет, карту загружают сервисы платформы — " +
-      "распределённый инференс. Клиент со ставкой выше вытесняет базовую " +
-      "загрузку, а когда уходит, она возвращается сама.",
-    note: "чего нет у маркетплейсов: там без арендатора карта не приносит ничего",
+    id: "looma-inference",
+    title: "Инференс",
+    line: "Готовый API вместо своей карты.",
+    detail: "Совместим с OpenAI: меняется адрес и ключ, остальной код остаётся. " +
+      "Большие модели работают там, где не помещаются целиком.",
+    facts: ["оплата за токены", "потоковая выдача", "модели до 70B"],
   },
   {
-    title: "Два порога вместо торга",
-    text: "Владелец задаёт минимум, ниже которого не сдаёт. Клиент — максимум, " +
-      "выше которого не арендует. Сделка невозможна вне этих границ, и " +
-      "никто не промахивается с ценой вручную.",
-    note: "хост не получает ниже себестоимости, клиент не переплачивает",
-  },
-  {
-    title: "Инференс без своей карты",
-    text: "Готовый API, совместимый с OpenAI: ключ, модель, оплата за токены. " +
-      "Мощность платформа закупает у владельцев по их порогам и несёт риск " +
-      "загрузки сама.",
-    note: "цель — заметно ниже облачных тарифов, потому что дата-центров нет",
-  },
-  {
-    title: "Работает на домашних картах",
-    text: "Узлу не нужен белый адрес и открытые порты: он сам открывает одно " +
-      "исходящее соединение, и всё идёт через него. Роутер настраивать не надо.",
-    note: "поэтому подключается и мини-цод, и одна карта за NAT",
+    id: "looma-compute",
+    title: "Кластер",
+    line: "Свой код на арендованных картах.",
+    detail: "Обычный Ray: подключаетесь с ноутбука одной строкой и считаете " +
+      "что угодно — обучение, симуляции, рендер.",
+    facts: ["оплата за GPU-часы", "почасовая аренда", "локальный порт"],
   },
 ];
 
-const STEPS = [
-  { n: "01", head: "Подключить машину", text: "Одна команда docker run с ключом. Агент сам определит карту и предложит порог." },
-  { n: "02", head: "Задать минимум", text: "Ниже него мощность не сдаётся. Всё, что рынок даёт сверху, — ваше." },
-  { n: "03", head: "Получать за загрузку", text: "Свободные часы забирают сервисы платформы; прямой клиент платит больше." },
+const WHY = [
+  { head: "Дешевле облака", text: "Мощность берётся у тех, у кого она уже есть, — без дата-центров в цене." },
+  { head: "Без обязательств", text: "Ни минимального срока, ни резерва. Счёт идёт по факту, посекундно." },
+  { head: "Ничего не настраивать", text: "Ни VPC, ни квот, ни заявок на доступ. Ключ — и работаете." },
 ];
 
 export function Landing() {
@@ -51,116 +157,81 @@ export function Landing() {
     <div className="landing">
       <header className="lp-top">
         <div className="lp-wrap lp-nav">
-          <a className="lp-brand" href="/"><Mark size={30} /><span>Looma&nbsp;Float</span></a>
+          <a className="lp-brand" href="/"><Mark size={28} /><span>Looma&nbsp;Float</span></a>
           <nav>
-            <a href="#how">Как это работает</a>
-            <a href="#resources">Ресурсы</a>
+            <a href="#products">Возможности</a>
             <a className="lp-enter" href="/app">Войти</a>
           </nav>
         </div>
       </header>
 
       <section className="lp-hero">
-        <div className="lp-wrap">
-          <p className="lp-kicker">Распределённая GPU-инфраструктура</p>
-          <h1>Вычисления на картах,<br />до которых нельзя дозвониться</h1>
+        <Weave />
+        <div className="lp-wrap lp-hero-body">
+          <p className="lp-kicker">Маркетплейс вычислений</p>
+          <h1>Мощность,<br />когда она нужна</h1>
           <p className="lp-lead">
-            Маркетплейс мощности, где мини-цоды, майнеры и владельцы игровых
-            карт сдают GPU защищёнными контейнерами. И не простаивают: пока
-            прямого клиента нет, мощность занимают сервисы платформы, начиная с
-            распределённого инференса.
+            Инференс больших моделей и аренда GPU-кластеров. Платите за
+            использованное — без дата-центров в цене.
           </p>
           <div className="lp-cta">
-            <a className="lp-primary" href="/app">Личный кабинет</a>
-            <a className="lp-secondary" href="#resources">Что можно арендовать</a>
+            <a className="lp-primary" href="/app">Начать</a>
+            <a className="lp-secondary" href="#products">Возможности</a>
           </div>
-          <dl className="lp-metrics">
-            <div><dt>0 часов</dt><dd>простоя: карта загружена с первой минуты</dd></div>
-            <div><dt>2 порога</dt><dd>минимум владельца и максимум клиента</dd></div>
-            <div><dt>1 команда</dt><dd>чтобы подключить машину к сети</dd></div>
-          </dl>
         </div>
       </section>
 
-      <section className="lp-section" id="how">
+      <section className="lp-section" id="products">
         <div className="lp-wrap">
-          <h2>Почему карта не простаивает</h2>
-          <p className="lp-sub">
-            Классическая беда двустороннего рынка: нет клиентов — нет
-            владельцев, нет владельцев — нет клиентов. Мы снимаем её тем, что
-            платформа сама выступает первым клиентом собственной сети.
-          </p>
-          <div className="lp-grid">
-            {ADVANTAGES.map((a) => (
-              <article className="lp-card" key={a.title}>
-                <h3>{a.title}</h3>
-                <p>{a.text}</p>
-                <p className="lp-note">{a.note}</p>
-              </article>
+          <Reveal><h2 className="lp-h2">Возможности</h2></Reveal>
+          <div className="lp-products">
+            {PRODUCTS.map((p, i) => (
+              <Reveal key={p.id} delay={i * 90}>
+                <article className="lp-product">
+                  <h3>{p.title}</h3>
+                  <p className="lp-line">{p.line}</p>
+                  <p className="lp-detail">{p.detail}</p>
+                  <ul>{p.facts.map((f) => <li key={f}>{f}</li>)}</ul>
+                  <code className="lp-id">{p.id}</code>
+                </article>
+              </Reveal>
             ))}
           </div>
         </div>
       </section>
 
-      <section className="lp-section lp-dark" id="resources">
+      <section className="lp-section lp-why">
         <div className="lp-wrap">
-          <h2>Что можно взять сейчас</h2>
-          <div className="lp-grid lp-two">
-            <article className="lp-card lp-product">
-              <span className="lp-tag">looma-inference</span>
-              <h3>Инференс больших моделей</h3>
-              <p>
-                API, совместимый с OpenAI. Модель разрезана по слоям между
-                несколькими картами, так что помещается то, что не влезает ни в
-                одну из них по отдельности.
-              </p>
-              <ul>
-                <li>оплата за токены</li>
-                <li>потоковая выдача</li>
-                <li>несколько запросов в одном шаге движка</li>
-              </ul>
-            </article>
-            <article className="lp-card lp-product">
-              <span className="lp-tag">looma-compute</span>
-              <h3>Аренда Ray-кластера</h3>
-              <p>
-                Свой код на чужих картах: обычный Ray, к которому вы
-                подключаетесь с ноутбука одной строкой. Кластер собирается на
-                узлах, у которых нет ни одного открытого порта.
-              </p>
-              <ul>
-                <li>оплата за GPU-часы</li>
-                <li>вытесняет базовую загрузку платформы</li>
-                <li>локальный порт вместо публичного адреса</li>
-              </ul>
-            </article>
+          <div className="lp-why-grid">
+            {WHY.map((w, i) => (
+              <Reveal key={w.head} delay={i * 80}>
+                <div className="lp-why-item">
+                  <h3>{w.head}</h3>
+                  <p>{w.text}</p>
+                </div>
+              </Reveal>
+            ))}
           </div>
         </div>
       </section>
 
-      <section className="lp-section" id="hosts">
+      <section className="lp-section lp-final">
         <div className="lp-wrap">
-          <h2>Владельцам карт</h2>
-          <ol className="lp-steps">
-            {STEPS.map((s) => (
-              <li key={s.n}>
-                <span className="lp-num">{s.n}</span>
-                <div><h3>{s.head}</h3><p>{s.text}</p></div>
-              </li>
-            ))}
-          </ol>
-          <p className="lp-fine">
-            Подключение владельцев пока по приглашению: сеть в закрытой бете, и
-            мы отвечаем за каждую машину в ней.
-          </p>
+          <Reveal>
+            <h2 className="lp-h2">Попробовать</h2>
+            <p className="lp-lead">
+              Доступ по приглашению: сеть в закрытой бете, и мы отвечаем за
+              каждую машину в ней.
+            </p>
+            <a className="lp-primary" href="/app">Войти в кабинет</a>
+          </Reveal>
         </div>
       </section>
 
       <footer className="lp-foot">
         <div className="lp-wrap">
-          <Mark size={26} />
-          <p>Looma Float · распределённые вычисления на частном железе</p>
-          <a href="/app">Войти в кабинет</a>
+          <Mark size={24} />
+          <p>Looma Float</p>
         </div>
       </footer>
     </div>

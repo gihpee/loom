@@ -16,8 +16,12 @@
   --text-mute: #5f6878;
 
   /* Смысл, а не палитра: цвет означает состояние. */
-  --accent:      #5b8cff;
-  --accent-soft: #5b8cff22;
+  /* Бирюза, а не сине-фиолетовый: последний узнаётся как «цвет по умолчанию»
+     любого дашборда, а этот идёт от знака Looma и связывает панель с лендингом.
+     Он же достаточно далёк от ok/warn/bad, чтобы действие не путалось с
+     состоянием. */
+  --accent:      #45c8c0;
+  --accent-soft: #45c8c022;
   --ok:          #3ecf8e;
   --ok-soft:     #3ecf8e1f;
   --warn:        #e5b95c;
@@ -129,7 +133,7 @@ button.btn {
 button.btn:hover:not(:disabled) { border-color: var(--text-mute); }
 button.btn:disabled { opacity: .4; cursor: not-allowed; }
 button.btn.primary {
-  background: var(--accent); border-color: var(--accent); color: #08101f; font-weight: 600;
+  background: var(--accent); border-color: var(--accent); color: #04211f; font-weight: 600;
 }
 button.btn.primary:hover:not(:disabled) { filter: brightness(1.08); }
 button.btn.ghost { background: none; border-color: transparent; color: var(--text-dim); }
@@ -281,105 +285,126 @@ pre.block.tall { max-height: 420px; }
 }
 
 /* ------------------------------------------------------------------ лендинг
-   Единственная публичная поверхность. Палитра здесь своя — фирменная бирюза с
-   питча, а не служебный синий панели: человек, пришедший с презентации, должен
-   узнать проект. Панель остаётся инструментом, лендинг — лицом. */
+   Единственная публичная поверхность. Своя палитра — бирюза знака, а не
+   служебные цвета панели: панель это инструмент, лендинг это лицо.
+
+   Плиток нет намеренно. Карточка с рамкой — способ не принимать решение о
+   иерархии: всё в ней выглядит одинаково важным. Здесь иерархию держат размер,
+   вес и воздух, а рамка появляется только там, где две вещи стоят рядом и их
+   надо разделить. */
 .landing {
-  --lp-ink:    #eaf1f6;
-  --lp-dim:    #a8bccb;
-  --lp-deep:   #0a1119;
-  --lp-panel:  #101a25;
-  --lp-line:   #1d2c3a;
-  --lp-teal:   #7fc4e8;
-  --lp-teal-d: #1f6f8b;
+  --lp-ink:    #eef4f6;
+  --lp-dim:    #93a8b4;
+  --lp-deep:   #080d11;
+  --lp-line:   #17242c;
+  --lp-teal:   #45c8c0;
+  --lp-glow:   #78f0e6;
   background: var(--lp-deep);
   color: var(--lp-ink);
   min-height: 100vh;
   font-size: 16px;
-  line-height: 1.62;
+  line-height: 1.6;
 }
-.lp-wrap { max-width: 1080px; margin: 0 auto; padding: 0 24px; }
+.lp-wrap { max-width: 1060px; margin: 0 auto; padding: 0 28px; }
 
-.lp-top { border-bottom: 1px solid var(--lp-line); position: sticky; top: 0;
-          background: rgba(10, 17, 25, .88); backdrop-filter: blur(8px); z-index: 5; }
-.lp-nav { display: flex; align-items: center; justify-content: space-between;
-          height: 68px; }
-.lp-brand { display: flex; align-items: center; gap: 12px; color: var(--lp-teal);
-            text-decoration: none; font-weight: 700; letter-spacing: .04em; }
-.lp-brand span { color: var(--lp-ink); font-size: 15px; }
-.lp-nav nav { display: flex; align-items: center; gap: 26px; }
-.lp-nav a { color: var(--lp-dim); text-decoration: none; font-size: 14.5px; }
+.lp-top { position: sticky; top: 0; z-index: 5;
+          background: rgba(8, 13, 17, .82); backdrop-filter: blur(10px);
+          border-bottom: 1px solid transparent; transition: border-color .3s; }
+.lp-nav { display: flex; align-items: center; justify-content: space-between; height: 64px; }
+.lp-brand { display: flex; align-items: center; gap: 11px; color: var(--lp-teal);
+            text-decoration: none; }
+.lp-brand span { color: var(--lp-ink); font-size: 14.5px; font-weight: 600;
+                 letter-spacing: .01em; }
+.lp-nav nav { display: flex; align-items: center; gap: 24px; }
+.lp-nav a { color: var(--lp-dim); text-decoration: none; font-size: 14px;
+            transition: color .18s; }
 .lp-nav a:hover { color: var(--lp-ink); }
-.lp-enter { border: 1px solid var(--lp-teal-d); border-radius: 8px;
-            padding: 7px 16px; color: var(--lp-teal) !important; }
-.lp-enter:hover { background: var(--lp-teal-d); color: #fff !important; }
+.lp-enter { color: var(--lp-teal) !important; }
 
-.lp-hero { padding: 92px 0 76px;
-  background:
-    radial-gradient(900px 420px at 82% 8%,  rgba(127, 196, 232, .14), transparent 62%),
-    radial-gradient(700px 380px at 10% 92%, rgba(31, 111, 139, .18), transparent 60%); }
-.lp-kicker { color: var(--lp-teal); font-size: 12.5px; font-weight: 700;
-             letter-spacing: .17em; text-transform: uppercase; margin-bottom: 18px; }
-.lp-hero h1 { font-size: clamp(34px, 5.2vw, 58px); line-height: 1.08;
-              letter-spacing: -.025em; font-weight: 800; text-wrap: balance;
-              margin-bottom: 22px; }
-.lp-lead { max-width: 62ch; color: var(--lp-dim); font-size: 17.5px; }
-.lp-cta { display: flex; flex-wrap: wrap; gap: 14px; margin: 34px 0 46px; }
-.lp-primary, .lp-secondary { text-decoration: none; border-radius: 10px;
-  padding: 13px 26px; font-weight: 600; font-size: 15px; }
-.lp-primary { background: var(--lp-teal); color: #08131b; }
-.lp-primary:hover { background: #9ad4f0; }
-.lp-secondary { border: 1px solid var(--lp-line); color: var(--lp-ink); }
-.lp-secondary:hover { border-color: var(--lp-teal-d); }
+/* ---------------------------------------------------------------- первый экран */
+.lp-hero { position: relative; overflow: hidden; padding: 132px 0 116px; }
+.weave { position: absolute; inset: 0; width: 100%; height: 100%;
+         pointer-events: none; opacity: .9;
+         mask-image: linear-gradient(90deg, transparent, #000 22%, #000 78%, transparent); }
+.lp-hero-body { position: relative; }
+.lp-kicker { color: var(--lp-teal); font-size: 12px; font-weight: 600;
+             letter-spacing: .2em; text-transform: uppercase; margin-bottom: 22px;
+             animation: rise .7s cubic-bezier(.2,.7,.2,1) both; }
+.lp-hero h1 { font-size: clamp(42px, 7vw, 76px); line-height: 1.02;
+              letter-spacing: -.035em; font-weight: 800; margin-bottom: 26px;
+              animation: rise .8s cubic-bezier(.2,.7,.2,1) .06s both; }
+.lp-lead { max-width: 46ch; color: var(--lp-dim); font-size: 18px;
+           animation: rise .8s cubic-bezier(.2,.7,.2,1) .14s both; }
+.lp-cta { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 38px;
+          animation: rise .8s cubic-bezier(.2,.7,.2,1) .22s both; }
+@keyframes rise { from { opacity: 0; transform: translateY(14px); } }
 
-.lp-metrics { display: grid; gap: 18px;
-              grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); }
-.lp-metrics dt { font-size: 27px; font-weight: 800; color: var(--lp-teal);
-                 line-height: 1.2; }
-.lp-metrics dd { margin: 4px 0 0; color: var(--lp-dim); font-size: 14px; }
+.lp-primary, .lp-secondary {
+  text-decoration: none; border-radius: 9px; padding: 13px 28px;
+  font-weight: 600; font-size: 15px; display: inline-block;
+  transition: transform .16s cubic-bezier(.2,.7,.2,1), background .16s, box-shadow .16s;
+}
+.lp-primary { background: var(--lp-teal); color: #04211f;
+              box-shadow: 0 0 0 0 rgba(69, 200, 192, .5); }
+.lp-primary:hover { transform: translateY(-2px);
+                    box-shadow: 0 10px 30px -10px rgba(69, 200, 192, .6); }
+.lp-secondary { color: var(--lp-ink); border: 1px solid var(--lp-line); }
+.lp-secondary:hover { border-color: var(--lp-teal); transform: translateY(-2px); }
 
-.lp-section { padding: 74px 0; border-top: 1px solid var(--lp-line); }
-.lp-dark { background: var(--lp-panel); }
-.lp-section h2 { font-size: clamp(24px, 3vw, 32px); font-weight: 800;
-                 letter-spacing: -.02em; margin-bottom: 12px; text-wrap: balance; }
-.lp-sub { color: var(--lp-dim); max-width: 64ch; margin-bottom: 34px; }
+/* ------------------------------------------------------------------- разделы */
+.lp-section { padding: 96px 0; }
+.lp-h2 { font-size: clamp(13px, 1.6vw, 14px); font-weight: 600; letter-spacing: .18em;
+         text-transform: uppercase; color: var(--lp-teal); margin-bottom: 40px; }
 
-/* 340, а не 272: при ширине обёртки в 1032 три колонки оставляли четвёртую
-   карточку сиротой в отдельном ряду. Четыре по два читаются как решение, а
-   3+1 — как недосмотр. */
-.lp-grid { display: grid; gap: 18px;
-           grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); }
-.lp-two { grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); }
-.lp-card { background: rgba(255, 255, 255, .028); border: 1px solid var(--lp-line);
-           border-radius: 14px; padding: 24px; }
-.lp-card h3 { font-size: 17.5px; font-weight: 700; margin-bottom: 10px; }
-.lp-card p { color: var(--lp-dim); font-size: 14.8px; }
-.lp-note { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--lp-line);
-           color: var(--lp-teal) !important; font-size: 13.5px !important; }
-.lp-product ul { margin: 16px 0 0; padding: 0; list-style: none; }
-.lp-product li { position: relative; padding-left: 18px; color: var(--lp-dim);
-                 font-size: 14px; margin-bottom: 7px; }
-.lp-product li::before { content: ""; position: absolute; left: 2px; top: .62em;
-  width: 6px; height: 6px; border-radius: 2px; background: var(--lp-teal-d); }
-.lp-tag { display: inline-block; font-family: var(--mono, monospace); font-size: 12px;
-  color: var(--lp-teal); background: rgba(127, 196, 232, .1);
-  border: 1px solid var(--lp-line); border-radius: 6px; padding: 3px 9px;
-  margin-bottom: 14px; }
+.reveal { opacity: 0; transform: translateY(18px);
+          transition: opacity .6s cubic-bezier(.2,.7,.2,1),
+                      transform .6s cubic-bezier(.2,.7,.2,1); }
+.reveal[data-seen="true"] { opacity: 1; transform: none; }
 
-.lp-steps { list-style: none; padding: 0; margin: 0; display: grid; gap: 4px; }
-.lp-steps li { display: flex; gap: 22px; padding: 20px 0;
-               border-bottom: 1px dashed var(--lp-line); }
-.lp-steps li:last-child { border-bottom: none; }
-.lp-num { flex: 0 0 auto; font-weight: 800; font-size: 15px; color: var(--lp-teal-d);
-          letter-spacing: .06em; padding-top: 2px; }
-.lp-steps h3 { font-size: 16.5px; font-weight: 700; margin-bottom: 4px; }
-.lp-steps p { color: var(--lp-dim); font-size: 14.5px; }
-.lp-fine { margin-top: 26px; color: var(--lp-dim); font-size: 13.5px; }
+/* Две возможности. Не карточки: разделены линией и воздухом, а имя сервиса —
+   крупным, потому что именно его ищут глазами. */
+.lp-products { display: grid; gap: 0;
+               grid-template-columns: repeat(auto-fit, minmax(330px, 1fr)); }
+.lp-product { padding: 34px 34px 34px 0; position: relative; height: 100%; }
+.lp-products > .reveal + .reveal .lp-product { padding-left: 34px; }
+.lp-products > .reveal + .reveal .lp-product::before {
+  content: ""; position: absolute; left: 0; top: 8px; bottom: 8px; width: 1px;
+  background: linear-gradient(180deg, transparent, var(--lp-line) 20%,
+                              var(--lp-line) 80%, transparent);
+}
+.lp-product h3 { font-size: clamp(30px, 4vw, 42px); font-weight: 800;
+                 letter-spacing: -.03em; line-height: 1.05; margin-bottom: 14px; }
+.lp-line { font-size: 17px; color: var(--lp-ink); margin-bottom: 12px; }
+.lp-detail { color: var(--lp-dim); font-size: 15px; max-width: 42ch; }
+.lp-product ul { list-style: none; padding: 0; margin: 22px 0 0;
+                 display: flex; flex-wrap: wrap; gap: 8px; }
+.lp-product li { font-size: 13px; color: var(--lp-dim); border: 1px solid var(--lp-line);
+                 border-radius: 999px; padding: 5px 13px; transition: border-color .2s, color .2s; }
+.lp-product:hover li { border-color: rgba(69, 200, 192, .35); color: var(--lp-ink); }
+.lp-id { display: block; margin-top: 22px; font-size: 12.5px; color: var(--lp-teal);
+         opacity: .55; transition: opacity .2s; letter-spacing: .02em; }
+.lp-product:hover .lp-id { opacity: 1; }
 
-.lp-foot { border-top: 1px solid var(--lp-line); padding: 30px 0; color: var(--lp-teal); }
-.lp-foot .lp-wrap { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
-.lp-foot p { color: var(--lp-dim); font-size: 13.5px; margin: 0; flex: 1; }
-.lp-foot a { color: var(--lp-teal); text-decoration: none; font-size: 14px; }
+/* ----------------------------------------------------------------- почему */
+.lp-why { border-top: 1px solid var(--lp-line); border-bottom: 1px solid var(--lp-line);
+          background: rgba(255, 255, 255, .012); }
+.lp-why-grid { display: grid; gap: 40px;
+               grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); }
+.lp-why-item h3 { font-size: 18px; font-weight: 700; margin-bottom: 8px;
+                  letter-spacing: -.01em; }
+.lp-why-item p { color: var(--lp-dim); font-size: 14.5px; }
+
+.lp-final { text-align: left; }
+.lp-final .lp-lead { margin-bottom: 32px; }
+
+.lp-foot { border-top: 1px solid var(--lp-line); padding: 28px 0; color: var(--lp-teal); }
+.lp-foot .lp-wrap { display: flex; align-items: center; gap: 14px; }
+.lp-foot p { color: var(--lp-dim); font-size: 13px; margin: 0; }
+
+@media (prefers-reduced-motion: reduce) {
+  .lp-kicker, .lp-hero h1, .lp-lead, .lp-cta { animation: none; }
+  .reveal { opacity: 1; transform: none; transition: none; }
+}
 
 /* -------------------------------------------------------------------- вход */
 .signin { min-height: 100vh; display: grid; place-items: center; padding: 24px;

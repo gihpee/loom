@@ -43,19 +43,21 @@ export function Cabinet({ who }: { who: Who }) {
   const running = totals.reduce((sum, l) => sum + l.running, 0);
 
   return (
-    <div className="screen">
+    <div className="page">
       <ErrorLine error={usage.error || keys.error} />
-      <header className="screen-head">
+      <header>
         <div>
           <h1>Мои ресурсы</h1>
-          <p className="sub">{who.email}</p>
+          <p>{who.email}</p>
         </div>
-        <Button kind="primary" onClick={() => setRenting(true)}>
-          Арендовать кластер
-        </Button>
+        <div className="actions">
+          <Button kind="primary" onClick={() => setRenting(true)}>
+            Арендовать кластер
+          </Button>
+        </div>
       </header>
 
-      <div className="cards">
+      <div className="grid stats">
         <Stat label="Потрачено" value={money(spent, currency)} />
         <Stat label="Сейчас работает" value={running} sub="аренд" />
         <Stat label="Токенов выдано"
@@ -71,7 +73,7 @@ export function Cabinet({ who }: { who: Who }) {
             Аренда кластера считается по GPU-часам, инференс — по токенам.
           </Empty>
         ) : (
-          <table className="table">
+          <div className="card pad0"><table>
             <thead>
               <tr><th>Ресурс</th><th>GPU-часов</th><th>Аренд</th><th>Стоимость</th></tr>
             </thead>
@@ -88,14 +90,14 @@ export function Cabinet({ who }: { who: Who }) {
                 </tr>
               ))}
             </tbody>
-          </table>
+          </table></div>
         )}
       </section>
 
       {tokens.length > 0 && (
         <section>
           <h2>Инференс</h2>
-          <table className="table">
+          <table>
             <thead><tr><th>Модель</th><th>Промпт</th><th>Ответ</th></tr></thead>
             <tbody>
               {tokens.map((t) => (
@@ -130,7 +132,7 @@ function Clusters({ clusters, onChanged }: {
   return (
     <section>
       <h2>Мои кластеры</h2>
-      <table className="table">
+      <div className="card pad0"><table>
         <thead>
           <tr><th>Кластер</th><th>Узлов</th><th>С</th><th>Состояние</th><th /></tr>
         </thead>
@@ -152,7 +154,7 @@ function Clusters({ clusters, onChanged }: {
             </tr>
           ))}
         </tbody>
-      </table>
+      </table></div>
       <p className="sub">
         Счёт идёт, пока кластер держит ресурс. Снятие возвращает платформе
         модели, которые были подвинуты ради этой аренды.
@@ -177,8 +179,8 @@ function Keys({ keys, fresh, setFresh }: {
 
   return (
     <section>
-      <div className="screen-head">
-        <h2>Ключи API</h2>
+      <h2>Ключи API</h2>
+      <div className="tools">
         <Button size="sm" onClick={create} disabled={action.busy}>Создать ключ</Button>
       </div>
       {fresh && (
@@ -193,7 +195,7 @@ function Keys({ keys, fresh, setFresh }: {
       {rows.length === 0 ? (
         <Empty title="Ключей нет">Ключ подписывает запросы к инференсу.</Empty>
       ) : (
-        <table className="table">
+        <div className="card pad0"><table>
           <thead><tr><th>Ключ</th><th>Создан</th><th>Использован</th><th /></tr></thead>
           <tbody>
             {rows.map((k) => (
@@ -214,7 +216,7 @@ function Keys({ keys, fresh, setFresh }: {
               </tr>
             ))}
           </tbody>
-        </table>
+        </table></div>
       )}
     </section>
   );
