@@ -5,6 +5,10 @@ description = "Looma orchestrator — distributed compute and inference on machi
 requires-python = ">=3.11"
 dependencies = [
     "grpcio>=1.60",
+    # Postgres. Асинхронный драйвер, потому что HTTP-слой асинхронный: с
+    # синхронным каждый запрос к базе блокировал бы цикл событий, то есть и
+    # все остальные запросы заодно.
+    "asyncpg>=0.29",
     "protobuf>=5.29",
     "fastapi>=0.110",
     "uvicorn>=0.29",
@@ -28,6 +32,9 @@ grpc-tools = ["grpcio-tools==1.71.0"]
 # the node's and the payload's dependencies are dev dependencies here.
 dev = [
     "pytest>=8.0",
+    # Часть проверок учётных записей асинхронна — иначе они проверяли бы
+    # заглушку, а не поведение самой базы.
+    "pytest-asyncio>=0.24",
     "grpcio-tools==1.71.0",
     "psutil>=5.9",
     "cryptography>=42",
@@ -46,3 +53,7 @@ packages = ["src/looma"]
 [tool.pytest.ini_options]
 markers = ["slow: runs a real model; minutes, not seconds"]
 testpaths = ["tests"]
+# `auto`, а не декоратор на каждой: асинхронных проверок будет всё больше, а
+# один пропущенный `@pytest_asyncio.fixture` даёт не падение теста, а ошибку в
+# внутренностях pytest, по которой не видно ни файла, ни причины.
+asyncio_mode = "auto"

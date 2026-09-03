@@ -227,7 +227,7 @@ def test_the_http_api_runs_a_task_and_hands_back_the_file(stand):
 
     orchestrator, _agent = stand
     app = create_app(agents=orchestrator.hub, config=_Settings())
-    client = TestClient(app)
+    client = TestClient(app, headers=ADMIN_HEADERS)
 
     listed = client.get("/admin/agents").json()
     assert [n["node_id"] for n in listed["nodes"]] == ["test-agent"]
@@ -263,17 +263,28 @@ def test_the_api_explains_a_task_it_cannot_place(stand):
     from looma.api.app import create_app
 
     orchestrator, _agent = stand
-    client = TestClient(create_app(agents=orchestrator.hub, config=_Settings()))
+    client = TestClient(create_app(agents=orchestrator.hub, config=_Settings()), headers=ADMIN_HEADERS)
     answer = client.post("/admin/tasks", json={"command": ["true"],
                                                "resources": {"gpus": 64}})
     assert answer.status_code == 409
     assert "gpu" in answer.json()["error"]["message"].lower()
 
 
-class _Settings:
-    """An orchestrator with no admin token, so the tests are about the routes."""
+#: Чем тесты представляются. Общим, чтобы добавление маршрута не требовало
+#: трогать двенадцать мест.
+ADMIN_TOKEN = "test-admin-token"
+ADMIN_HEADERS = {"X-Looma-Admin-Token": ADMIN_TOKEN}
 
-    admin_token = ""
+
+class _Settings:
+    """Оркестратор с настоящим админским токеном.
+
+    Раньше здесь была пустая строка, и это работало ровно потому, что пустой
+    токен означал «пускать всех» — то есть тесты опирались на дыру. Теперь
+    отсутствие настройки означает «никого», и представляться нужно даже им.
+    """
+
+    admin_token = ADMIN_TOKEN
 
 
 # ------------------------------------------------------------------ releases
@@ -347,7 +358,7 @@ def test_the_archive_is_served_to_anyone_who_asks(tmp_path):
 
     store = ReleaseStore(tmp_path / "releases")
     store.publish(version="0.4.0", signature=b"\x03" * 64, archive=b"the payload")
-    client = TestClient(create_app(releases=store, config=_Settings()))
+    client = TestClient(create_app(releases=store, config=_Settings()), headers=ADMIN_HEADERS)
 
     got = client.get("/agent/release/0.4.0.tar.gz")
     assert got.status_code == 200
@@ -362,7 +373,7 @@ def test_publishing_and_advancing_through_the_api(tmp_path):
     from looma.orchestrator.releases import ReleaseStore
 
     store = ReleaseStore(tmp_path / "releases")
-    client = TestClient(create_app(releases=store, config=_Settings()))
+    client = TestClient(create_app(releases=store, config=_Settings()), headers=ADMIN_HEADERS)
 
     published = client.post("/admin/release", json={
         "version": "0.5.0",
@@ -384,7 +395,7 @@ def test_the_api_refuses_an_unsigned_release(tmp_path):
     from looma.api.app import create_app
     from looma.orchestrator.releases import ReleaseStore
 
-    client = TestClient(create_app(releases=ReleaseStore(tmp_path / "r"), config=_Settings()))
+    client = TestClient(create_app(releases=ReleaseStore(tmp_path / "r"), config=_Settings()), headers=ADMIN_HEADERS)
     answer = client.post("/admin/release", json={
         "version": "0.5.0", "signature": "",
         "archive": base64.b64encode(b"bytes").decode()})

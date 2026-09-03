@@ -52,6 +52,25 @@ def incoming_dir() -> Optional[Path]:
     return Path(raw) if raw else None
 
 
+def refusal_for(version: str) -> str:
+    """Почему этот релиз уже отвергли на этом узле. Пусто — не отвергали.
+
+    Читается файлом, а не импортом из лаунчера: агент — это то, что обновление
+    заменяет, и зависеть от версии лаунчера, под которой он однажды окажется,
+    он не может. Общий тут только путь, и его лаунчер передаёт сам.
+
+    Старый лаунчер этих файлов не пишет — тогда защиты просто нет, ровно как
+    раньше. Хуже от чтения не станет.
+    """
+    incoming = incoming_dir()
+    if incoming is None or not version:
+        return ""
+    try:
+        return (incoming.parent / "refused" / f"{version}.txt").read_text().strip()
+    except (OSError, ValueError):
+        return ""
+
+
 def updates_disabled() -> str:
     """Почему этот узел не сможет поставить обновление, если не сможет.
 
@@ -113,6 +132,19 @@ class Updater:
             self.state = "refused"
             self.last_refusal = f"релиз {release.version} назван без адреса, откуда его брать"
             logger.warning("%s", self.last_refusal)
+            return
+        already = refusal_for(release.version)
+        if already:
+            # Тот же релиз, который этот узел уже отказался ставить. Скачать
+            # его снова — значит слить задачи, перезапуститься, получить тот же
+            # отказ и начать заново; в логе это выглядит как петля раз в
+            # секунду, и настоящей причины в ней не видно.
+            if self.offered != release.version or self.state != "refused":
+                logger.error("релиз %s уже отвергнут этим узлом: %s",
+                             release.version, already)
+            self.offered = release.version
+            self.state = "refused"
+            self.last_refusal = already
             return
         self.offered = release.version
         if not self._working.acquire(blocking=False):

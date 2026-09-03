@@ -22,6 +22,17 @@ server {
         add_header Cache-Control "public, immutable";
     }
 
+    # Кабинет клиента. Отдельным префиксом от /admin: правило доступа читается
+    # по адресу, а не по догадке о том, кто зашёл.
+    location /api/ {
+        proxy_pass http://${LOOMA_API_HOST}:${LOOMA_HTTP_PORT};
+        proxy_set_header Host $host;
+        # Сессия ездит в cookie, и без этого заголовка вход работал бы только
+        # до первой перезагрузки страницы.
+        proxy_set_header Cookie $http_cookie;
+        proxy_read_timeout 120s;
+    }
+
     location /admin/ {
         proxy_pass http://${LOOMA_API_HOST}:${LOOMA_HTTP_PORT};
         proxy_set_header Host $host;

@@ -55,8 +55,10 @@ class ControlClient:
         on_message: Callable[[agent_pb2.ServerMessage], None],
         on_registered: Optional[Callable[[agent_pb2.RegisterAck], None]] = None,
         reconnect_delay_s: float = 3.0,
+        tls: bool = False,
     ) -> None:
         self.address = address
+        self.tls = tls
         self.register_message = register_message
         self.on_message = on_message
         self.on_registered = on_registered
@@ -109,7 +111,7 @@ class ControlClient:
         outbox: "queue.Queue[object]" = queue.Queue()
         self._outbox = outbox
         try:
-            with grpc.insecure_channel(self.address, options=CHANNEL_OPTIONS) as channel:
+            with self._channel() as channel:
                 stub = agent_pb2_grpc.AgentGatewayStub(channel)
                 for message in stub.Attach(self._outgoing(outbox)):
                     self._receive(message)
@@ -119,6 +121,24 @@ class ControlClient:
             if self._outbox is outbox:
                 self._outbox = None
             outbox.put(_CLOSE)  # free the generator if it is still blocked
+
+    def _channel(self):
+        """Канал до оркестратора — шифрованный, если так сказал ключ.
+
+        Корневые сертификаты берутся системные: сертификат оркестратора выдан
+        обычным публичным центром, и возить его копию в образе значило бы
+        обновлять образ при каждой смене центра.
+
+        Открытый канал остаётся ради разработки и тестов, где оркестратор
+        поднимается в том же процессе. Но он сообщает о себе в лог: по этому
+        каналу едут секрет ключа и команды запуска задач, и «забыли настроить»
+        не должно выглядеть так же, как «настроили».
+        """
+        if not self.tls:
+            logger.warning("канал до %s без шифрования", self.address)
+            return grpc.insecure_channel(self.address, options=CHANNEL_OPTIONS)
+        return grpc.secure_channel(self.address, grpc.ssl_channel_credentials(),
+                                   options=CHANNEL_OPTIONS)
 
     def _outgoing(self, outbox: "queue.Queue[object]"):
         yield agent_pb2.AgentMessage(register=self.register_message())

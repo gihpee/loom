@@ -103,6 +103,7 @@ class Agent:
         self.peers = PeerLayer(on_message=lambda raw: self.commands.on_peer_message(raw))
         self.client = ControlClient(
             address=self.key.address,
+            tls=self.key.tls,
             register_message=self._register_message,
             on_message=lambda msg: self.handlers.handle(msg),
             on_registered=self._on_registered,

@@ -34,12 +34,20 @@ class JoinKey:
     label: str = ""
     created_at: float = field(default_factory=time.time)
     max_nodes: int = 0  # 0 = unlimited
+    # Ходить ли по этому адресу с TLS. Едет внутри ключа, а не выводится из
+    # вида адреса: угадывание здесь означало бы, что узел молча уходит в
+    # открытый канал, когда оркестратор ждал шифрованный.
+    tls: bool = False
     revoked: bool = False
     nodes: List[str] = field(default_factory=list)  # node_ids seen with this key
 
     def encode(self) -> str:
         """Render the shareable key string."""
         payload = {"i": self.key_id, "s": self.secret, "a": self.address}
+        if self.tls:
+            # Только когда включено: ключи, выпущенные до шифрования, остаются
+            # прежними строками, и старые узлы продолжают работать.
+            payload["t"] = 1
         raw = json.dumps(payload, separators=(",", ":")).encode()
         return PREFIX + base64.urlsafe_b64encode(raw).decode().rstrip("=")
 
@@ -61,6 +69,7 @@ def decode_key(key: str) -> Optional[dict]:
             "key_id": payload["i"],
             "secret": payload["s"],
             "address": payload.get("a", ""),
+            "tls": bool(payload.get("t")),
         }
     except Exception:
         return None
@@ -75,9 +84,13 @@ class KeyStore:
         public_address: str,
         path: Optional[str | Path] = None,
         master_token: str = "",
+        tls: bool = False,
     ) -> None:
         self._lock = threading.RLock()
         self.public_address = public_address
+        # Чем ключи будут снабжаться при выпуске. Уже выпущенные не меняются:
+        # строка ключа у владельца узла на руках, и переписать её мы не можем.
+        self.tls = tls
         self.path = Path(path) if path else None
         # Legacy/dev escape hatch: a single shared token also authenticates.
         self.master_token = master_token
@@ -111,6 +124,7 @@ class KeyStore:
                 key_id=secrets.token_hex(6),
                 secret=secrets.token_urlsafe(32),
                 address=self.public_address,
+                tls=self.tls,
                 label=label,
                 max_nodes=max_nodes,
             )

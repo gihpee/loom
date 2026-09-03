@@ -279,3 +279,142 @@ pre.block.tall { max-height: 420px; }
   .page { padding: var(--s4); }
   .form-grid.two, .form-grid.three { grid-template-columns: 1fr; }
 }
+
+/* ------------------------------------------------------------------ лендинг
+   Единственная публичная поверхность. Палитра здесь своя — фирменная бирюза с
+   питча, а не служебный синий панели: человек, пришедший с презентации, должен
+   узнать проект. Панель остаётся инструментом, лендинг — лицом. */
+.landing {
+  --lp-ink:    #eaf1f6;
+  --lp-dim:    #a8bccb;
+  --lp-deep:   #0a1119;
+  --lp-panel:  #101a25;
+  --lp-line:   #1d2c3a;
+  --lp-teal:   #7fc4e8;
+  --lp-teal-d: #1f6f8b;
+  background: var(--lp-deep);
+  color: var(--lp-ink);
+  min-height: 100vh;
+  font-size: 16px;
+  line-height: 1.62;
+}
+.lp-wrap { max-width: 1080px; margin: 0 auto; padding: 0 24px; }
+
+.lp-top { border-bottom: 1px solid var(--lp-line); position: sticky; top: 0;
+          background: rgba(10, 17, 25, .88); backdrop-filter: blur(8px); z-index: 5; }
+.lp-nav { display: flex; align-items: center; justify-content: space-between;
+          height: 68px; }
+.lp-brand { display: flex; align-items: center; gap: 12px; color: var(--lp-teal);
+            text-decoration: none; font-weight: 700; letter-spacing: .04em; }
+.lp-brand span { color: var(--lp-ink); font-size: 15px; }
+.lp-nav nav { display: flex; align-items: center; gap: 26px; }
+.lp-nav a { color: var(--lp-dim); text-decoration: none; font-size: 14.5px; }
+.lp-nav a:hover { color: var(--lp-ink); }
+.lp-enter { border: 1px solid var(--lp-teal-d); border-radius: 8px;
+            padding: 7px 16px; color: var(--lp-teal) !important; }
+.lp-enter:hover { background: var(--lp-teal-d); color: #fff !important; }
+
+.lp-hero { padding: 92px 0 76px;
+  background:
+    radial-gradient(900px 420px at 82% 8%,  rgba(127, 196, 232, .14), transparent 62%),
+    radial-gradient(700px 380px at 10% 92%, rgba(31, 111, 139, .18), transparent 60%); }
+.lp-kicker { color: var(--lp-teal); font-size: 12.5px; font-weight: 700;
+             letter-spacing: .17em; text-transform: uppercase; margin-bottom: 18px; }
+.lp-hero h1 { font-size: clamp(34px, 5.2vw, 58px); line-height: 1.08;
+              letter-spacing: -.025em; font-weight: 800; text-wrap: balance;
+              margin-bottom: 22px; }
+.lp-lead { max-width: 62ch; color: var(--lp-dim); font-size: 17.5px; }
+.lp-cta { display: flex; flex-wrap: wrap; gap: 14px; margin: 34px 0 46px; }
+.lp-primary, .lp-secondary { text-decoration: none; border-radius: 10px;
+  padding: 13px 26px; font-weight: 600; font-size: 15px; }
+.lp-primary { background: var(--lp-teal); color: #08131b; }
+.lp-primary:hover { background: #9ad4f0; }
+.lp-secondary { border: 1px solid var(--lp-line); color: var(--lp-ink); }
+.lp-secondary:hover { border-color: var(--lp-teal-d); }
+
+.lp-metrics { display: grid; gap: 18px;
+              grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); }
+.lp-metrics dt { font-size: 27px; font-weight: 800; color: var(--lp-teal);
+                 line-height: 1.2; }
+.lp-metrics dd { margin: 4px 0 0; color: var(--lp-dim); font-size: 14px; }
+
+.lp-section { padding: 74px 0; border-top: 1px solid var(--lp-line); }
+.lp-dark { background: var(--lp-panel); }
+.lp-section h2 { font-size: clamp(24px, 3vw, 32px); font-weight: 800;
+                 letter-spacing: -.02em; margin-bottom: 12px; text-wrap: balance; }
+.lp-sub { color: var(--lp-dim); max-width: 64ch; margin-bottom: 34px; }
+
+/* 340, а не 272: при ширине обёртки в 1032 три колонки оставляли четвёртую
+   карточку сиротой в отдельном ряду. Четыре по два читаются как решение, а
+   3+1 — как недосмотр. */
+.lp-grid { display: grid; gap: 18px;
+           grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); }
+.lp-two { grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); }
+.lp-card { background: rgba(255, 255, 255, .028); border: 1px solid var(--lp-line);
+           border-radius: 14px; padding: 24px; }
+.lp-card h3 { font-size: 17.5px; font-weight: 700; margin-bottom: 10px; }
+.lp-card p { color: var(--lp-dim); font-size: 14.8px; }
+.lp-note { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--lp-line);
+           color: var(--lp-teal) !important; font-size: 13.5px !important; }
+.lp-product ul { margin: 16px 0 0; padding: 0; list-style: none; }
+.lp-product li { position: relative; padding-left: 18px; color: var(--lp-dim);
+                 font-size: 14px; margin-bottom: 7px; }
+.lp-product li::before { content: ""; position: absolute; left: 2px; top: .62em;
+  width: 6px; height: 6px; border-radius: 2px; background: var(--lp-teal-d); }
+.lp-tag { display: inline-block; font-family: var(--mono, monospace); font-size: 12px;
+  color: var(--lp-teal); background: rgba(127, 196, 232, .1);
+  border: 1px solid var(--lp-line); border-radius: 6px; padding: 3px 9px;
+  margin-bottom: 14px; }
+
+.lp-steps { list-style: none; padding: 0; margin: 0; display: grid; gap: 4px; }
+.lp-steps li { display: flex; gap: 22px; padding: 20px 0;
+               border-bottom: 1px dashed var(--lp-line); }
+.lp-steps li:last-child { border-bottom: none; }
+.lp-num { flex: 0 0 auto; font-weight: 800; font-size: 15px; color: var(--lp-teal-d);
+          letter-spacing: .06em; padding-top: 2px; }
+.lp-steps h3 { font-size: 16.5px; font-weight: 700; margin-bottom: 4px; }
+.lp-steps p { color: var(--lp-dim); font-size: 14.5px; }
+.lp-fine { margin-top: 26px; color: var(--lp-dim); font-size: 13.5px; }
+
+.lp-foot { border-top: 1px solid var(--lp-line); padding: 30px 0; color: var(--lp-teal); }
+.lp-foot .lp-wrap { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
+.lp-foot p { color: var(--lp-dim); font-size: 13.5px; margin: 0; flex: 1; }
+.lp-foot a { color: var(--lp-teal); text-decoration: none; font-size: 14px; }
+
+/* -------------------------------------------------------------------- вход */
+.signin { min-height: 100vh; display: grid; place-items: center; padding: 24px;
+          background: var(--bg); }
+.signin-card { width: 100%; max-width: 380px; background: var(--surface);
+  border: 1px solid var(--line); border-radius: var(--r3); padding: 30px;
+  display: grid; gap: 16px; }
+.signin-brand { display: flex; align-items: center; gap: 11px; color: var(--accent);
+  text-decoration: none; font-weight: 700; }
+.signin-brand span { color: var(--text); font-size: 15px; }
+.signin-card h1 { font-size: 21px; font-weight: 700; margin: 0; }
+.signin-card label { display: grid; gap: 6px; font-size: 13px; color: var(--text-dim); }
+.signin-card button { padding: 11px; border-radius: var(--r1); border: none;
+  background: var(--accent); color: #06101f; font-weight: 600; cursor: pointer; }
+.signin-card button:disabled { opacity: .5; cursor: not-allowed; }
+.signin-error { color: var(--bad); font-size: 13.5px; margin: 0; }
+.signin-fine { color: var(--text-mute); font-size: 12.5px; margin: 0; }
+
+/* ---------------------------------------------------------------- кабинет */
+.app-shell { min-height: 100vh; background: var(--bg); }
+.app-top { display: flex; align-items: center; justify-content: space-between;
+  height: 58px; padding: 0 var(--s5); border-bottom: 1px solid var(--line); }
+.app-brand { color: var(--text); text-decoration: none; font-weight: 700;
+             letter-spacing: .03em; }
+.app-top nav { display: flex; align-items: center; gap: var(--s4); }
+.app-top nav a { color: var(--text-dim); text-decoration: none; font-size: 14px; }
+.app-top nav a:hover { color: var(--text); }
+.notice { background: var(--warn-soft); border: 1px solid var(--warn);
+  border-radius: var(--r2); padding: var(--s4); margin: var(--s4) 0;
+  display: grid; gap: var(--s3); justify-items: start; }
+.notice code { word-break: break-all; }
+.who { display: flex; align-items: center; gap: var(--s2); margin-top: var(--s3);
+       font-size: 12px; color: var(--text-mute); }
+.who span { flex: 1; overflow: hidden; text-overflow: ellipsis; }
+.denied { min-height: 100vh; display: grid; place-content: center; gap: var(--s4);
+  justify-items: center; text-align: center; padding: 24px; }
+.denied p { color: var(--text-dim); }
+.loading { min-height: 100vh; background: var(--bg); }

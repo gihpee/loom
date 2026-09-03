@@ -18,7 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "agent"))
 
 from looma.orchestrator.agents import AgentError  # noqa: E402
 
-from test_agent_gateway import Orchestrator, _Settings  # noqa: E402
+from test_agent_gateway import ADMIN_HEADERS, Orchestrator, _Settings  # noqa: E402
 
 
 def free_port() -> int:
@@ -197,7 +197,7 @@ def app_client(hub=None):
 
     from looma.api.app import create_app
 
-    return TestClient(create_app(agents=hub, config=_Settings()))
+    return TestClient(create_app(agents=hub, config=_Settings()), headers=ADMIN_HEADERS)
 
 
 def test_websocket_умеет_обслуживаться_uvicorn():

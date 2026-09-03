@@ -3,6 +3,27 @@
 # (docs/DEPLOYMENT.md).
 
 services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    # Host-сеть, как и у остальных: оркестратор ходит на 127.0.0.1, а наружу
+    # база не смотрит — открытый в интернет Postgres перебирают в тот же день.
+    network_mode: host
+    environment:
+      POSTGRES_DB: ${LOOMA_DB_NAME:-looma}
+      POSTGRES_USER: ${LOOMA_DB_USER:-looma}
+      POSTGRES_PASSWORD: ${LOOMA_DB_PASSWORD:?задайте пароль базы в .env}
+      PGPORT: ${LOOMA_DB_PORT:-5432}
+    volumes:
+      - postgres:/var/lib/postgresql/data
+    healthcheck:
+      # Оркестратор без базы не поднимет учётные записи, а compose иначе
+      # запустит его в ту же секунду, что и базу, — то есть до неё.
+      test: ["CMD-SHELL", "pg_isready -U ${LOOMA_DB_USER:-looma} -p ${LOOMA_DB_PORT:-5432}"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
   orchestrator:
     build:
       context: .
@@ -14,7 +35,13 @@ services:
     env_file: .env
     environment:
       LOOMA_DATA_DIR: /data
+    depends_on:
+      postgres:
+        condition: service_healthy
     volumes:
+      # Сертификат — только на чтение: обновляет его certbot, а оркестратор
+      # перечитывает файл, когда тот меняется (orchestrator/tls.py).
+      - letsencrypt:/etc/letsencrypt:ro
       # Join keys, published agent releases, and the address the relay writes
       # for us. All of it must outlive the container.
       - looma-data:/data
@@ -34,6 +61,37 @@ services:
       LOOMA_API_HOST: 127.0.0.1
     depends_on:
       - orchestrator
+
+  # Единственное, что смотрит в интернет. Панель и API остаются на локальных
+  # портах и в интернет не выставляются — их закрывает межсетевой экран узла.
+  edge:
+    build:
+      context: .
+      dockerfile: docker/edge.Dockerfile
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      LOOMA_DOMAIN: ${LOOMA_DOMAIN:?нужен домен, например loomafloat.ru}
+      LOOMA_WEB_PORT: ${LOOMA_WEB_PORT:-8080}
+    volumes:
+      - letsencrypt:/etc/letsencrypt:ro
+      - acme:/var/www/acme:ro
+    depends_on:
+      - web
+
+  # Продление сертификата. Первый выпуск делается отдельно и один раз —
+  # scripts/issue_cert.sh: пока сертификата нет, nginx не поднимется, а значит
+  # и проверку владения доменом обслужить некому.
+  certbot:
+    image: certbot/certbot:latest
+    restart: unless-stopped
+    volumes:
+      - letsencrypt:/etc/letsencrypt
+      - acme:/var/www/acme
+    # Дважды в сутки — рекомендация самого Let's Encrypt: продление начинается
+    # за 30 дней до срока, и две попытки в день дают шестьдесят шансов до того,
+    # как что-то станет срочным.
+    entrypoint: sh -c 'trap exit TERM; while :; do certbot renew --webroot -w /var/www/acme --quiet; sleep 12h & wait $${!}; done'
 
   # For nodes nothing can dial into — including from other nodes. Optional: a
   # node without it simply relays everything through the orchestrator, which is
@@ -59,4 +117,7 @@ services:
       - looma-data:/data
 
 volumes:
+  postgres:
+  letsencrypt:
+  acme:
   looma-data:

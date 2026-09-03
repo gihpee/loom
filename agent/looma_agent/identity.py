@@ -34,6 +34,11 @@ class JoinKey:
     secret: str
     address: str
     raw: str
+    #: Шифровать ли канал. Приходит внутри ключа, а не угадывается по адресу:
+    #: догадка тут означала бы, что узел молча уходит в открытый канал там, где
+    #: оркестратор ждал шифрованный, — и заметить это можно было бы только
+    #: перехватив трафик.
+    tls: bool = False
 
 
 def parse_join_key(key: str) -> JoinKey:
@@ -52,6 +57,7 @@ def parse_join_key(key: str) -> JoinKey:
             secret=payload["s"],
             address=payload.get("a", ""),
             raw=key,
+            tls=bool(payload.get("t")),
         )
     except BadJoinKey:
         raise

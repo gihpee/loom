@@ -1,0 +1,68 @@
+# Пограничный слой: единственное, что смотрит в интернет.
+#
+# Он делает ровно две вещи — отвечает на проверку Let's Encrypt и завершает
+# TLS, отдавая расшифрованное панели на 127.0.0.1. Панель при этом не знает,
+# что стоит за ней кто-то ещё, и локальный запуск без домена работает так же,
+# как работал.
+#
+# Порты 80 и 443 — хостовые: сеть у compose host, иначе p2p-порт rendezvous
+# оказался бы за трансляцией и ни один узел не смог бы к нему подключиться.
+
+server {
+    listen 80;
+    listen [::]:80;
+    server_name ${LOOMA_DOMAIN};
+
+    # Проверка владения доменом ходит только сюда и только по http: заворачивать
+    # её в https нельзя, потому что сертификата ещё нет — именно за ним и
+    # пришли.
+    location /.well-known/acme-challenge/ {
+        root /var/www/acme;
+    }
+
+    location / {
+        return 301 https://$host$request_uri;
+    }
+}
+
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    http2 on;
+    server_name ${LOOMA_DOMAIN};
+
+    ssl_certificate     /etc/letsencrypt/live/${LOOMA_DOMAIN}/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/${LOOMA_DOMAIN}/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_prefer_server_ciphers off;
+    ssl_session_cache shared:SSL:10m;
+    ssl_session_timeout 1d;
+
+    # Полгода, потому что вернуться на http мы не собираемся. Ставится после
+    # того, как сертификат уже работает: включённый заранее HSTS запирает домен
+    # для всех, кто успел его увидеть, даже если выпуск не удался.
+    add_header Strict-Transport-Security "max-age=15768000" always;
+
+    # Ответ модели и результат задачи бывают большими, а установка окружения —
+    # долгой. Здесь только предел на всякий случай: настоящие таймауты стоят у
+    # панели, которая и знает, чего ждёт.
+    client_max_body_size 512m;
+
+    location / {
+        proxy_pass http://127.0.0.1:${LOOMA_WEB_PORT};
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+
+        # Заголовки апгрейда нужны и здесь: канал до Ray-кластера идёт сквозь
+        # оба слоя, и потерянный на первом же Upgrade он превращается в обрыв
+        # без причины.
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $connection_upgrade;
+
+        proxy_buffering off;
+        proxy_read_timeout 86400s;
+        proxy_send_timeout 86400s;
+    }
+}

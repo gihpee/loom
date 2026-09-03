@@ -15,7 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "agent"))
 
 from looma.orchestrator.models import ModelError, describe, split_layers, stage_payload
 
-from test_agent_gateway import stand  # noqa: F401 — фикстура стенда
+from test_agent_gateway import ADMIN_HEADERS, stand  # noqa: F401 — фикстура стенда
 
 
 # ------------------------------------------------------------------- разрез
@@ -134,7 +134,7 @@ def api(orchestrator):
     from looma.api.app import create_app
     from test_agent_gateway import _Settings
 
-    return TestClient(create_app(agents=orchestrator.hub, config=_Settings()))
+    return TestClient(create_app(agents=orchestrator.hub, config=_Settings()), headers=ADMIN_HEADERS)
 
 
 def test_неизвестный_движок_отвергается_до_запуска(stand):

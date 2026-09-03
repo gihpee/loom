@@ -24,7 +24,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "agent"))
 
 from looma.orchestrator.agents import AgentError
 
-from test_agent_gateway import Orchestrator  # noqa: E402
+from test_agent_gateway import ADMIN_HEADERS, Orchestrator  # noqa: E402
 
 STAGE = str(Path(__file__).resolve().parent / "stage_fixture" / "pipeline_stage.py")
 
@@ -267,7 +267,7 @@ def test_код_группы_доезжает_до_каждого_ранга(two
     from looma.api.app import create_app
     from test_agent_gateway import _Settings
 
-    client = TestClient(create_app(agents=two_nodes.hub, config=_Settings()))
+    client = TestClient(create_app(agents=two_nodes.hub, config=_Settings()), headers=ADMIN_HEADERS)
     submitted = client.post("/admin/groups", json={
         "size": 2,
         "command": [sys.executable, "-c", GROUP_INPUT_ECHO],
@@ -292,7 +292,7 @@ def test_испорченный_base64_называет_свой_файл(two_no
     from looma.api.app import create_app
     from test_agent_gateway import _Settings
 
-    client = TestClient(create_app(agents=two_nodes.hub, config=_Settings()))
+    client = TestClient(create_app(agents=two_nodes.hub, config=_Settings()), headers=ADMIN_HEADERS)
     answer = client.post("/admin/groups", json={
         "size": 1, "command": ["true"], "node_ids": ["node-0"],
         "inputs": {"beper.bin": "не base64 ни разу!!"},

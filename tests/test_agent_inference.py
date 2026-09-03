@@ -22,7 +22,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "agent"))
 
 from make_tiny_model import ensure_tiny_model
-from test_agent_gateway import Orchestrator
+from test_agent_gateway import ADMIN_HEADERS, Orchestrator
 
 PAYLOAD = str(Path(__file__).resolve().parent.parent / "payloads" / "looma_stage")
 
@@ -272,7 +272,7 @@ def test_состояние_стадий_видно_пока_модель_под
             env={"PYTHONPATH": PAYLOAD}, serve_port=1, timeout_s=600,
             node_ids=["node-0"], label="tiny")
         wait_ready(orchestrator, group)
-        client = TestClient(create_app(agents=orchestrator.hub, config=_Settings()))
+        client = TestClient(create_app(agents=orchestrator.hub, config=_Settings()), headers=ADMIN_HEADERS)
         view = client.get(f"/admin/groups/{group.group_id}/health").json()
         assert view["ready"] is True
         stage = view["stages"][0]

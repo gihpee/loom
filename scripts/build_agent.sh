@@ -13,7 +13,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 IMAGE="${LOOMA_AGENT_IMAGE:-gihpee/looma-agent}"
-TAG="${LOOMA_AGENT_TAG:-0.0.1}"
+TAG="${LOOMA_AGENT_TAG:-0.1.0}"
 
 if [ "${1:-}" = "--push" ]; then
   docker buildx build --platform linux/amd64,linux/arm64 \

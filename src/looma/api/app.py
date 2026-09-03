@@ -22,7 +22,15 @@ from pathlib import Path
 from fastapi import FastAPI, Header, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
+from looma.accounts.store import SESSION_TTL, AccountError
+from looma.api.auth import (
+    ANONYMOUS,
+    SESSION_COOKIE,
+    Authenticator,
+    refuse,
+)
 from looma.logging_config import get_logger
+from looma.usage.ledger import COMPUTE, INFERENCE
 from looma.orchestrator.agents import AgentError
 from looma.orchestrator.models import (
     ModelError,
@@ -78,15 +86,352 @@ def _inputs_of(raw: dict) -> dict:
 
 
 def create_app(*, agents=None, releases=None, keystore=None, config=None,
-               public_address=None) -> FastAPI:
+               public_address=None, accounts=None, ledger=None,
+               deployments=None) -> FastAPI:
     app = FastAPI(title="Looma", version="0.2.0")
-    admin_token = getattr(config, "admin_token", "") or ""
+    auth = Authenticator(accounts=accounts,
+                         emergency_token=getattr(config, "admin_token", "") or "")
 
-    def forbidden(token: str | None) -> bool:
-        return bool(admin_token) and token != admin_token
+    # Проверка правами — ОДНИМ слоем, а не в каждом маршруте. Двадцать пять
+    # одинаковых охранников, расставленных руками, — это гарантированно один
+    # забытый маршрут, и заметен он будет не тем, кто его забыл.
+    #
+    # Правило читается целиком отсюда: /admin — администратору, /api и /v1 —
+    # любому, кто представился. Остальное открыто: по корню отдаётся лендинг.
+    # Вход и выход — единственное, что обязано работать без представления:
+    # именно за тем на них и приходят. Без этой строчки войти невозможно в
+    # принципе, и обнаруживается это не раньше первой попытки.
+    OPEN = {"/api/session"}
+
+    @app.middleware("http")
+    async def guard(request: Request, call_next):
+        path = request.url.path
+        needs_admin = path.startswith("/admin")
+        if path in OPEN or not (
+                needs_admin or path.startswith("/api/") or path.startswith("/v1/")):
+            return await call_next(request)
+        caller = await auth.identify(
+            session=request.cookies.get(SESSION_COOKIE),
+            authorization=request.headers.get("authorization"),
+            admin_token=request.headers.get("x-looma-admin-token"))
+        why = refuse(caller, admin=needs_admin)
+        if why:
+            # 401 против 403 — разные действия для клиента: первое означает
+            # «войди», второе «войдено, но не тебе сюда».
+            return JSONResponse(status_code=401 if not caller.known else 403,
+                                content={"error": {"message": why}})
+        request.state.caller = caller
+        return await call_next(request)
+
+    def whoami(request: Request):
+        return getattr(request.state, "caller", ANONYMOUS)
+
+    async def _start_billing(account_id, record, resource: str, *,
+                             nodes: int, gpus: int, label: str = "") -> int:
+        """Начать считать потребление группы.
+
+        Молча ничего не делает без базы или без опознанного вызывающего:
+        оркестратор без учётных записей всё ещё должен уметь разворачивать
+        модели, просто счёт вести не на кого.
+        """
+        if ledger is None or account_id is None:
+            return 0
+        try:
+            return await ledger.open_lease(
+                account_id=account_id, resource=resource,
+                group_id=record.group_id, nodes=nodes, gpus=gpus, label=label)
+        except Exception:
+            # Счёт важен, но не важнее развёрнутой группы: она уже работает, и
+            # ронять ответ из-за журнала значит оставить клиента без ответа при
+            # успешном действии.
+            logger.exception("не удалось открыть аренду для %s", record.group_id)
+            return 0
+
+    async def _count_tokens(request: Request, model: str, answer: bytes) -> None:
+        """Записать токены ответа.
+
+        Считаются те, что назвала сама стадия: пересчитывать их здесь значило
+        бы держать второй токенизатор и расходиться с первым на краях.
+
+        Потоковый ответ пока не учитывается — счётчики приходят в последнем
+        куске, а он уезжает клиенту, минуя это место. Молчать об этом хуже, чем
+        сказать: см. docs/BILLING.md.
+        """
+        who = whoami(request)
+        if ledger is None or who.account_id is None:
+            return
+        try:
+            usage = (json.loads(answer or b"{}") or {}).get("usage") or {}
+            await ledger.record_tokens(
+                account_id=who.account_id, model=model,
+                prompt_tokens=int(usage.get("prompt_tokens") or 0),
+                completion_tokens=int(usage.get("completion_tokens") or 0))
+        except Exception:
+            logger.exception("не удалось записать токены ответа")
+
+    async def _plan_preemption(size: int, free: list):
+        """Кого подвинуть. Считается целиком, ничего не трогая."""
+        from looma.orchestrator.preemption import plan as make_plan
+        from looma.orchestrator.preemption import standing_from
+
+        protected = await deployments.protected_ids() if deployments else set()
+        known = {d.group_id: d for d in (await deployments.list()
+                                         if deployments else [])}
+
+        def resource_of(group_id: str) -> str:
+            # Уступает только то, что держит сама платформа. Арендованный
+            # кластер снимать ради другой аренды нельзя — за него уже платят.
+            return INFERENCE if group_id in known else ""
+
+        return make_plan(need=size, free=free,
+                         standing=standing_from(agents.groups, protected=protected,
+                                                resource_of=resource_of))
+
+    async def _evict(made) -> None:
+        """Снять то, что назвал план. Со сливом, а не убийством: запрос,
+        который сейчас отвечает, дописывает ответ."""
+        for group in made.evict:
+            try:
+                agents.stop_group(group.group_id, reason="вытеснено арендой")
+                await _stop_billing(group.group_id)
+            except AgentError:
+                logger.exception("не удалось снять %s", group.group_id)
+
+    async def _restore(lease_id: int) -> None:
+        """Вернуть снятое этой арендой.
+
+        Вторая половина вытеснения. Без неё механика выглядит работающей ровно
+        до конца первой аренды, а потом платформа тихо остаётся без инференса.
+        """
+        if deployments is None:
+            return
+        for gone in await deployments.evicted_by(lease_id):
+            try:
+                answer = await _deploy_model(gone.request,
+                                             account_id=gone.account_id)
+            except Exception:
+                logger.exception("не удалось вернуть %s", gone.label or gone.group_id)
+                continue
+            if isinstance(answer, JSONResponse):
+                logger.warning("вернуть %s пока некуда — узлы заняты",
+                               gone.label or gone.group_id)
+                continue
+            await deployments.restored(gone.group_id)
+            logger.info("вернули %s", gone.label or gone.group_id)
+
+    async def _stop_billing(group_id: str) -> None:
+        """Закрыть аренду и вернуть то, что она вытеснила.
+
+        Возврат идёт здесь, а не отдельной кнопкой: аренда кончилась — базовая
+        загрузка обязана вернуться сама, иначе платформа теряет инференс на
+        каждой аренде, и виноватого не найти.
+        """
+        if ledger is None:
+            return
+        try:
+            lease_id = await ledger.lease_for(group_id)
+            await ledger.close_lease(group_id)
+        except Exception:
+            logger.exception("не удалось закрыть аренду %s", group_id)
+            return
+        if lease_id:
+            await _restore(lease_id)
+
+    async def _body(request: Request) -> dict:
+        try:
+            return await request.json()
+        except Exception:
+            return {}
 
     def need_agents():
         return _error(503, "this orchestrator is running without the agent gateway")
+
+    # ------------------------------------------------------- вход и записи
+    def need_accounts():
+        return _error(503, "оркестратор поднят без базы: учётные записи "
+                            "недоступны, работает только аварийный токен")
+
+    @app.post("/api/session")
+    async def sign_in(request: Request):
+        """Вход по почте и паролю. Кладёт сессию в cookie."""
+        if accounts is None:
+            return need_accounts()
+        body = await _body(request)
+        account = await accounts.sign_in(email=body.get("email", ""),
+                                         password=body.get("password", ""))
+        if account is None:
+            # Одна причина на оба случая: «нет такого адреса» и «неверный
+            # пароль» вместе рассказывают, кто у нас зарегистрирован.
+            return _error(401, "почта или пароль не подошли")
+        token = await accounts.start_session(account.id)
+        answer = JSONResponse(content=account.as_dict())
+        answer.set_cookie(
+            SESSION_COOKIE, token,
+            httponly=True,      # чужой скрипт на странице не прочитает
+            samesite="lax",     # и не отправит её с чужого сайта
+            secure=request.url.scheme == "https",
+            max_age=int(SESSION_TTL.total_seconds()),
+            path="/")
+        return answer
+
+    @app.delete("/api/session")
+    async def sign_out(request: Request):
+        if accounts is not None:
+            await accounts.end_session(request.cookies.get(SESSION_COOKIE) or "")
+        answer = JSONResponse(content={"signed_out": True})
+        answer.delete_cookie(SESSION_COOKIE, path="/")
+        return answer
+
+    @app.get("/api/me")
+    async def me(request: Request):
+        return whoami(request).as_dict()
+
+    # ------------------------------------------------------------ ключи API
+    @app.get("/api/keys")
+    async def my_keys(request: Request):
+        if accounts is None:
+            return need_accounts()
+        return {"keys": await accounts.keys_of(whoami(request).account_id)}
+
+    @app.post("/api/keys")
+    async def new_key(request: Request):
+        """Создать ключ. Показывается один раз — в базе только хэш."""
+        if accounts is None:
+            return need_accounts()
+        body = await _body(request)
+        key, record = await accounts.issue_key(whoami(request).account_id,
+                                               name=(body.get("name") or "").strip())
+        return {**record, "key": key,
+                "notice": "Сохраните ключ сейчас: он больше не будет показан"}
+
+    @app.delete("/api/keys/{key_id}")
+    async def drop_key(key_id: int, request: Request):
+        if accounts is None:
+            return need_accounts()
+        if not await accounts.revoke_key(whoami(request).account_id, key_id):
+            return _error(404, "такого ключа нет или он уже отозван")
+        return {"revoked": key_id}
+
+    # ------------------------------------------------------------ потребление
+    def _period(request: Request):
+        """Границы отчёта из строки запроса. Пусто — за всё время."""
+        from datetime import datetime
+
+        def when(name):
+            raw = request.query_params.get(name)
+            if not raw:
+                return None
+            try:
+                return datetime.fromisoformat(raw)
+            except ValueError:
+                return None
+
+        return when("since"), when("until")
+
+    @app.get("/api/usage")
+    async def my_usage(request: Request):
+        """Что израсходовал я. Идущие аренды считаются по «сейчас»."""
+        if ledger is None:
+            return _error(503, "оркестратор поднят без базы: журнала нет")
+        since, until = _period(request)
+        return await ledger.report(account_id=whoami(request).account_id,
+                                   since=since, until=until)
+
+    @app.get("/admin/usage")
+    async def all_usage(request: Request):
+        """То же по всем. Без account_id — сводка, с ним — по одному."""
+        if ledger is None:
+            return _error(503, "оркестратор поднят без базы: журнала нет")
+        since, until = _period(request)
+        who = request.query_params.get("account_id")
+        return await ledger.report(account_id=int(who) if who else None,
+                                   since=since, until=until)
+
+    @app.get("/admin/rates")
+    async def read_rates():
+        if ledger is None:
+            return _error(503, "оркестратор поднят без базы: ставок нет")
+        return {"rates": [r.as_dict() for r in await ledger.rates()]}
+
+    @app.post("/admin/rates")
+    async def write_rate(request: Request):
+        """Ставка в КОПЕЙКАХ за GPU-час. Целыми: деньги в плавающей точке дают
+        0.1 + 0.2 = 0.30000000000000004 в счёте."""
+        if ledger is None:
+            return _error(503, "оркестратор поднят без базы: ставок нет")
+        body = await _body(request)
+        try:
+            rate = await ledger.set_rate(
+                (body.get("resource") or "").strip(),
+                int(body.get("per_hour") or 0),
+                (body.get("currency") or "RUB").strip())
+        except (ValueError, TypeError) as exc:
+            return _error(400, str(exc))
+        return rate.as_dict()
+
+    # ---------------------------------------------------- защита от снятия
+    @app.get("/admin/deployments")
+    async def list_deployments():
+        """Что развёрнуто и что из этого защищено от вытеснения."""
+        if deployments is None:
+            return _error(503, "оркестратор поднят без базы")
+        return {"deployments": [d.as_dict() for d in await deployments.list()]}
+
+    @app.post("/admin/deployments/{group_id}/protected")
+    async def protect(group_id: str, request: Request):
+        """Защитить от вытеснения или снять защиту.
+
+        Модель, на которой висит витрина, не должна падать оттого, что кто-то
+        арендовал кластер. Решает это администратор, а не арендатор.
+        """
+        if deployments is None:
+            return _error(503, "оркестратор поднят без базы")
+        body = await _body(request)
+        want = bool(body.get("protected", True))
+        if not await deployments.set_protected(group_id, want):
+            return _error(404, f"нет развёртывания {group_id}")
+        return {"group_id": group_id, "protected": want}
+
+    # ------------------------------------------------------ записи (админ)
+    @app.get("/admin/accounts")
+    async def list_accounts():
+        if accounts is None:
+            return need_accounts()
+        return {"accounts": [a.as_dict() for a in await accounts.list()]}
+
+    @app.post("/admin/accounts")
+    async def add_account(request: Request):
+        if accounts is None:
+            return need_accounts()
+        body = await _body(request)
+        try:
+            made = await accounts.create(
+                email=body.get("email", ""), password=body.get("password", ""),
+                role=(body.get("role") or "client").strip(),
+                display_name=(body.get("display_name") or "").strip())
+        except AccountError as exc:
+            return _error(400, str(exc))
+        return made.as_dict()
+
+    @app.post("/admin/accounts/{account_id}/password")
+    async def reset_password(account_id: int, request: Request):
+        if accounts is None:
+            return need_accounts()
+        body = await _body(request)
+        try:
+            await accounts.set_password(account_id, body.get("password", ""))
+        except AccountError as exc:
+            return _error(400, str(exc))
+        return {"changed": account_id}
+
+    @app.post("/admin/accounts/{account_id}/disabled")
+    async def set_account_disabled(account_id: int, request: Request):
+        """Отключить или вернуть. Отключение гасит все сессии и ключи разом."""
+        if accounts is None:
+            return need_accounts()
+        body = await _body(request)
+        await accounts.set_disabled(account_id, bool(body.get("disabled", True)))
+        return {"account": account_id, "disabled": bool(body.get("disabled", True))}
 
     # ------------------------------------------------------------- clients
     @app.get("/v1/models")
@@ -135,6 +480,7 @@ def create_app(*, agents=None, releases=None, keystore=None, config=None,
                     body=raw, headers={"Content-Type": "application/json"})
             except AgentError as exc:
                 return _error(502, str(exc))
+            await _count_tokens(request, model, answer)
             return Response(content=answer, status_code=status,
                             media_type=headers.get("Content-Type", "application/json"))
 
@@ -167,8 +513,6 @@ def create_app(*, agents=None, releases=None, keystore=None, config=None,
     @app.get("/admin/connect")
     async def admin_connect(x_looma_admin_token: str | None = Header(default=None)):
         """Everything needed to attach a machine: the address and one command."""
-        if forbidden(x_looma_admin_token):
-            return _error(403, "invalid admin token")
         return {
             "dial_address": getattr(public_address, "address", ""),
             "source": getattr(public_address, "source", "config"),
@@ -182,8 +526,6 @@ def create_app(*, agents=None, releases=None, keystore=None, config=None,
 
     @app.get("/admin/agents")
     async def admin_agents(x_looma_admin_token: str | None = Header(default=None)):
-        if forbidden(x_looma_admin_token):
-            return _error(403, "invalid admin token")
         if agents is None:
             return need_agents()
         return {"nodes": agents.node_list()}
@@ -191,8 +533,6 @@ def create_app(*, agents=None, releases=None, keystore=None, config=None,
     # ---------------------------------------------------------------- keys
     @app.get("/admin/keys")
     async def admin_keys(x_looma_admin_token: str | None = Header(default=None)):
-        if forbidden(x_looma_admin_token):
-            return _error(403, "invalid admin token")
         if keystore is None:
             return {"keys": []}
         return {"keys": [k.public() for k in keystore.list()]}
@@ -200,8 +540,6 @@ def create_app(*, agents=None, releases=None, keystore=None, config=None,
     @app.post("/admin/keys")
     async def admin_issue_key(request: Request,
                               x_looma_admin_token: str | None = Header(default=None)):
-        if forbidden(x_looma_admin_token):
-            return _error(403, "invalid admin token")
         if keystore is None:
             return _error(503, "this orchestrator issues no keys")
         raw = await request.json()
@@ -214,8 +552,6 @@ def create_app(*, agents=None, releases=None, keystore=None, config=None,
     @app.delete("/admin/keys/{key_id}")
     async def admin_revoke_key(key_id: str,
                                x_looma_admin_token: str | None = Header(default=None)):
-        if forbidden(x_looma_admin_token):
-            return _error(403, "invalid admin token")
         if keystore is None or not keystore.revoke(key_id):
             return _error(404, f"no key {key_id!r}")
         return {"revoked": key_id}
@@ -223,8 +559,6 @@ def create_app(*, agents=None, releases=None, keystore=None, config=None,
     # --------------------------------------------------------------- tasks
     @app.get("/admin/tasks")
     async def admin_tasks(x_looma_admin_token: str | None = Header(default=None)):
-        if forbidden(x_looma_admin_token):
-            return _error(403, "invalid admin token")
         if agents is None:
             return need_agents()
         ordered = sorted(agents.tasks.values(), key=lambda t: t.submitted_at, reverse=True)
@@ -239,8 +573,6 @@ def create_app(*, agents=None, releases=None, keystore=None, config=None,
         take half an hour, so this must not wait for the task to start — follow
         it by its state instead. Input files come base64-encoded in `inputs`.
         """
-        if forbidden(x_looma_admin_token):
-            return _error(403, "invalid admin token")
         if agents is None:
             return need_agents()
         raw = await request.json()
@@ -273,8 +605,6 @@ def create_app(*, agents=None, releases=None, keystore=None, config=None,
     @app.get("/admin/tasks/{task_id}")
     async def admin_task(task_id: str,
                          x_looma_admin_token: str | None = Header(default=None)):
-        if forbidden(x_looma_admin_token):
-            return _error(403, "invalid admin token")
         if agents is None:
             return need_agents()
         record = agents.tasks.get(task_id)
@@ -283,8 +613,6 @@ def create_app(*, agents=None, releases=None, keystore=None, config=None,
     @app.get("/admin/tasks/{task_id}/logs")
     async def admin_task_logs(task_id: str, tail: int = 200,
                               x_looma_admin_token: str | None = Header(default=None)):
-        if forbidden(x_looma_admin_token):
-            return _error(403, "invalid admin token")
         if agents is None:
             return need_agents()
         try:
@@ -295,8 +623,6 @@ def create_app(*, agents=None, releases=None, keystore=None, config=None,
     @app.get("/admin/tasks/{task_id}/results/{name:path}")
     async def admin_task_result(task_id: str, name: str,
                                 x_looma_admin_token: str | None = Header(default=None)):
-        if forbidden(x_looma_admin_token):
-            return _error(403, "invalid admin token")
         if agents is None:
             return need_agents()
         try:
@@ -310,8 +636,6 @@ def create_app(*, agents=None, releases=None, keystore=None, config=None,
     @app.post("/admin/tasks/{task_id}/stop")
     async def admin_stop_task(task_id: str,
                               x_looma_admin_token: str | None = Header(default=None)):
-        if forbidden(x_looma_admin_token):
-            return _error(403, "invalid admin token")
         if agents is None:
             return need_agents()
         try:
@@ -322,8 +646,6 @@ def create_app(*, agents=None, releases=None, keystore=None, config=None,
     @app.delete("/admin/tasks/{task_id}")
     async def admin_release_task(task_id: str,
                                  x_looma_admin_token: str | None = Header(default=None)):
-        if forbidden(x_looma_admin_token):
-            return _error(403, "invalid admin token")
         if agents is None:
             return need_agents()
         try:
@@ -335,8 +657,6 @@ def create_app(*, agents=None, releases=None, keystore=None, config=None,
     # -------------------------------------------------------------- groups
     @app.get("/admin/groups")
     async def admin_groups(x_looma_admin_token: str | None = Header(default=None)):
-        if forbidden(x_looma_admin_token):
-            return _error(403, "invalid admin token")
         if agents is None:
             return need_agents()
         ordered = sorted(agents.groups.values(), key=lambda g: g.submitted_at, reverse=True)
@@ -358,8 +678,6 @@ def create_app(*, agents=None, releases=None, keystore=None, config=None,
         впервые видящий эту работу, получает её код вместе с задачей, и никакой
         реестр пакетов посередине для этого не нужен.
         """
-        if forbidden(x_looma_admin_token):
-            return _error(403, "invalid admin token")
         if agents is None:
             return need_agents()
         raw = await request.json()
@@ -393,11 +711,12 @@ def create_app(*, agents=None, releases=None, keystore=None, config=None,
         Отдельно от остановки, и намеренно: у остановленной задачи ещё лежит
         результат, за которым придут. Забытая не нужна никому.
         """
-        if forbidden(x_looma_admin_token):
-            return _error(403, "invalid admin token")
         if agents is None:
             return need_agents()
         try:
+            await _stop_billing(group_id)
+            if deployments is not None:
+                await deployments.forget(group_id)
             record = agents.forget_group(group_id)
         except AgentError as exc:
             return _error(404, str(exc))
@@ -413,8 +732,6 @@ def create_app(*, agents=None, releases=None, keystore=None, config=None,
         выглядит одинаково. Разницу знает только сама стадия, поэтому её и
         спрашивают.
         """
-        if forbidden(x_looma_admin_token):
-            return _error(403, "invalid admin token")
         if agents is None:
             return need_agents()
         record = agents.groups.get(group_id)
@@ -450,11 +767,12 @@ def create_app(*, agents=None, releases=None, keystore=None, config=None,
     @app.post("/admin/groups/{group_id}/stop")
     async def admin_stop_group(group_id: str,
                                x_looma_admin_token: str | None = Header(default=None)):
-        if forbidden(x_looma_admin_token):
-            return _error(403, "invalid admin token")
         if agents is None:
             return need_agents()
         try:
+            await _stop_billing(group_id)
+            if deployments is not None:
+                await deployments.forget(group_id)
             return agents.stop_group(group_id,
                                      reason="stopped from the admin page").as_dict()
         except AgentError as exc:
@@ -465,17 +783,13 @@ def create_app(*, agents=None, releases=None, keystore=None, config=None,
     async def admin_describe_model(request: Request,
                                    x_looma_admin_token: str | None = Header(default=None)):
         """Сколько в модели слоёв — прежде чем решать, на сколько узлов её резать."""
-        if forbidden(x_looma_admin_token):
-            return _error(403, "invalid admin token")
         raw = await request.json()
         try:
             return describe((raw.get("repo") or "").strip()).as_dict()
         except ModelError as exc:
             return _error(400, str(exc))
 
-    @app.post("/admin/deploy")
-    async def admin_deploy(request: Request,
-                           x_looma_admin_token: str | None = Header(default=None)):
+    async def _deploy_model(raw: dict, *, account_id=None):
         """Развернуть модель конвейером по узлам.
 
         Одно действие вместо четырёх: узнать число слоёв, выбрать узлы,
@@ -483,11 +797,8 @@ def create_app(*, agents=None, releases=None, keystore=None, config=None,
         Всё это можно сделать и руками через /admin/groups — здесь просто
         собрано то, что иначе набирают в четыре запроса и один раз ошибаются.
         """
-        if forbidden(x_looma_admin_token):
-            return _error(403, "invalid admin token")
         if agents is None:
             return need_agents()
-        raw = await request.json()
         # Сочетания, которые не сойдутся ни при каком ответе HuggingFace, —
         # до обращения к нему. Опечатка в имени движка не стоит похода в сеть,
         # и оператор узнаёт о ней сразу, а не через задержку, которая выглядит
@@ -574,6 +885,15 @@ def create_app(*, agents=None, releases=None, keystore=None, config=None,
             )
         except AgentError as exc:
             return _error(409, str(exc))
+        await _start_billing(account_id, record, INFERENCE,
+                             nodes=len(chosen), label=label,
+                             gpus=sum(int(n.get("gpus_total") or 1) for n in chosen))
+        # Чем подняли — в базу. Без этого снятая ради аренды модель не
+        # вернётся: тело запроса знает только он сам, а он вот-вот кончится.
+        if deployments is not None:
+            await deployments.remember(group_id=record.group_id, label=label,
+                                       request=raw,
+                                       account_id=account_id)
         return {
             **record.as_dict(),
             "model": model.as_dict(),
@@ -582,9 +902,15 @@ def create_app(*, agents=None, releases=None, keystore=None, config=None,
                       for i, (s, e) in enumerate(ranges)],
         }
 
-    @app.post("/admin/ray")
-    async def admin_ray(request: Request,
-                        x_looma_admin_token: str | None = Header(default=None)):
+    @app.post("/admin/deploy")
+    async def admin_deploy(request: Request,
+                           x_looma_admin_token: str | None = Header(default=None)):
+        """Развернуть модель. Тонкая обёртка: та же работа нужна и при возврате
+        снятого, а звать обработчик из обработчика нельзя."""
+        return await _deploy_model(await _body(request),
+                                   account_id=whoami(request).account_id)
+
+    async def _start_cluster(raw: dict, *, account_id=None, by_admin: bool):
         """Собрать Ray-кластер на нескольких узлах.
 
         То же самое, что модель, только жилец другой: обычная группа, обычное
@@ -594,17 +920,16 @@ def create_app(*, agents=None, releases=None, keystore=None, config=None,
         `script` (base64) — точка входа клиента. Её запускает ранг 0, когда
         кластер уже собран; без неё кластер просто стоит и ждёт.
         """
-        if forbidden(x_looma_admin_token):
-            return _error(403, "invalid admin token")
         if agents is None:
             return need_agents()
-        raw = await request.json()
-
         available = [n for n in agents.node_list() if n["accepts_tasks"]]
         if not available:
             return _error(409, "ни один подключённый узел не берёт задачи")
         named = list(raw.get("node_ids") or [])
         by_id = {n["node_id"]: n for n in available}
+        evicted_ids: list = []
+        if named and not by_admin:
+            return _error(403, "выбирать узлы по именам может только администратор")
         if named:
             missing = [n for n in named if n not in by_id]
             if missing:
@@ -617,7 +942,25 @@ def create_app(*, agents=None, releases=None, keystore=None, config=None,
                               f"просят {size} узлов, а работу берут {len(available)}")
             # Сначала те, кто легче сходится с соседями: Ray гоняет через этот
             # путь весь свой обмен, а не восемь килобайт на токен, как стадия.
-            picked = prefer_meshy(available)[:size]
+            free = [n for n in prefer_meshy(available)
+                    if not int(n.get("tasks_running") or 0)]
+            if len(free) >= size:
+                picked = free[:size]
+            else:
+                # Свободных не хватает — прямой клиент вытесняет базовую
+                # загрузку. Сначала план целиком, и только если он сходится,
+                # что-то снимаем: снятые модели при не вставшей аренде — худшая
+                # из возможных развязок.
+                made = await _plan_preemption(size, [n["node_id"] for n in free])
+                if not made.possible:
+                    return _error(409, made.refusal)
+                await _evict(made)
+                evicted_ids = [g.group_id for g in made.evict]
+                picked = [by_id[node] for node in made.nodes if node in by_id]
+                if len(picked) < size:
+                    return _error(409, "узлы, освобождённые снятием, не вернулись "
+                                       "в список свободных — попробуйте ещё раз")
+                logger.info("аренда: %s", made.explain())
         chosen = [n["node_id"] for n in picked]
 
         # Собраться группа обязана ДО того, как займёт карты. Единственный
@@ -675,11 +1018,74 @@ def create_app(*, agents=None, releases=None, keystore=None, config=None,
             )
         except AgentError as exc:
             return _error(409, str(exc))
+        lease_id = await _start_billing(account_id, record, COMPUTE,
+                                        nodes=len(chosen), label=label,
+                                        gpus=len(chosen))
+        # Снятое ради этой аренды помечается ЕЮ: по этой метке оно и вернётся,
+        # когда аренду закроют.
+        if deployments is not None and lease_id and evicted_ids:
+            await deployments.mark_evicted(evicted_ids, lease_id)
         return {**record.as_dict(), "entry": entry, "nodes": chosen,
                 # Каким путём соберётся кластер. Медленный кластер должен быть
                 # объяснимым, а не загадочным.
                 "path": path["path"], "relayed_pairs": path["relayed_pairs"],
                 "warning": path["why"] if path["path"] == "relay" else ""}
+
+    @app.post("/admin/ray")
+    async def admin_ray(request: Request,
+                        x_looma_admin_token: str | None = Header(default=None)):
+        """Кластер от имени администратора: можно назвать узлы и не иметь
+        потолка по времени."""
+        return await _start_cluster(await _body(request),
+                                   account_id=whoami(request).account_id,
+                                   by_admin=True)
+
+    # -------------------------------------------------- аренда для клиента
+    #: Потолок на одну аренду. «До отмены» без потолка — это забытый кластер,
+    #: который тикает, пока кто-нибудь не заметит счёт.
+    MAX_RENT_HOURS = int(os.environ.get("LOOMA_MAX_RENT_HOURS", "24"))
+
+    @app.post("/api/compute")
+    async def rent_compute(request: Request):
+        """Арендовать кластер. То же, что у администратора, но со потолком по
+        времени и без выбора узлов: на чьей машине считать — не решение
+        арендатора."""
+        raw = dict(await _body(request))
+        hours = min(max(1, int(raw.get("hours") or 1)), MAX_RENT_HOURS)
+        raw.pop("node_ids", None)
+        raw["timeout_s"] = hours * 3600
+        return await _start_cluster(raw, account_id=whoami(request).account_id,
+                                   by_admin=False)
+
+    @app.get("/api/compute")
+    async def my_clusters(request: Request):
+        """Мои идущие аренды. Только свои: чужие сюда не попадают."""
+        if ledger is None:
+            return _error(503, "оркестратор поднят без базы: журнала нет")
+        mine = await ledger.open_leases(account_id=whoami(request).account_id,
+                                        resource=COMPUTE)
+        live = agents.groups if agents is not None else {}
+        return {"clusters": [
+            {**row, "alive": row["group_id"] in live} for row in mine]}
+
+    @app.delete("/api/compute/{group_id}")
+    async def drop_cluster(group_id: str, request: Request):
+        """Снять свою аренду.
+
+        Владение проверяется по журналу, а не по тому, что прислал клиент:
+        иначе номер группы в адресе даёт власть над чужим кластером.
+        """
+        if ledger is None:
+            return _error(503, "оркестратор поднят без базы: журнала нет")
+        if not await ledger.lease_belongs_to(group_id,
+                                             whoami(request).account_id):
+            return _error(404, "такой аренды за вами не числится")
+        await _stop_billing(group_id)
+        try:
+            agents.stop_group(group_id, reason="снято арендатором")
+        except AgentError as exc:
+            return _error(409, str(exc))
+        return {"stopped": group_id}
 
     @app.websocket("/connect/{group_id}")
     async def connect_to_cluster(socket: WebSocket, group_id: str):
@@ -693,10 +1099,16 @@ def create_app(*, agents=None, releases=None, keystore=None, config=None,
         портов определяет версия Ray, и знать её оркестратору значит обновлять
         оркестратор вместе с ней.
         """
-        token = socket.headers.get("x-looma-admin-token", "")
-        if forbidden(token):
+        # Своя проверка, а не общий слой: middleware в Starlette обслуживает
+        # только http, и веб-сокет прошёл бы мимо неё незамеченным.
+        caller = await auth.identify(
+            session=socket.cookies.get(SESSION_COOKIE),
+            authorization=socket.headers.get("authorization"),
+            admin_token=socket.headers.get("x-looma-admin-token"))
+        why = refuse(caller)
+        if why:
             # 1008 — «политика»: клиент увидит причину, а не молчаливый обрыв.
-            await socket.close(code=1008, reason=_reason("invalid admin token"))
+            await socket.close(code=1008, reason=_reason(why))
             return
         if agents is None:
             await socket.close(code=1011,
@@ -789,8 +1201,6 @@ def create_app(*, agents=None, releases=None, keystore=None, config=None,
     @app.get("/admin/release")
     async def admin_release(x_looma_admin_token: str | None = Header(default=None)):
         """The version map: who is on what, before a wave is advanced."""
-        if forbidden(x_looma_admin_token):
-            return _error(403, "invalid admin token")
         if releases is None:
             return _error(503, "this orchestrator publishes no agent releases")
         return releases.version_map(agents.node_list() if agents else [])
@@ -804,8 +1214,6 @@ def create_app(*, agents=None, releases=None, keystore=None, config=None,
         have and must not: taking it over should let an attacker name a release
         we already signed, and nothing more.
         """
-        if forbidden(x_looma_admin_token):
-            return _error(403, "invalid admin token")
         if releases is None:
             return _error(503, "this orchestrator publishes no agent releases")
         raw = await request.json()
@@ -824,8 +1232,6 @@ def create_app(*, agents=None, releases=None, keystore=None, config=None,
                                  x_looma_admin_token: str | None = Header(default=None)):
         """Advance the rollout. Small first: a bad build reaching the whole
         fleet at once can take with it the ability to ship the fix."""
-        if forbidden(x_looma_admin_token):
-            return _error(403, "invalid admin token")
         if releases is None:
             return _error(503, "this orchestrator publishes no agent releases")
         raw = await request.json()
@@ -842,8 +1248,6 @@ def create_app(*, agents=None, releases=None, keystore=None, config=None,
     async def admin_release_withdraw(x_looma_admin_token: str | None = Header(default=None)):
         """Stop the spread. Nodes already updated stay updated — taking a
         version back means publishing an older one, which agents refuse."""
-        if forbidden(x_looma_admin_token):
-            return _error(403, "invalid admin token")
         if releases is None:
             return _error(503, "this orchestrator publishes no agent releases")
         releases.withdraw()

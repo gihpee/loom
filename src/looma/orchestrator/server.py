@@ -10,6 +10,7 @@ port, or anything configured on its owner's router.
 from __future__ import annotations
 
 import asyncio
+from typing import Optional
 from pathlib import Path
 
 import grpc
@@ -21,6 +22,11 @@ from looma.orchestrator.agents import AgentHub, add_agent_gateway_to_server
 from looma.orchestrator.config import OrchestratorConfig
 from looma.orchestrator.keys import KeyStore
 from looma.orchestrator.public_addr import resolve_public_address
+from looma.accounts.store import Accounts
+from looma.usage.deployments import Deployments
+from looma.usage.ledger import Ledger
+from looma.orchestrator.tls import CertPaths, server_credentials
+from looma.store.database import Database, DatabaseUnavailable, database_url
 from looma.orchestrator.releases import ReleaseStore
 from looma.orchestrator.rendezvous import RendezvousNode, host_of
 from looma.orchestrator.state import StateStore
@@ -32,7 +38,8 @@ logger = get_logger(__name__)
 MAX_MESSAGE_BYTES = 64 * 1024 * 1024
 
 
-async def serve_grpc(*, hub: AgentHub, port: int) -> grpc.aio.Server:
+async def serve_grpc(*, hub: AgentHub, port: int,
+                     certificates: Optional[CertPaths] = None) -> grpc.aio.Server:
     server = grpc.aio.server(options=[
         ("grpc.max_send_message_length", MAX_MESSAGE_BYTES),
         ("grpc.max_receive_message_length", MAX_MESSAGE_BYTES),
@@ -48,22 +55,84 @@ async def serve_grpc(*, hub: AgentHub, port: int) -> grpc.aio.Server:
         ("grpc.http2.max_pings_without_data", 0),
     ])
     add_agent_gateway_to_server(server, hub)
-    server.add_insecure_port(f"[::]:{port}")
+    credentials = server_credentials(certificates or CertPaths())
+    if credentials is None:
+        # Открытым текстом — только когда сертификат не назван вовсе. Сказать
+        # об этом вслух обязательно: по этому каналу едут секрет ключа и
+        # команды запуска чужого кода, и «забыли настроить» не должно выглядеть
+        # так же, как «настроили».
+        server.add_insecure_port(f"[::]:{port}")
+        logger.warning("AgentGateway слушает :%d БЕЗ шифрования — задайте "
+                       "LOOMA_TLS_CERT и LOOMA_TLS_KEY", port)
+    else:
+        server.add_secure_port(f"[::]:{port}", credentials)
+        logger.info("AgentGateway слушает :%d по TLS", port)
     await server.start()
-    logger.info("AgentGateway listening on :%d", port)
     return server
+
+
+RECONCILE_EVERY_S = 60.0
+
+
+async def _reconcile_forever(ledger, hub) -> None:
+    """Закрывать аренды, за которыми больше нет группы.
+
+    Раз в минуту, а не по событию: события бывают потеряны — именно тогда, когда
+    что-то пошло не так, то есть ровно в тех случаях, ради которых сверка и
+    нужна.
+    """
+    while True:
+        await asyncio.sleep(RECONCILE_EVERY_S)
+        try:
+            await ledger.reconcile(list(hub.groups.keys()))
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("сверка журнала потребления не удалась")
 
 
 async def run() -> None:
     config = OrchestratorConfig.from_env()
     Path(config.data_dir).mkdir(parents=True, exist_ok=True)
 
+    certificates = CertPaths.from_env()
+
+    # База поднимается до всего остального: без неё нет учётных записей, а
+    # значит и кабинета. Работать без неё можно — тогда остаётся аварийный
+    # админский токен, — но узнать об этом надо на старте, а не на первом входе.
+    database, accounts, ledger, fleet = None, None, None, None
+    if database_url():
+        database = Database(database_url())
+        try:
+            await database.connect()
+            applied = await database.migrate()
+            if applied:
+                logger.info("миграции накатаны: %s", ", ".join(applied))
+            accounts = Accounts(database)
+            ledger = Ledger(database)
+            fleet = Deployments(database)
+            if await accounts.count() == 0:
+                logger.warning("в базе нет ни одной учётной записи — заведите "
+                               "администратора: scripts/create_admin.py")
+        except DatabaseUnavailable as exc:
+            # Не падаем: узлы и уже развёрнутые модели важнее кабинета, и
+            # оркестратор без базы всё ещё умеет ими управлять.
+            logger.error("%s; работаю без учётных записей", exc)
+            database, accounts, ledger, fleet = None, None, None, None
+    else:
+        logger.warning("LOOMA_DATABASE_URL не задан — учётных записей нет, "
+                       "работает только аварийный админский токен")
+
     public = resolve_public_address(config.grpc_port)
     logger.info("nodes will dial %s (%s)", public.address, public.source)
     if public.warning:
         logger.warning("%s", public.warning)
 
-    keystore = KeyStore(public_address=public.address, path=config.keystore_path)
+    # Ключ несёт не только адрес, но и то, как по нему звонить: узел с ключом
+    # старого образца продолжит ходить открытым текстом, а с новым — только по
+    # TLS. Без этого пришлось бы угадывать по виду адреса.
+    keystore = KeyStore(public_address=public.address, path=config.keystore_path,
+                        tls=certificates.configured)
     releases = ReleaseStore(Path(config.releases_dir))
 
     # The p2p entry point handed to every node at registration. One address is
@@ -89,9 +158,19 @@ async def run() -> None:
     # уже без имени модели и без группы, которые лежат в файле.
     hub.restore()
 
-    grpc_server = await serve_grpc(hub=hub, port=config.grpc_port)
+    grpc_server = await serve_grpc(hub=hub, port=config.grpc_port,
+                                   certificates=certificates)
+
+    # Сверка журнала с живыми группами. Группа умеет исчезнуть сама — узел
+    # отвалился, задача упала, оркестратор перезапустился, — и без сверки такая
+    # аренда тикала бы вечно, а счёт рос бы молча.
+    watcher = None
+    if ledger is not None:
+        watcher = asyncio.create_task(_reconcile_forever(ledger, hub),
+                                      name="usage-reconcile")
     app = create_app(agents=hub, releases=releases, keystore=keystore,
-                     config=config, public_address=public)
+                     config=config, public_address=public, accounts=accounts,
+                     ledger=ledger, deployments=fleet)
     http = uvicorn.Server(uvicorn.Config(app, host="0.0.0.0", port=config.http_port,
                                          log_level="info", loop="asyncio"))
     logger.info("HTTP on :%d  (dashboard at /admin)", config.http_port)
@@ -106,6 +185,10 @@ async def run() -> None:
             pass
         hub.flush()
         await grpc_server.stop(5)
+        if watcher is not None:
+            watcher.cancel()
+        if database is not None:
+            await database.close()
         rendezvous.stop()
 
 

@@ -49,9 +49,9 @@ def client(hub):
     from fastapi.testclient import TestClient
 
     from looma.api.app import create_app
-    from test_agent_gateway import _Settings
+    from test_agent_gateway import ADMIN_HEADERS, _Settings
 
-    return TestClient(create_app(agents=hub, config=_Settings()))
+    return TestClient(create_app(agents=hub, config=_Settings()), headers=ADMIN_HEADERS)
 
 
 def test_кластер_ложится_на_несколько_узлов(two_nodes):

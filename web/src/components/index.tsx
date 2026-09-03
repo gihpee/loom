@@ -255,3 +255,19 @@ export function ErrorLine({ error }: { error: string }) {
     </div>
   );
 }
+
+/** Знак Looma. Один на все три поверхности: лендинг, кабинет и панель —
+ *  человек, пришедший с питча, должен узнать проект. */
+export function Mark({ size = 32 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 52 52" fill="none" aria-hidden="true">
+      <rect x="3" y="3" width="46" height="46" rx="12"
+            stroke="currentColor" strokeWidth="2.5" opacity=".85" />
+      <rect x="13" y="29" width="26" height="7" rx="2"
+            stroke="currentColor" strokeWidth="2" opacity=".6" />
+      <rect x="13" y="19" width="26" height="7" rx="2"
+            stroke="currentColor" strokeWidth="2" opacity=".8" />
+      <rect x="13" y="9" width="26" height="7" rx="2" fill="currentColor" />
+    </svg>
+  );
+}

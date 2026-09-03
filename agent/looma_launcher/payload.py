@@ -104,6 +104,36 @@ def incoming_dir() -> Path:
     return agents_dir() / "incoming"
 
 
+def refused_dir() -> Path:
+    """Версии, которые этот узел уже отказался ставить.
+
+    Отказ обязан пережить перезапуск, иначе он ничего не значит. Оркестратор
+    предлагает релиз при каждом подключении, а состояние агента живёт ровно
+    столько же, сколько его процесс: без записи на диск узел качает отвергнутое
+    заново, отказ повторяется, агент перезапускается — и так по кругу, раз в
+    секунду, пока кто-нибудь не заметит.
+
+    Рядом с `incoming`, потому что читать это будет агент, а он про раскладку
+    лаунчера знает только один путь — тот, что ему передали.
+    """
+    return incoming_dir().parent / "refused"
+
+
+def remember_refusal(version: str, reason: str) -> None:
+    """Записать, что этот релиз ставить не будем и почему.
+
+    Не падает ни при какой ошибке записи: отказ и так уже случился, и уронить
+    на нём лаунчер значит превратить негодный релиз в мёртвый узел.
+    """
+    try:
+        directory = refused_dir()
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / f"{version}.txt").write_text(reason + "\n")
+    except OSError as exc:
+        logger.warning("не удалось запомнить отказ от %s (%s); узел может "
+                       "начать качать его по кругу", version, exc)
+
+
 def health_marker(version: str) -> Path:
     """Written by the agent once it has actually registered.
 
@@ -144,6 +174,9 @@ def install(manifest_path: Path, *, installed_version: str = "") -> Optional[Pay
         payload = _unpack(archive, manifest.version)
     except Untrusted as exc:
         logger.error("REFUSING release %s: %s", manifest.version, exc)
+        # На диск, а не только в лог: без этого агент скачает тот же релиз при
+        # следующем же подключении, и отказ повторится вместе с перезапуском.
+        remember_refusal(manifest.version, str(exc))
         _discard(manifest_path, archive)
         return None
     except (OSError, tarfile.TarError) as exc:
