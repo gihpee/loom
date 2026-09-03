@@ -152,11 +152,13 @@ function Router() {
   return (
     <div className="app-shell">
       <header className="app-top">
-        <a className="app-brand" href="/"><Mark size={22} /><span>Looma&nbsp;Float</span></a>
-        <nav>
-          {who.role === "admin" && <a href="/console">Панель</a>}
-          <button className="btn ghost sm" onClick={leave}>Выйти</button>
-        </nav>
+        <div className="app-top-in">
+          <a className="app-brand" href="/"><Mark size={22} /><span>Looma&nbsp;Float</span></a>
+          <nav>
+            {who.role === "admin" && <a href="/console">Панель</a>}
+            <button className="btn ghost sm" onClick={leave}>Выйти</button>
+          </nav>
+        </div>
       </header>
       <Cabinet who={who} />
     </div>

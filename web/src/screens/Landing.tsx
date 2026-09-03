@@ -11,7 +11,7 @@
  */
 import { useEffect, useRef, useState } from "react";
 import { Mark } from "../components";
-import { WeaveReveal, useWeaveReveal } from "../components/Weave";
+import { WeaveReveal, Weft, useWeaveReveal } from "../components/Weave";
 import { Loom, type Highlight } from "./Loom";
 
 const FACTS = [
@@ -218,6 +218,7 @@ function Surface({ id, title, line, detail, facts, featured, ...rest }: {
       <p className="lp-detail">{detail}</p>
       <ul>{facts.map((f) => <li key={f}>{f}</li>)}</ul>
       <code className="lp-id">{id}</code>
+      <Weft />
     </article>
   );
 }

@@ -110,6 +110,7 @@ a:hover { text-decoration: underline; }
 
 .main { overflow: auto; display: flex; flex-direction: column; }
 .page { padding: var(--s6) var(--s6) 56px; max-width: 1400px; width: 100%;
+        margin-inline: auto;
         display: flex; flex-direction: column; gap: var(--s6); }
 .page > header {
   display: flex; align-items: flex-start; gap: var(--s4);
@@ -119,16 +120,16 @@ a:hover { text-decoration: underline; }
 .page > header p { color: var(--text-dim); font-size: 13px; margin-top: 2px; }
 .page > header .actions { margin-left: auto; display: flex; gap: var(--s2); }
 
-section { display: flex; flex-direction: column; gap: var(--s3); }
-section > h2 {
+.page section { display: flex; flex-direction: column; gap: var(--s3); }
+.page section > h2 {
   font-size: 12px; font-weight: 600; color: var(--text-dim);
   letter-spacing: .04em; text-transform: uppercase;
   display: flex; align-items: center; gap: var(--s2);
 }
 /* Подпись под заголовком раздела принадлежит заголовку, а не следующему блоку:
    поднимаем её вплотную, чтобы gap не разрывал пару. */
-section > .sub { color: var(--text-dim); font-size: 13px; max-width: 68ch; }
-section > h2 + .sub { margin-top: calc(var(--s3) * -1 + 2px); }
+.page section > .sub { color: var(--text-dim); font-size: 13px; max-width: 68ch; }
+.page section > h2 + .sub { margin-top: calc(var(--s3) * -1 + 2px); }
 
 /* ------------------------------------------------------------ примитивы */
 .card { border-radius: var(--r2); padding: var(--s4); }
@@ -354,7 +355,7 @@ pre.block.tall { max-height: 420px; }
 .lp-enter { color: var(--teal-core) !important; }
 
 /* --------------------------------------------------------------- первый экран */
-.lp-hero { padding: 118px 0 82px; }
+.lp-hero { padding: 92px 0 54px; position: relative; }
 .lp-hero h1 { font-family: var(--display); font-size: clamp(44px, 7.4vw, 82px);
               line-height: 1; letter-spacing: -.04em; font-weight: 700;
               margin-bottom: 26px;
@@ -384,31 +385,47 @@ pre.block.tall { max-height: 420px; }
                     box-shadow: 0 0 34px -6px rgba(124, 240, 255, .55); }
 
 /* ------------------------------------------------------------------- разделы */
-.lp-section { padding: 68px 0; }
+.lp-section { padding: 44px 0; position: relative; }
+/* Цвет, которому протекать сквозь стекло. Два пятна, не больше: третье
+   превращает фон в лужу и съедает контраст текста. */
+.lp-section::before, .lp-section::after,
+.lp-hero::before, .lp-hero::after {
+  content: ""; position: absolute; z-index: -1; pointer-events: none;
+  border-radius: 50%; filter: blur(80px);
+}
+.lp-section::before, .lp-hero::before {
+  width: 460px; height: 380px; left: 4%; top: 8%;
+  background: radial-gradient(closest-side, rgba(41, 198, 222, .3), transparent);
+}
+.lp-section::after, .lp-hero::after {
+  width: 400px; height: 340px; right: 8%; bottom: 4%;
+  background: radial-gradient(closest-side, rgba(140, 120, 255, .17), transparent);
+}
 .lp-h2 { font-family: var(--display); font-size: clamp(26px, 3.4vw, 38px);
          font-weight: 600; letter-spacing: -.03em; margin-bottom: 14px; }
-.lp-sub { color: var(--ink-60); max-width: 52ch; margin-bottom: 26px; }
+.lp-sub { color: var(--ink-60); max-width: 52ch; margin-bottom: 20px; }
 .lp-section .lp-h2 + .lp-surfaces,
-.lp-section .lp-h2 + .lp-facts { margin-top: 26px; }
+.lp-section .lp-h2 + .lp-facts { margin-top: 20px; }
 
 /* Две поверхности: не одинаковые. Инференс — ядро предложения, поэтому шире и
    со свечением; кластер рядом, спокойнее. */
 .lp-surfaces { display: grid; gap: 20px;
-               grid-template-columns: 1.25fr 1fr; align-items: start; }
+               grid-template-columns: 1.25fr 1fr; align-items: stretch; }
 @media (max-width: 880px) { .lp-surfaces { grid-template-columns: 1fr; } }
-.lp-surface { border-radius: 18px; padding: 34px; overflow: hidden;
-              transition: transform .3s cubic-bezier(.2,.7,.2,1),
-                          border-color .3s, box-shadow .3s; }
-.lp-surface:hover { transform: translateY(-3px);
-                    border-color: rgba(41, 198, 222, .35); }
+.lp-surface { border-radius: 18px; padding: 34px;
+              transition: transform .42s cubic-bezier(.22, 1, .36, 1); }
+.lp-surface:hover { transform: translate3d(0, -5px, 0); }
+.lp-surface:hover::before { opacity: .32; }
 .card--featured {
-  border-color: rgba(124, 240, 255, .42);
   box-shadow:
-    inset 0 1px 0 rgba(150, 244, 255, .22),
-    0 0 52px -14px rgba(41, 198, 222, .55),
-    0 18px 42px -28px rgba(0, 0, 0, .8);
+    inset 0 1px 0 rgba(255, 255, 255, .24),
+    inset 0 -1px 0 rgba(0, 0, 0, .3),
+    inset 0 0 0 1px rgba(124, 240, 255, .22),
+    0 0 52px -16px rgba(41, 198, 222, .45),
+    0 18px 42px -28px rgba(0, 0, 0, .85);
 }
-.card--featured:hover { box-shadow: 0 0 56px -8px rgba(41, 198, 222, .5); }
+.card--featured::before { opacity: .24; }
+
 .lp-surface h3 { font-family: var(--display); font-size: clamp(28px, 3.6vw, 40px);
                  font-weight: 700; letter-spacing: -.03em; line-height: 1.05;
                  margin-bottom: 14px; }
@@ -428,27 +445,33 @@ pre.block.tall { max-height: 420px; }
 /* Факты об устройстве: три карточки разного размера. Глубина свечения — по
    тому, насколько факт близок к ядру, а не по вкусу. */
 .lp-facts { display: grid; gap: 18px;
-            grid-template-columns: repeat(2, 1fr); align-items: start; }
+            grid-template-columns: repeat(2, 1fr); align-items: stretch; }
 @media (max-width: 880px) { .lp-facts { grid-template-columns: 1fr; } }
 .lp-fact { border-radius: 16px; padding: 28px; overflow: hidden; }
 .lp-fact h3 { font-family: var(--display); font-size: 21px; font-weight: 600;
               letter-spacing: -.02em; margin-bottom: 10px; }
 .lp-fact p { color: var(--ink-60); font-size: 14.8px; }
 .lp-fact--core { grid-column: 1 / -1; padding: 36px;
-  border-color: rgba(124, 240, 255, .26);
   box-shadow:
-    inset 0 1px 0 rgba(150, 244, 255, .2),
-    0 0 66px -26px rgba(41, 198, 222, .55),
-    0 18px 42px -28px rgba(0, 0, 0, .8); }
+    inset 0 1px 0 rgba(255, 255, 255, .2),
+    inset 0 -1px 0 rgba(0, 0, 0, .3),
+    inset 0 0 0 1px rgba(124, 240, 255, .18),
+    0 0 66px -28px rgba(41, 198, 222, .45),
+    0 18px 42px -28px rgba(0, 0, 0, .85); }
+.lp-fact--core::before { opacity: .22; }
 .lp-fact--core h3 { font-size: clamp(24px, 3vw, 30px); }
 .lp-fact--core p { font-size: 16px; max-width: 64ch; }
 
 /* ---------------------------------------------------------------------- FAQ */
-.lp-faq-wrap { max-width: 800px; }
+.lp-faq { max-width: 820px; }
 .lp-faq { display: grid; gap: 10px; }
-.lp-q { border-radius: 12px; overflow: hidden; transition: border-color .25s; }
-.lp-q[data-open="true"] { border-color: rgba(41, 198, 222, .4);
-                          box-shadow: 0 0 30px -14px rgba(41, 198, 222, .55); }
+.lp-q { border-radius: 12px; }
+.lp-q { transition: box-shadow .35s ease; }
+.lp-q[data-open="true"] { box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, .2),
+    inset 0 -1px 0 rgba(0, 0, 0, .3),
+    inset 0 0 0 1px rgba(124, 240, 255, .28),
+    0 0 34px -16px rgba(41, 198, 222, .5); }
 .lp-q button { width: 100%; display: flex; align-items: center; gap: 16px;
                background: none; border: none; color: var(--ink-100);
                font: inherit; text-align: left; padding: 18px 22px; cursor: pointer; }
@@ -460,14 +483,13 @@ pre.block.tall { max-height: 420px; }
 .lp-q i::after  { width: 1.5px; height: 11px; }
 .lp-q[data-open="true"] i::after { transform: scaleY(0); opacity: 0; }
 .lp-a { display: grid; grid-template-rows: 0fr;
-        transition: grid-template-rows .34s cubic-bezier(.65,0,.35,1); }
+        transition: grid-template-rows .42s cubic-bezier(.33, 1, .68, 1); }
 .lp-q[data-open="true"] .lp-a { grid-template-rows: 1fr; }
 .lp-a > p { overflow: hidden; color: var(--ink-60); font-size: 14.8px;
-            padding: 0 22px; }
-.lp-q[data-open="true"] .lp-a > p { padding-bottom: 20px; }
+            padding: 0 22px 20px; }
 
 /* ------------------------------------------------------------- финальный блок */
-.lp-final { padding: 84px 0 88px; }
+.lp-final { padding: 60px 0 64px; }
 .lp-final h2 { font-family: var(--display); font-size: clamp(30px, 4.4vw, 48px);
                font-weight: 700; letter-spacing: -.035em; margin-bottom: 18px; }
 .lp-final .lp-lead { margin-bottom: 34px; animation: none; }
@@ -508,8 +530,11 @@ pre.block.tall { max-height: 420px; }
     radial-gradient(46% 40% at 8% 94%,  rgba(124, 240, 255, .08), transparent 70%),
     radial-gradient(70% 50% at 50% 46%, rgba(41, 198, 222, .05), transparent 72%);
   background-attachment: fixed; }
-.app-top { display: flex; align-items: center; justify-content: space-between;
-  height: 58px; padding: 0 var(--s5); border-bottom: 1px solid var(--line); }
+.app-top { border-bottom: 1px solid var(--line); }
+/* Полоса во всю ширину, содержимое — по той же сетке, что и страница: иначе
+   знак в шапке не совпадает по левому краю с заголовком под ней. */
+.app-top-in { display: flex; align-items: center; justify-content: space-between;
+  height: 58px; max-width: 1400px; margin-inline: auto; padding: 0 var(--s6); }
 .app-brand { color: var(--text); text-decoration: none; font-weight: 700;
              letter-spacing: .03em; display: flex; align-items: center; gap: 9px; }
 .app-brand svg { color: var(--accent); flex: 0 0 auto; }
@@ -534,62 +559,66 @@ pre.block.tall { max-height: 420px; }
 
    1. Заправка. Карточки ещё нет: есть кусок голой основы, плоский на фоне.
    2. Проход утка́. Холст выводит нить от полотна к левой кромке карточки, и
-      ровно в этот момент начинает открываться клип. Челнок идёт слева направо,
-      за ним остаётся уже сотканное; перед ним — ещё сетка нитей.
-   3. Съём. Ткань становится предметом: приподнимается и обретает стекло.
+      ровно тогда открывается клип. Челнок идёт слева направо: за ним ткань,
+      перед ним ещё сетка нитей.
+   3. Съём. Ткань становится предметом: поднимается и обретает стекло.
 
-   Всё это — одна величина. --progress объявлен через @property, то есть это
-   настоящее число, а не подстановка текста: браузер сам плавно ведёт от нуля к
-   единице, и клип, подъём, сетка и челнок едут синхронно от одних часов. Те же
-   часы уходят в холст событием, поэтому нить и карточка — одно движение, а не
-   два похожих. */
+   Всё это одна величина. --progress объявлен через @property, то есть это
+   настоящее число: браузер сам ведёт его от нуля к единице, и клип, подъём,
+   сетка и челнок едут синхронно. Наследование включено — слой с нитями лежит
+   отдельным элементом (псевдоэлементы карточки заняты стеклом) и читает
+   величину у родителя.
+
+   Ключевые кадры, а не переход: анимация начинается по добавлению класса и
+   доигрывает сама. Переход же зависел от того, успел ли браузер посчитать
+   промежуточное состояние, — а он в половине случаев не успевал. */
 @property --progress {
   syntax: "<number>";
-  inherits: false;
+  inherits: true;
   initial-value: 1;
 }
 
+@keyframes weave-in { from { --progress: 0 } to { --progress: 1 } }
+
 .weave-reveal {
   /* Единица, а не ноль: без скрипта содержимое просто видно. Ноль здесь
-     означал бы, что сломанный наблюдатель прячет текст навсегда. */
+     означал бы, что сорванная анимация прячет текст навсегда. */
   --progress: 1;
-  --lead: 260ms;    /* подвод нити: столько холст тянет её к кромке */
-  --sweep: 760ms;   /* сам проход утка́ */
+  --lead: 240ms;     /* столько холст ведёт нить к кромке */
+  --sweep: 900ms;    /* сам проход утка́ */
   position: relative;
-  transition: --progress var(--sweep) cubic-bezier(.65, 0, .35, 1) var(--lead);
   clip-path: inset(0 calc((1 - var(--progress)) * 100%) 0 0);
-  /* Съём с полотна: пока ткань на станке — она лежит в плоскости фона. */
-  transform: translateY(calc((1 - var(--progress)) * 14px));
-  opacity: calc(.1 + var(--progress) * .9);
+  transform: translate3d(0, calc((1 - var(--progress)) * 30px), 0)
+             scale(calc(.96 + var(--progress) * .04));
+  opacity: calc(.05 + var(--progress) * .95);
+}
+.weave-reveal.weave-wait { --progress: 0; }
+.weave-reveal.weaving {
+  animation: weave-in var(--sweep) cubic-bezier(.65, 0, .35, 1) var(--lead) both;
 }
 
-/* Голая основа: то, чем карточка была до утка́. Видна узкой полосой перед
-   челноком — там, где ткань ещё не легла. Слева от него сетки уже нет. */
-.weave-reveal::before {
-  content: "";
-  position: absolute; inset: 0;
-  border-radius: inherit;
-  z-index: 2; pointer-events: none;
+/* Голая основа и челнок. Отдельным слоем поверх содержимого: ::before и
+   ::after самой карточки держат блик и плёнку стекла. */
+.weft {
+  position: absolute; inset: 0; z-index: 2;
+  border-radius: inherit; pointer-events: none;
   background:
-    repeating-linear-gradient(90deg, rgba(124, 240, 255, .40) 0 1px, transparent 1px 8px),
-    repeating-linear-gradient(0deg,  rgba(124, 240, 255, .16) 0 1px, transparent 1px 8px);
+    repeating-linear-gradient(90deg, rgba(124, 240, 255, .45) 0 1px, transparent 1px 9px),
+    repeating-linear-gradient(0deg,  rgba(124, 240, 255, .18) 0 1px, transparent 1px 9px);
   mask-image: linear-gradient(90deg,
-    transparent calc(var(--progress) * 122% - 32%), #000 calc(var(--progress) * 122% - 3%));
+    transparent calc(var(--progress) * 124% - 34%), #000 calc(var(--progress) * 124% - 3%));
   -webkit-mask-image: linear-gradient(90deg,
-    transparent calc(var(--progress) * 122% - 32%), #000 calc(var(--progress) * 122% - 3%));
+    transparent calc(var(--progress) * 124% - 34%), #000 calc(var(--progress) * 124% - 3%));
   opacity: calc(1 - var(--progress) * var(--progress));
 }
-
-/* Челнок на кромке. Гаснет к обоим концам: на нуле он ещё не вошёл, на
-   единице уже ушёл за край. */
-.weave-reveal::after {
+.weft::after {
   content: "";
-  position: absolute; top: -2px; bottom: -2px;
+  position: absolute; top: -3px; bottom: -3px;
   left: calc(var(--progress) * 100%);
-  width: 3px; z-index: 3; pointer-events: none;
+  width: 3px;
   background: linear-gradient(180deg, transparent,
-              var(--teal-bright) 14%, #e6fcff 50%, var(--teal-bright) 86%, transparent);
-  box-shadow: 0 0 24px 5px rgba(124, 240, 255, .55);
+              var(--teal-bright) 14%, #eafcff 50%, var(--teal-bright) 86%, transparent);
+  box-shadow: 0 0 28px 6px rgba(124, 240, 255, .6);
   opacity: calc(var(--progress) * (1 - var(--progress)) * 4);
 }
 
@@ -608,8 +637,8 @@ pre.block.tall { max-height: 420px; }
 .warp-guides[data-open="true"]::before { opacity: .18; }
 
 @media (prefers-reduced-motion: reduce) {
-  .weave-reveal { --progress: 1; transition: none; opacity: 1; transform: none; }
-  .weave-reveal::before, .weave-reveal::after { display: none; }
+  .weave-reveal { --progress: 1; animation: none; opacity: 1; transform: none; }
+  .weft { display: none; }
 }
 
 /* ------------------------------------------------------------------ кабинет
@@ -625,35 +654,70 @@ pre.block.tall { max-height: 420px; }
 .app-shell .grid.stats { gap: var(--s4); }
 
 /* ------------------------------------------------------------------- стекло
-   Одна техника на весь сайт, иначе «стеклянными» окажутся только те карточки,
-   до которых дошли руки. Слои по порядку: размытие того, что за карточкой,
-   светлый скос по верхней кромке, холодная подсветка изнутри и тень, отрывающая
-   карточку от фона. Матовой заливки нет совсем — она и делала карточки плитками. */
+   Жидкое, а не матовое. Разница не в силе размытия: размывать было нечего —
+   под карточками лежал почти однородный тёмный фон. Поэтому техника целиком:
+
+   пятна цвета за карточкой (см. .lp-section ниже) дают то, чему протекать;
+   saturate вытягивает этот цвет наружу, без него фон глушится;
+   ::before — блик отражения, идёт за курсором;
+   ::after — тонкая плёночная интерференция, а не радуга во всю карточку;
+   кромка нарисована светом сверху и тенью снизу вместо ровной рамки, поэтому
+   карточка читается выпуклой линзой.
+
+   Оба слоя лежат на z-index: -1 при isolation: isolate — так они попадают между
+   фоном карточки и её текстом: выше — перекрыли бы содержимое, ниже — исчезли
+   бы за фоном. Их screen смешивается только внутри карточки. */
 .glass, .card, .lp-surface, .lp-fact, .lp-q, .key-woven, .signin-card {
   position: relative;
-  background:
-    radial-gradient(118% 96% at 80% -12%, rgba(124, 240, 255, .13), transparent 60%),
-    linear-gradient(152deg, rgba(41, 198, 222, .10) 0%,
-                            rgba(23, 48, 57, .46) 46%,
-                            rgba(15, 33, 41, .54) 100%);
-  backdrop-filter: blur(18px) saturate(140%);
-  -webkit-backdrop-filter: blur(18px) saturate(140%);
-  border: 1px solid rgba(124, 240, 255, .15);
+  isolation: isolate;
+  overflow: hidden;
+  border: 0;
+  background: linear-gradient(152deg,
+              rgba(41, 198, 222, .07) 0%,
+              rgba(15, 33, 41, .34) 55%,
+              rgba(10, 26, 33, .42) 100%);
+  backdrop-filter: blur(24px) saturate(160%);
+  -webkit-backdrop-filter: blur(24px) saturate(160%);
   box-shadow:
-    inset 0 1px 0 rgba(150, 244, 255, .16),
-    inset 0 -22px 44px -38px rgba(124, 240, 255, .55),
-    0 18px 42px -28px rgba(0, 0, 0, .8);
+    inset 0 1px 0 rgba(255, 255, 255, .15),      /* свет по верхней кромке */
+    inset 0 -1px 0 rgba(0, 0, 0, .3),            /* тень по нижней */
+    inset 0 0 0 1px rgba(124, 240, 255, .06),    /* едва заметный контур */
+    0 18px 40px -28px rgba(0, 0, 0, .85);
 }
-.glass { border-radius: 18px; padding: 22px 24px 24px; overflow: hidden; }
+
+.glass::before, .card::before, .lp-surface::before, .lp-fact::before,
+.lp-q::before, .key-woven::before, .signin-card::before {
+  content: "";
+  position: absolute; inset: 0; z-index: -1;
+  border-radius: inherit; pointer-events: none;
+  background: radial-gradient(58% 58% at var(--mx, 24%) var(--my, 6%),
+              rgba(255, 255, 255, .55), rgba(255, 255, 255, 0) 72%);
+  filter: blur(20px);
+  mix-blend-mode: screen;
+  opacity: .17;
+  transition: opacity .4s ease;
+}
+
+.glass::after, .card::after, .lp-surface::after, .lp-fact::after,
+.lp-q::after, .key-woven::after, .signin-card::after {
+  content: "";
+  position: absolute; inset: 0; z-index: -1;
+  border-radius: inherit; pointer-events: none;
+  background: linear-gradient(120deg,
+              rgba(124, 240, 255, .6) 0%, rgba(124, 240, 255, 0) 36%,
+              rgba(0, 0, 0, 0) 64%, rgba(150, 132, 255, .45) 100%);
+  mix-blend-mode: screen;
+  opacity: .09;
+}
+
+.glass { border-radius: 18px; padding: 22px 24px 24px; }
 /* Выделенная — та же техника, глубже свет. Не другая карточка. */
-.glass.lead {
-  border-color: rgba(124, 240, 255, .3);
-  background:
-    radial-gradient(126% 104% at 78% -14%, rgba(124, 240, 255, .22), transparent 62%),
-    linear-gradient(152deg, rgba(41, 198, 222, .15) 0%,
-                            rgba(23, 48, 57, .46) 46%,
-                            rgba(15, 33, 41, .54) 100%);
-}
+.glass.lead { box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, .22),
+    inset 0 -1px 0 rgba(0, 0, 0, .3),
+    inset 0 0 0 1px rgba(124, 240, 255, .16),
+    0 18px 40px -28px rgba(0, 0, 0, .85); }
+.glass.lead::before { opacity: .26; }
 .glass .label { color: var(--ink-60); font-family: var(--mono); font-size: 11px;
                 letter-spacing: .09em; text-transform: uppercase; }
 .glass .value { font-family: var(--display); font-size: 32px; font-weight: 600;
@@ -690,7 +754,9 @@ pre.block.tall { max-height: 420px; }
    затыкается обратно при закрытии: исчезновение должно выглядеть
    необратимым, потому что оно и есть необратимое. */
 .key-woven { overflow: hidden; border-radius: var(--r2); padding: 14px 16px; }
-.key-woven .weave-reveal { display: block; }
+.key-woven .weave-reveal { display: block;
+  transition: --progress .55s cubic-bezier(.65, 0, .35, 1); }
+.key-woven .weft { display: none; }
 .key-woven code { font-family: var(--mono); font-size: 13px; word-break: break-all;
                   color: var(--teal-bright); }
 

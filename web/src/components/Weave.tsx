@@ -37,67 +37,73 @@ export const calmMotion = () =>
  *  нить от полотна к её кромке ровно в том же такте, в каком открывается клип. */
 export const WEFT = "looma:weft";
 
-/** Поставить величину, не проиграв переход к ней.
- *
- *  --progress объявлен через @property, то есть переходы по нему настоящие. Из-за
- *  этого исходное «спрятать» само становится анимацией: карточка на глазах
- *  расткалась бы обратно и лишь потом ткалась заново. Достаточно было бы ставить
- *  ноль до первого расчёта стилей, но замер положения карточки этот расчёт как раз
- *  и вызывает, так что переход гасим явно. */
-function setAtOnce(node: HTMLElement, value: string) {
-  const kept = node.style.transition;
-  node.style.transition = "none";
-  node.style.setProperty("--progress", value);
-  void node.offsetWidth;            // фиксируем без перехода
-  node.style.transition = kept;
-}
-
 export interface WeftPass {
   left: number; right: number; top: number; bottom: number;
   lead: number; sweep: number;
 }
 
+/** Поставить величину, не проиграв переход к ней. Нужно там, где --progress
+ *  всё-таки переходный (показ ключа): первая установка — это состояние, а не
+ *  движение, и ключ не должен затыкаться обратно на глазах у того, кто его ещё
+ *  не открывал. */
+function setAtOnce(node: HTMLElement, value: string) {
+  const kept = node.style.transition;
+  node.style.transition = "none";
+  node.style.setProperty("--progress", value);
+  void node.offsetWidth;
+  node.style.transition = kept;
+}
+
 export function useWeaveReveal<T extends HTMLElement>(threshold = 0.3) {
   const ref = useRef<T>(null);
-  const hidden = useRef(false);
+  const waiting = useRef(false);
 
   // Прячем только то, что ещё ниже экрана. Уже видимое не трогаем совсем:
   // анимировать появление того, на что человек уже смотрит, незачем, а вот
-  // спрятать первый экран в ожидании события, которое может не прийти, —
-  // ровно та ошибка, из-за которой разделы оказывались пустыми.
+  // спрятать первый экран в ожидании события, которое может не прийти, — ровно
+  // та ошибка, из-за которой разделы однажды оказались пустыми.
   useLayoutEffect(() => {
     const node = ref.current;
     if (!node || calmMotion()) return;
-    if (node.getBoundingClientRect().top < window.innerHeight) return;
-    setAtOnce(node, "0");
-    hidden.current = true;
+    // clientHeight, а не innerHeight: последний на момент этого замера может
+    // быть ещё нулевым. Не знаем размера окна — не прячем ничего: тогда просто
+    // не будет анимации, а не пустого первого экрана в ожидании страховки.
+    const viewport = document.documentElement.clientHeight || window.innerHeight;
+    if (!viewport) return;
+    if (node.getBoundingClientRect().top < viewport * 0.9) return;
+    node.classList.add("weave-wait");
+    waiting.current = true;
   }, []);
 
   useEffect(() => {
     const node = ref.current;
-    if (!node || !hidden.current) return;
+    if (!node || !waiting.current) return;
 
     const show = (animate: boolean) => {
-      if (!hidden.current) return;
-      hidden.current = false;
-      // В скрытой вкладке переходы не идут: они замирают на начальном кадре,
-      // то есть на спрятанном. Тогда показываем разом, без анимации.
-      if (!animate) { node.style.transition = "none"; node.style.setProperty("--progress", "1"); return; }
+      if (!waiting.current) return;
+      waiting.current = false;
+      node.classList.remove("weave-wait");
+      if (!animate) return;              // вкладка скрыта — показываем разом
 
-      // Станок ведёт нить к этой карточке, пока идёт --lead, и отпускает её на
-      // --sweep. Тайминги берутся с самого элемента, а не задаются здесь второй
-      // раз: разъехавшись, нить и клип превратились бы в два разных движения.
+      node.classList.add("weaving");
+      node.addEventListener("animationend",
+        () => node.classList.remove("weaving"), { once: true });
+
+      // Станок ведёт нить к этой карточке. Тайминги берутся с самого элемента,
+      // а не задаются здесь второй раз: разъехавшись, нить и клип превратились
+      // бы в два разных движения вместо одного.
       const css = getComputedStyle(node);
       const ms = (name: string, fallback: number) => {
-        const v = parseFloat(css.getPropertyValue(name));
-        return Number.isFinite(v) ? (css.getPropertyValue(name).includes("ms") ? v : v * 1000) : fallback;
+        const raw = css.getPropertyValue(name).trim();
+        const v = parseFloat(raw);
+        if (!Number.isFinite(v)) return fallback;
+        return raw.endsWith("ms") ? v : v * 1000;
       };
       const box = node.getBoundingClientRect();
       window.dispatchEvent(new CustomEvent(WEFT, { detail: {
         left: box.left, right: box.right, top: box.top, bottom: box.bottom,
-        lead: ms("--lead", 260), sweep: ms("--sweep", 760),
+        lead: ms("--lead", 240), sweep: ms("--sweep", 900),
       } }));
-      node.style.setProperty("--progress", "1");
     };
 
     const eye = new IntersectionObserver(([entry]) => {
@@ -114,15 +120,22 @@ export function useWeaveReveal<T extends HTMLElement>(threshold = 0.3) {
   return ref;
 }
 
-/** Обёртка для случаев, когда своя разметка не нужна. */
+/** Слой с нитями: голая основа перед челноком и сам челнок на кромке.
+ *  Отдельным элементом, потому что ::before и ::after карточки заняты бликом и
+ *  плёнкой стекла. */
+export function Weft() {
+  return <i className="weft" aria-hidden="true" />;
+}
+
 export function WeaveReveal({ children, delay = 0, className = "" }: {
   children: React.ReactNode; delay?: number; className?: string;
 }) {
   const ref = useWeaveReveal<HTMLDivElement>();
   return (
     <div ref={ref} className={`weave-reveal ${className}`.trim()}
-         style={{ transitionDelay: `${delay}ms` }}>
+         style={{ "--lead": `${240 + delay}ms` } as React.CSSProperties}>
       {children}
+      <Weft />
     </div>
   );
 }
