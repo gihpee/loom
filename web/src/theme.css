@@ -5,9 +5,9 @@
   /* --- база: чёрный с холодным бирюзовым подтоном -------------------------
      Не нейтральный серый: подтон связывает поверхность с акцентом, и без него
      бирюзовое свечение выглядит наклеенным на чужой фон. */
-  --bg-void:           #08151a;
-  --bg-surface:        #0f2129;
-  --bg-surface-raised: #173039;
+  --bg-void:           #03080a;
+  --bg-surface:        #071115;
+  --bg-surface-raised: #0d1c22;
 
   /* Приглушённый, а не неоновый. Дорогое свечение получается низкой
      насыщенностью и большим радиусом, а не яркостью: неон читается как
@@ -25,9 +25,9 @@
   --bg:        var(--bg-void);
   --surface:   var(--bg-surface);
   --raised:    var(--bg-surface-raised);
-  --overlay:   #1c3843;
-  --line:      #21414c;
-  --line-soft: #172f37;
+  --overlay:   #12242b;
+  --line:      #18313a;
+  --line-soft: #101f25;
 
   /* Текст: три веса важности вместо одного серого на всё. */
   --text:      var(--ink-100);
@@ -344,7 +344,7 @@ html { scroll-behavior: smooth; }
 .landing > *:not(.loom):not(.lp-top) { position: relative; z-index: 1; }
 
 .lp-top { position: sticky; top: 0; z-index: 6;
-          background: rgba(8, 21, 26, .68); backdrop-filter: blur(16px) saturate(140%);
+          background: rgba(3, 8, 10, .72); backdrop-filter: blur(16px) saturate(140%);
           border-bottom: 1px solid var(--line); }
 .lp-nav { display: flex; align-items: center; justify-content: space-between; height: 62px; }
 .lp-brand { display: flex; align-items: center; gap: 10px; color: var(--teal-core);
