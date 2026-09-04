@@ -318,6 +318,9 @@ pre.block.tall { max-height: 420px; }
    то, насколько факт близок к ядру продукта. Одна тень и один радиус на всём —
    ровно то ощущение «набора для SaaS», из-за которого интерфейс кажется
    скудным. */
+html { scroll-behavior: smooth; }
+@media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
+
 .landing {
   background: var(--bg-void);
   color: var(--ink-100);
@@ -338,7 +341,7 @@ pre.block.tall { max-height: 420px; }
 /* Исключение обязательно: без него правило перебивает `fixed` у холста, тот
    становится потоковым, `height: 100%` считается от авто-высоты родителя и
    даёт ноль — полотно просто исчезает, не оставив следа в консоли. */
-.landing > *:not(.loom) { position: relative; z-index: 1; }
+.landing > *:not(.loom):not(.lp-top) { position: relative; z-index: 1; }
 
 .lp-top { position: sticky; top: 0; z-index: 6;
           background: rgba(8, 21, 26, .68); backdrop-filter: blur(16px) saturate(140%);
@@ -385,7 +388,7 @@ pre.block.tall { max-height: 420px; }
                     box-shadow: 0 0 34px -6px rgba(124, 240, 255, .55); }
 
 /* ------------------------------------------------------------------- разделы */
-.lp-section { padding: 44px 0; position: relative; }
+.lp-section { padding: 44px 0; position: relative; scroll-margin-top: 78px; }
 /* Цвет, которому протекать сквозь стекло. Два пятна, не больше: третье
    превращает фон в лужу и съедает контраст текста. */
 .lp-section::before, .lp-section::after,
@@ -410,7 +413,7 @@ pre.block.tall { max-height: 420px; }
 /* Возможности: строка иконок, а не плитки. Знак крупный, подпись короткая —
    такое читают взглядом. Нити позади идут насквозь: три способа взять мощность
    лежат в одной сети, а не стоят порознь. */
-.lp-deploy { position: relative; display: grid; gap: 28px;
+.lp-deploy { position: relative; display: grid; gap: 28px 28px;
              grid-template-columns: repeat(3, 1fr); align-items: start;
              text-align: center; padding-top: 20px; }
 @media (max-width: 760px) {
@@ -418,19 +421,11 @@ pre.block.tall { max-height: 420px; }
   .lp-arcs { display: none; }
 }
 .lp-arcs { position: absolute; left: -5%; top: 26px; width: 110%; height: 130px;
-           color: rgba(124, 240, 255, .2); pointer-events: none; z-index: -1; }
+           color: rgba(150, 244, 255, .4); pointer-events: none; z-index: -1; }
 .lp-opt { display: flex; flex-direction: column; align-items: center; gap: 14px; }
 .lp-chip {
   width: 104px; height: 104px; display: grid; place-items: center;
   border-radius: 28px; color: var(--teal-bright);
-  background: linear-gradient(158deg, rgba(124, 240, 255, .17), rgba(15, 33, 41, .4));
-  backdrop-filter: blur(20px) saturate(150%);
-  -webkit-backdrop-filter: blur(20px) saturate(150%);
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, .24),
-    inset 0 -1px 0 rgba(0, 0, 0, .35),
-    inset 0 0 0 1px rgba(124, 240, 255, .1),
-    0 24px 44px -28px rgba(0, 0, 0, .9);
   transition: transform .42s cubic-bezier(.22, 1, .36, 1);
 }
 .lp-chip svg { width: 42px; height: 42px; }
@@ -602,12 +597,19 @@ pre.block.tall { max-height: 420px; }
   --lead: 240ms;     /* столько холст ведёт нить к кромке */
   --sweep: 900ms;    /* сам проход утка́ */
   position: relative;
+}
+/* Клип живёт ровно столько, сколько идёт раскрытие. Оставшись на элементе в
+   покое, он режет всё, что выходит за рамку: тень, свечение и подъём знака при
+   наведении. */
+.weave-reveal.weave-wait, .weave-reveal.weaving {
   clip-path: inset(0 calc((1 - var(--progress)) * 100%) 0 0);
   transform: translate3d(0, calc((1 - var(--progress)) * 30px), 0)
              scale(calc(.96 + var(--progress) * .04));
   opacity: calc(.05 + var(--progress) * .95);
 }
 .weave-reveal.weave-wait { --progress: 0; }
+/* Слой нитей существует только во время прохода утка́. */
+.weave-reveal:not(.weave-wait):not(.weaving) > .weft { display: none; }
 .weave-reveal.weaving {
   animation: weave-in var(--sweep) cubic-bezier(.65, 0, .35, 1) var(--lead) both;
 }
@@ -684,7 +686,7 @@ pre.block.tall { max-height: 420px; }
    Оба слоя лежат на z-index: -1 при isolation: isolate — так они попадают между
    фоном карточки и её текстом: выше — перекрыли бы содержимое, ниже — исчезли
    бы за фоном. Их screen смешивается только внутри карточки. */
-.glass, .card, .lp-fact, .lp-demo, .key-woven, .signin-card {
+.glass, .card, .lp-fact, .lp-demo, .lp-chip, .key-woven, .signin-card {
   position: relative;
   isolation: isolate;
   overflow: hidden;
@@ -703,7 +705,7 @@ pre.block.tall { max-height: 420px; }
 }
 
 .glass::before, .card::before, .lp-fact::before, .lp-demo::before,
-.key-woven::before, .signin-card::before {
+.lp-chip::before, .key-woven::before, .signin-card::before {
   content: "";
   position: absolute; inset: 0; z-index: -1;
   border-radius: inherit; pointer-events: none;
@@ -716,7 +718,7 @@ pre.block.tall { max-height: 420px; }
 }
 
 .glass::after, .card::after, .lp-fact::after, .lp-demo::after,
-.key-woven::after, .signin-card::after {
+.lp-chip::after, .key-woven::after, .signin-card::after {
   content: "";
   position: absolute; inset: 0; z-index: -1;
   border-radius: inherit; pointer-events: none;

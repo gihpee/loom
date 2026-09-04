@@ -20,19 +20,19 @@ const OPTIONS = [
   {
     id: "inference",
     title: "Инференс",
-    text: "Готовый API. Как у OpenAI.",
+    text: "Готовый API, как у OpenAI",
     icon: (
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"
            strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
         <path d="M4 5h16v10H9.5L4 19V5Z" />
-        <path d="m12 8 1.1 2.3 2.3 1.1-2.3 1.1L12 15l-1.1-2.5-2.3-1.1 2.3-1.1L12 8Z" />
+        <path d="M12 6.8 13.1 8.9 15.2 10 13.1 11.1 12 13.2 10.9 11.1 8.8 10 10.9 8.9Z" />
       </svg>
     ),
   },
   {
     id: "compute",
     title: "Ray-кластер",
-    text: "Свой код на чужих картах.",
+    text: "Свой код на чужих картах",
     icon: (
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"
            strokeLinecap="round" aria-hidden="true">
@@ -46,7 +46,7 @@ const OPTIONS = [
   {
     id: "weights",
     title: "Свои модели",
-    text: "Ваши веса — по запросу.",
+    text: "Ваши веса — по запросу",
     icon: (
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"
            strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
@@ -65,7 +65,7 @@ const FACTS = [
     text: "У машины-поставщика нет и не будет входящих портов: это домашний " +
       "компьютер за роутером, который никто не настраивает. Узел сам открывает " +
       "канал наружу, и всё идёт обратно по нему же — команды, активации модели, " +
-      "порт до кластера.",
+      "порт до кластера",
   },
   {
     id: "anchor",
@@ -73,7 +73,7 @@ const FACTS = [
     head: "Платформа — первый клиент своей сети",
     text: "Пока прямого арендатора нет, карты занимает инференс. Приходит " +
       "клиент за кластером — модели уступают ему узлы и возвращаются, когда " +
-      "аренда кончилась.",
+      "аренда кончилась",
   },
   {
     id: "isolation",
@@ -81,7 +81,7 @@ const FACTS = [
     head: "Чужой код в песочнице",
     text: "Задача идёт под отдельным пользователем, в своём каталоге, с " +
       "ограничениями по памяти и процессам. Владелец машины сдаёт мощность, а " +
-      "не доступ к себе.",
+      "не доступ к себе",
   },
 ];
 
@@ -135,7 +135,7 @@ export function Landing() {
             или{" "}
             <a href="#deploy" className="lp-point" data-lit={lit === "compute"}
                {...point("compute")}>кластер</a>{" "}
-            — платите за использованное.
+            — платите за использованное
           </p>
           <div className="lp-cta">
             <a className="lp-primary" href="/app">Начать</a>
@@ -145,8 +145,7 @@ export function Landing() {
 
       <section className="lp-section" id="deploy">
         <div className="lp-wrap">
-          <h2 className="lp-h2">Разворачивайте что хотите</h2>
-          <p className="lp-sub">И когда хотите.</p>
+          <h2 className="lp-h2">Разворачивайте что хотите и когда хотите</h2>
           <div className="lp-deploy">
             <Arcs />
             {OPTIONS.map((o, i) => (
@@ -159,8 +158,6 @@ export function Landing() {
           </div>
         </div>
       </section>
-
-      <Demo />
 
       <section className="lp-section" id="how">
         <div className="lp-wrap">
@@ -177,13 +174,15 @@ export function Landing() {
         </div>
       </section>
 
+      <Demo />
+
       <section className="lp-section lp-final">
         <div className="lp-wrap">
           <WeaveReveal>
             <h2>Полотно уже соткано</h2>
             <p className="lp-lead">
               Сеть работает, счёт считается, модели отвечают. Осталось выдать
-              вам ключ.
+              вам ключ
             </p>
             <a className="lp-primary" href="/app">Войти в кабинет</a>
           </WeaveReveal>
@@ -226,9 +225,18 @@ function Arcs() {
  *  Блока нет вовсе, когда сеть пуста: поле ввода, которое ничего не отвечает,
  *  хуже отсутствующего раздела.
  */
+/** Имя модели так, как его называют люди: «qwen3-4b» → «Qwen3». Размер в
+ *  подписи ничего не сообщает тому, кто пришёл оценить скорость, а точное имя
+ *  всегда доступно по API. Не узнав окончания, оставляем как есть — выдумывать
+ *  красивое имя незнакомой модели хуже, чем показать настоящее. */
+function показать(label: string) {
+  const short = label.replace(/-\d+(\.\d+)?\s*[bB]$/, "");
+  return short.charAt(0).toUpperCase() + short.slice(1);
+}
+
 function Demo() {
   const [ready, setReady] = useState<{ model: string; nodes: number } | null>(null);
-  const [prompt, setPrompt] = useState("");
+  const [prompt, setPrompt] = useState("Привет!");
   const [answer, setAnswer] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
@@ -298,8 +306,7 @@ function Demo() {
       <div className="lp-wrap">
         <h2 className="lp-h2">Убедитесь сами</h2>
         <p className="lp-sub">
-          {ready.model} разрезана по домашним машинам — {ready.nodes}{" "}
-          {ready.nodes === 1 ? "узел" : ready.nodes < 5 ? "узла" : "узлов"}. Спросите её.
+          {показать(ready.model)} разрезана по домашним машинам. Оцените скорость
         </p>
 
         <div className="lp-demo glass">
