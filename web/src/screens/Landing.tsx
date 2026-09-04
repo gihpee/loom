@@ -12,7 +12,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Mark } from "../components";
 import { usePhone } from "../components/device";
-import { WeaveReveal } from "../components/Weave";
+import { WeaveReveal, calmMotion } from "../components/Weave";
 import { Loom, type Highlight } from "./Loom";
 
 /* Три возможности одной строкой. Текст короткий намеренно: подпись под иконкой
@@ -252,31 +252,38 @@ function Deploy({ phone }: { phone: boolean }) {
     <section className="lp-section" id="deploy">
       <div className="lp-wrap">
         <h2 className="lp-h2">Разворачивайте что хотите и когда хотите</h2>
-        <div className="lp-deploy" ref={track}>
-          <Arcs />
-          {OPTIONS.map((o, i) => (
-            <WeaveReveal key={o.id} className="lp-opt" delay={i * 120}>
-              <span className="lp-chip">{o.icon}</span>
-              <h3>{o.title}</h3>
-              <p>{o.text}</p>
-            </WeaveReveal>
-          ))}
+        <div className="lp-stage">
+          <div className="lp-deploy" ref={track}>
+            <Arcs />
+            {OPTIONS.map((o, i) => (
+              <WeaveReveal key={o.id} className="lp-opt" delay={i * 120}>
+                <span className="lp-chip">{o.icon}</span>
+                <h3>{o.title}</h3>
+                <p>{o.text}</p>
+              </WeaveReveal>
+            ))}
+          </div>
+
+          {/* Стрелки лежат вне прокручиваемой полосы: внутри неё они уезжали бы
+              вместе с карточками. */}
+          {phone && (
+            <>
+              <button className="lp-slide" data-side="prev" disabled={at === 0}
+                      aria-label="Предыдущая" onClick={() => go(-1)}>
+                <Chevron back />
+              </button>
+              <button className="lp-slide" data-side="next"
+                      disabled={at >= OPTIONS.length - 1}
+                      aria-label="Следующая" onClick={() => go(1)}>
+                <Chevron />
+              </button>
+            </>
+          )}
         </div>
 
         {phone && (
-          <div className="lp-slider">
-            <button className="lp-slide" data-side="prev" disabled={at === 0}
-                    aria-label="Предыдущая" onClick={() => go(-1)}>
-              <Chevron back />
-            </button>
-            <div className="lp-dots" aria-hidden="true">
-              {OPTIONS.map((o, i) => <i key={o.id} data-on={i === at} />)}
-            </div>
-            <button className="lp-slide" data-side="next"
-                    disabled={at >= OPTIONS.length - 1}
-                    aria-label="Следующая" onClick={() => go(1)}>
-              <Chevron />
-            </button>
+          <div className="lp-dots" aria-hidden="true">
+            {OPTIONS.map((o, i) => <i key={o.id} data-on={i === at} />)}
           </div>
         )}
       </div>
@@ -447,33 +454,64 @@ function Demo() {
  *  Метафора при этом не теряется совсем: свет по-прежнему идёт сквозь тёмное
  *  полотно, просто нитей не видно. Соврать формой хуже, чем упростить её.
  */
-/** Огни на полотне. Те же, что бегают по холсту на рабочем столе, только здесь
- *  их ведёт не скрипт, а ключевые кадры: движутся transform и opacity, обе
- *  величины считает композитор, поэтому четырнадцать точек стоят примерно
- *  столько же, сколько одна.
+/** Фон для телефона: пятна света и огни, идущие по путям.
  *
- *  Список задан руками, а не случайными числами: композиция должна быть
- *  повторяемой, иначе половина загрузок даёт скученные в углу точки. */
-const SPARKS = [
-  { x:  6, y:  9, s: 5, d: 27, t:  0, p: 1 }, { x: 24, y: 17, s: 3, d: 34, t: 3, p: 2 },
-  { x: 47, y:  7, s: 4, d: 31, t:  6, p: 3 }, { x: 71, y: 14, s: 3, d: 38, t: 1, p: 1 },
-  { x: 89, y: 24, s: 5, d: 29, t:  4, p: 2 }, { x: 13, y: 33, s: 3, d: 41, t: 7, p: 3 },
-  { x: 38, y: 41, s: 6, d: 25, t:  2, p: 2 }, { x: 62, y: 36, s: 3, d: 36, t: 5, p: 1 },
-  { x: 84, y: 49, s: 4, d: 33, t:  8, p: 3 }, { x:  9, y: 58, s: 4, d: 30, t: 1, p: 2 },
-  { x: 33, y: 67, s: 3, d: 43, t:  5, p: 1 }, { x: 57, y: 74, s: 5, d: 28, t: 3, p: 3 },
-  { x: 78, y: 63, s: 3, d: 39, t:  9, p: 2 }, { x: 92, y: 82, s: 4, d: 32, t: 6, p: 1 },
+ *  Пути и огни живут в одной фигуре и в одной системе координат — иначе линию
+ *  пришлось бы рисовать отдельно от движения, и они разъехались бы при первом
+ *  же изменении размеров. Здесь огонь привязан к той самой линии, по которой
+ *  идёт (mpath), поэтому совпадение не нужно поддерживать руками: оно есть по
+ *  построению.
+ *
+ *  preserveAspectRatio держит равные масштабы по осям: при неравных огни
+ *  превратились бы в овалы, а линии — в кривые не той формы.
+ */
+const TRAILS = [
+  "M -8 26 C 26 8, 64 44, 108 22",
+  "M 108 62 C 72 78, 34 44, -8 68",
+  "M -8 104 C 30 88, 70 122, 108 100",
+  "M 108 140 C 66 156, 30 124, -8 148",
+  "M -8 178 C 34 162, 72 192, 108 172",
+];
+
+/** Огни: путь, размер, длительность и сдвиг начала. Сдвиг отрицательный —
+ *  анимация стартует с середины, поэтому огни не трогаются с места разом. */
+const LIGHTS = [
+  { t: 0, r: 1.0, d: 9,  b: 0 },  { t: 0, r: .7, d: 12, b: 5 },
+  { t: 1, r: .9, d: 8,  b: 2 },   { t: 1, r: 1.2, d: 13, b: 7 },
+  { t: 2, r: .8, d: 10, b: 1 },   { t: 2, r: 1.0, d: 14, b: 6 },
+  { t: 2, r: .6, d: 7,  b: 3 },   { t: 3, r: 1.1, d: 11, b: 4 },
+  { t: 3, r: .7, d: 9,  b: 8 },   { t: 4, r: .9, d: 12, b: 2 },
+  { t: 4, r: 1.0, d: 8,  b: 6 },  { t: 0, r: .6, d: 15, b: 9 },
+  { t: 3, r: .8, d: 13, b: 1 },   { t: 1, r: .6, d: 10, b: 9 },
 ];
 
 function Drift() {
+  const calm = calmMotion();
   return (
     <div className="drift" aria-hidden="true">
       <i /><i /><i />
-      {SPARKS.map((s, i) => (
-        <b key={i} style={{
-          "--x": `${s.x}vw`, "--y": `${s.y}vh`, "--s": `${s.s}px`,
-          "--d": `${s.d}s`, "--t": `-${s.t}s`, "--path": `spark-${s.p}`,
-        } as React.CSSProperties} />
-      ))}
+      <svg className="trails" viewBox="0 0 100 200" preserveAspectRatio="xMidYMid slice">
+        <defs>
+          <radialGradient id="light">
+            <stop offset="0%" stopColor="#d6fbff" stopOpacity=".95" />
+            <stop offset="40%" stopColor="#7cf0ff" stopOpacity=".55" />
+            <stop offset="100%" stopColor="#7cf0ff" stopOpacity="0" />
+          </radialGradient>
+        </defs>
+        {TRAILS.map((d, i) => (
+          <path key={i} id={`trail-${i}`} d={d} fill="none"
+                stroke="rgba(124, 240, 255, .09)" strokeWidth=".35" />
+        ))}
+        {LIGHTS.map((l, i) => (
+          <circle key={i} r={l.r} fill="url(#light)">
+            {!calm && (
+              <animateMotion dur={`${l.d}s`} begin={`-${l.b}s`} repeatCount="indefinite">
+                <mpath href={`#trail-${l.t}`} xlinkHref={`#trail-${l.t}`} />
+              </animateMotion>
+            )}
+          </circle>
+        ))}
+      </svg>
     </div>
   );
 }
