@@ -421,8 +421,47 @@ html { scroll-behavior: smooth;
              grid-template-columns: repeat(3, 1fr); align-items: start;
              text-align: center; padding-top: 20px; }
 @media (max-width: 760px) {
-  .lp-deploy { grid-template-columns: 1fr; }
   .lp-arcs { display: none; }
+
+  /* Листалка, а не колонка: три знака подряд в столбик растягивают раздел на
+     три экрана и читаются как список, хотя это равноправный выбор. */
+  .lp-deploy {
+    display: flex; gap: 0; padding-top: 8px;
+    overflow-x: auto; scroll-snap-type: x mandatory;
+    scrollbar-width: none; -ms-overflow-style: none;
+    /* Полоса прокрутки скрыта, но прокрутка пальцем остаётся: стрелки —
+       дополнение к жесту, а не замена ему. */
+  }
+  .lp-deploy::-webkit-scrollbar { display: none; }
+  .lp-opt { flex: 0 0 100%; scroll-snap-align: center; padding: 0 4px; }
+
+  .lp-slider { display: flex; align-items: center; justify-content: center;
+               gap: 18px; margin-top: 22px; }
+  .lp-slide {
+    width: 44px; height: 44px; border: 0; border-radius: 50%;
+    display: grid; place-items: center; cursor: pointer;
+    color: var(--ink-100);
+    background: rgba(41, 198, 222, .1);
+    box-shadow: inset 0 0 0 1px rgba(124, 240, 255, .18);
+    transition: opacity .25s, background .25s;
+  }
+  .lp-slide:disabled { opacity: .3; cursor: default; }
+  .lp-slide:not(:disabled):active { background: rgba(41, 198, 222, .22); }
+  /* Стрелка подрагивает в ту сторону, куда поведёт: это приглашение к жесту.
+     У выключенной движения нет — иначе она звала бы туда, где ничего нет. */
+  .lp-slide svg { width: 18px; height: 18px; }
+  .lp-slide[data-side="next"]:not(:disabled) svg { animation: nudge-next 2.4s ease-in-out infinite; }
+  .lp-slide[data-side="prev"]:not(:disabled) svg { animation: nudge-prev 2.4s ease-in-out infinite; }
+  @keyframes nudge-next { 0%, 100% { transform: translateX(0); } 50% { transform: translateX(3px); } }
+  @keyframes nudge-prev { 0%, 100% { transform: translateX(0); } 50% { transform: translateX(-3px); } }
+
+  .lp-dots { display: flex; gap: 7px; }
+  .lp-dots i { width: 6px; height: 6px; border-radius: 50%;
+               background: rgba(232, 247, 251, .22); transition: background .3s, width .3s; }
+  .lp-dots i[data-on="true"] { width: 18px; border-radius: 3px; background: var(--teal-core); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .lp-slide svg { animation: none !important; }
 }
 .lp-arcs { position: absolute; left: -5%; top: 26px; width: 110%; height: 130px;
            color: rgba(150, 244, 255, .4); pointer-events: none; z-index: -1; }
@@ -858,7 +897,6 @@ tr[data-weft="on"] { background-size: 60% 100%; background-repeat: no-repeat; }
   .lp-section { padding: 34px 0; scroll-margin-top: 66px; }
   .lp-final { padding: 44px 0 48px; }
   .lp-hero h1 { font-size: clamp(34px, 10vw, 46px); }
-  .lp-deploy { gap: 34px; padding-top: 8px; }
   .lp-deploy > .lp-opt:nth-of-type(2) .lp-chip { width: 104px; height: 104px;
                                                  margin-top: 0; border-radius: 28px; }
   .lp-deploy > .lp-opt:nth-of-type(2) .lp-chip svg { width: 42px; height: 42px; }
@@ -892,8 +930,26 @@ tr[data-weft="on"] { background-size: 60% 100%; background-repeat: no-repeat; }
 @keyframes drift-a { to { transform: translate3d(34vw, 22vh, 0); } }
 @keyframes drift-b { to { transform: translate3d(-30vw, -18vh, 0); } }
 @keyframes drift-c { to { transform: translate3d(38vw, -26vh, 0); } }
+/* Огни. Отрицательная задержка (--t) вместо положительной: анимация начинается
+   уже в середине, поэтому точки не трогаются с места разом, как по команде. */
+.drift b {
+  position: absolute; display: block; border-radius: 50%;
+  left: var(--x); top: var(--y);
+  width: var(--s); height: var(--s);
+  background: radial-gradient(circle,
+              rgba(214, 251, 255, .95) 0%, rgba(124, 240, 255, .5) 38%, transparent 70%);
+  box-shadow: 0 0 12px 2px rgba(124, 240, 255, .35);
+  will-change: transform, opacity;
+  animation: var(--path) var(--d) ease-in-out var(--t) infinite alternate,
+             twinkle 5s ease-in-out var(--t) infinite;
+}
+@keyframes spark-1 { to { transform: translate3d(9vw, -8vh, 0); } }
+@keyframes spark-2 { to { transform: translate3d(-8vw, 7vh, 0); } }
+@keyframes spark-3 { to { transform: translate3d(6vw, 10vh, 0); } }
+@keyframes twinkle { 0%, 100% { opacity: .4; } 50% { opacity: 1; } }
+
 @media (prefers-reduced-motion: reduce) {
-  .drift i { animation: none; }
+  .drift i, .drift b { animation: none; }
 }
 
 /* ------------------------------------------------------------------- бургер */
