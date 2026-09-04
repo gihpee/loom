@@ -17,6 +17,7 @@ import asyncio
 import base64
 import json
 import os
+import time
 from pathlib import Path
 
 from fastapi import FastAPI, Header, Request, WebSocket, WebSocketDisconnect
@@ -101,7 +102,9 @@ def create_app(*, agents=None, releases=None, keystore=None, config=None,
     # Вход и выход — единственное, что обязано работать без представления:
     # именно за тем на них и приходят. Без этой строчки войти невозможно в
     # принципе, и обнаруживается это не раньше первой попытки.
-    OPEN = {"/api/session"}
+    # Демо на лендинге отвечает без представления — в том и смысл: человек
+    # должен убедиться в скорости до того, как заводить учётную запись.
+    OPEN = {"/api/session", "/api/demo"}
 
     @app.middleware("http")
     async def guard(request: Request, call_next):
@@ -501,6 +504,112 @@ def create_app(*, agents=None, releases=None, keystore=None, config=None,
             except AgentError as exc:
                 yield f"data: {json.dumps({'error': {'message': str(exc)}})}\n\n".encode()
                 yield b"data: [DONE]\n\n"
+
+        return StreamingResponse(pieces(), media_type="text/event-stream",
+                                 headers={"Cache-Control": "no-cache",
+                                          "X-Accel-Buffering": "no"})
+
+    # ---------------------------------------------------------------- демо
+    # Открытый инференс на лендинге. Открытый — значит, за него платит парк, а
+    # не клиент, поэтому ограничители тут не украшение, а условие того, что это
+    # вообще можно включить: короткий запрос, короткий ответ, счётчик на адрес
+    # и общий потолок. Без последнего одна вкладка с циклом займёт все карты.
+    DEMO_PROMPT = 400          # символов
+    DEMO_TOKENS = 220          # токенов в ответе
+    DEMO_PER_HOUR = 20         # запросов с адреса
+    DEMO_AT_ONCE = 4           # одновременных на всех
+    demo_seen: dict[str, list[float]] = {}
+    demo_now = 0
+
+    def demo_who(request: Request) -> str:
+        """Адрес обратившегося. За обратным прокси реальный адрес приходит
+        заголовком: без этого все посетители выглядят одним клиентом, и общий
+        счётчик закрывает демо для всех сразу."""
+        sent = request.headers.get("x-forwarded-for", "")
+        first = sent.split(",")[0].strip()
+        return first or (request.client.host if request.client else "?")
+
+    def demo_allow(who: str) -> str:
+        """Пустая строка — можно; иначе причина отказа, как она уйдёт человеку."""
+        now = time.time()
+        seen = [t for t in demo_seen.get(who, []) if now - t < 3600]
+        if len(seen) >= DEMO_PER_HOUR:
+            return "на сегодня хватит: демо ограничено, ключ снимает предел"
+        seen.append(now)
+        demo_seen[who] = seen
+        if len(demo_seen) > 4096:                 # не растим словарь без предела
+            for key in [k for k, v in demo_seen.items() if not v or now - v[-1] > 3600]:
+                demo_seen.pop(key, None)
+        return ""
+
+    async def demo_model() -> str:
+        """Первая модель, которая действительно отвечает."""
+        if agents is None:
+            return ""
+        for label in sorted({g.label for g in agents.groups.values() if g.label}):
+            if await agents.serving(label) is not None:
+                return label
+        return ""
+
+    @app.get("/api/demo")
+    async def demo_ready():
+        """Есть ли что показывать. Лендинг прячет блок, если сеть пуста: пустое
+        поле ввода, которое ничего не отвечает, хуже отсутствующего блока."""
+        label = await demo_model()
+        nodes = 0
+        if agents is not None and label:
+            group = await agents.serving(label)
+            nodes = len(group.tasks) if group else 0
+        return {"model": label, "nodes": nodes, "limit": DEMO_TOKENS}
+
+    @app.post("/api/demo")
+    async def demo_ask(request: Request):
+        nonlocal demo_now
+        if agents is None:
+            return need_agents()
+        label = await demo_model()
+        if not label:
+            return _error(503, "сейчас ни одна модель не отвечает")
+
+        try:
+            body = json.loads(await request.body() or b"{}")
+        except ValueError:
+            return _error(400, "тело запроса не JSON")
+        prompt = (body.get("prompt") or "").strip()[:DEMO_PROMPT]
+        if not prompt:
+            return _error(400, "пустой запрос")
+
+        why = demo_allow(demo_who(request))
+        if why:
+            return _error(429, why)
+        if demo_now >= DEMO_AT_ONCE:
+            return _error(429, "демо сейчас занято, попробуйте через минуту")
+
+        ask = json.dumps({
+            "model": label,
+            "messages": [{"role": "user", "content": prompt}],
+            "max_tokens": DEMO_TOKENS,
+            "stream": True,
+        }).encode()
+        group = await agents.serving(label)
+        head = group.tasks[0]
+
+        async def pieces():
+            nonlocal demo_now
+            demo_now += 1
+            try:
+                async for piece in agents.request_stream(
+                        head, method="POST", path="/v1/chat/completions",
+                        body=ask, headers={"Content-Type": "application/json"}):
+                    if not isinstance(piece, tuple):
+                        yield piece
+            except AgentError as exc:
+                yield f"data: {json.dumps({'error': {'message': str(exc)}})}\n\n".encode()
+                yield b"data: [DONE]\n\n"
+            finally:
+                # Именно finally: оборванное соединение — обычный исход, и без
+                # этого счётчик занятости однажды упрётся в потолок навсегда.
+                demo_now -= 1
 
         return StreamingResponse(pieces(), media_type="text/event-stream",
                                  headers={"Cache-Control": "no-cache",

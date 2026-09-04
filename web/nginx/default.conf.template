@@ -22,6 +22,20 @@ server {
         add_header Cache-Control "public, immutable";
     }
 
+    # Демо на лендинге. Отдельно от /api/ ради одной строчки: без выключенной
+    # буферизации nginx копит ответ целиком, и обещанная скорость превращается
+    # в паузу на всю генерацию, а потом текст разом. Заодно сюда доезжает адрес
+    # обратившегося — по нему считается предел на демо.
+    location /api/demo {
+        proxy_pass http://${LOOMA_API_HOST}:${LOOMA_HTTP_PORT};
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_buffering off;
+        proxy_cache off;
+        chunked_transfer_encoding on;
+        proxy_read_timeout 300s;
+    }
+
     # Кабинет клиента. Отдельным префиксом от /admin: правило доступа читается
     # по адресу, а не по догадке о том, кто зашёл.
     location /api/ {
