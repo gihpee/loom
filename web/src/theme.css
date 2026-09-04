@@ -12,6 +12,16 @@
   /* Приглушённый, а не неоновый. Дорогое свечение получается низкой
      насыщенностью и большим радиусом, а не яркостью: неон читается как
      предупреждение, а не как акцент. */
+  /* Второй акцент. У него есть работа, а не просто присутствие: бирюза — это
+     основа, сеть, которая стоит всегда; коралл — уто́к, то, что сквозь неё
+     проходит. Поэтому коралловым горит всё движущееся: импульсы на полотне,
+     челнок раскрытия, курсор живого ответа. Ни одна кнопка и ни одно состояние
+     им не окрашены — иначе он спорил бы с бирюзой за смысл «нажми сюда» и с
+     красным за смысл «сломалось». */
+  --coral-core:   #ff7d63;
+  --coral-bright: #ffa48f;
+  --coral-dim:    rgba(255, 125, 99, .16);
+
   --teal-core:   #29c6de;
   --teal-bright: #7cf0ff;
   --teal-dim:    rgba(41, 198, 222, .14);
@@ -402,7 +412,7 @@ html { scroll-behavior: smooth; }
 }
 .lp-section::after, .lp-hero::after {
   width: 400px; height: 340px; right: 8%; bottom: 4%;
-  background: radial-gradient(closest-side, rgba(140, 120, 255, .17), transparent);
+  background: radial-gradient(closest-side, rgba(255, 125, 99, .2), transparent);
 }
 .lp-h2 { font-family: var(--display); font-size: clamp(26px, 3.4vw, 38px);
          font-weight: 600; letter-spacing: -.03em; margin-bottom: 14px; }
@@ -486,7 +496,7 @@ html { scroll-behavior: smooth; }
 /* Курсор показывает, что поток ещё идёт: без него пауза между токенами
    неотличима от закончившегося ответа. */
 .lp-caret { display: inline-block; width: 8px; height: 1.05em; margin-left: 3px;
-            vertical-align: -2px; background: var(--teal-bright); opacity: 0; }
+            vertical-align: -2px; background: var(--coral-core); opacity: 0; }
 .lp-caret[data-on="true"] { opacity: 1; animation: blink 1s steps(2) infinite; }
 @keyframes blink { 50% { opacity: 0; } }
 
@@ -497,6 +507,8 @@ html { scroll-behavior: smooth; }
                font-weight: 600; letter-spacing: -.02em;
                font-variant-numeric: tabular-nums; }
 .lp-stats b { font-size: 13px; font-weight: 400; color: var(--ink-60); }
+/* Одна цифра выделена, а не все три: выделены все — не выделен никто. */
+.lp-stats .lead dd { color: var(--coral-bright); }
 
 /* ------------------------------------------------------------- финальный блок */
 .lp-final { padding: 60px 0 64px; }
@@ -634,8 +646,8 @@ html { scroll-behavior: smooth; }
   left: calc(var(--progress) * 100%);
   width: 3px;
   background: linear-gradient(180deg, transparent,
-              var(--teal-bright) 14%, #eafcff 50%, var(--teal-bright) 86%, transparent);
-  box-shadow: 0 0 28px 6px rgba(124, 240, 255, .6);
+              var(--coral-core) 14%, #ffe4dc 50%, var(--coral-core) 86%, transparent);
+  box-shadow: 0 0 28px 6px rgba(255, 125, 99, .55);
   opacity: calc(var(--progress) * (1 - var(--progress)) * 4);
 }
 
@@ -724,7 +736,7 @@ html { scroll-behavior: smooth; }
   border-radius: inherit; pointer-events: none;
   background: linear-gradient(120deg,
               rgba(124, 240, 255, .6) 0%, rgba(124, 240, 255, 0) 36%,
-              rgba(0, 0, 0, 0) 64%, rgba(150, 132, 255, .45) 100%);
+              rgba(0, 0, 0, 0) 64%, rgba(255, 140, 115, .5) 100%);
   mix-blend-mode: screen;
   opacity: .09;
 }
