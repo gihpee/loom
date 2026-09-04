@@ -500,7 +500,7 @@ function Drift() {
         </defs>
         {TRAILS.map((d, i) => (
           <path key={i} id={`trail-${i}`} d={d} fill="none"
-                stroke="rgba(124, 240, 255, .09)" strokeWidth=".35" />
+                stroke="rgba(124, 240, 255, .045)" strokeWidth=".35" />
         ))}
         {LIGHTS.map((l, i) => (
           <circle key={i} r={l.r} fill="url(#light)">
