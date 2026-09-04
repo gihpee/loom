@@ -11,6 +11,7 @@
  */
 import { useEffect, useRef, useState } from "react";
 import { Mark } from "../components";
+import { usePhone } from "../components/device";
 import { WeaveReveal } from "../components/Weave";
 import { Loom, type Highlight } from "./Loom";
 
@@ -89,6 +90,18 @@ export function Landing() {
   const progress = useRef(0);
   const highlight = useRef<Highlight>("");
   const [lit, setLit] = useState<Highlight>("");
+  const [menu, setMenu] = useState(false);
+  const phone = usePhone();
+
+  // Меню закрывается клавишей и само собой, когда телефон снова становится
+  // рабочим столом: иначе оно осталось бы открытым поверх обычной шапки.
+  useEffect(() => {
+    if (!menu) return;
+    const key = (e: KeyboardEvent) => { if (e.key === "Escape") setMenu(false); };
+    addEventListener("keydown", key);
+    return () => removeEventListener("keydown", key);
+  }, [menu]);
+  useEffect(() => { if (!phone) setMenu(false); }, [phone]);
 
   // Полотно ткётся прокруткой. Значение пишем в ref, а не в состояние: иначе
   // каждый кадр скролла перерисовывал бы всё дерево.
@@ -111,12 +124,17 @@ export function Landing() {
 
   return (
     <div className="landing">
-      <Loom progress={progress} highlight={highlight} />
+      {phone ? <Drift /> : <Loom progress={progress} highlight={highlight} />}
 
-      <header className="lp-top">
+      <header className="lp-top" data-open={menu}>
         <div className="lp-wrap lp-nav">
           <a className="lp-brand" href="/"><Mark size={26} /><span>Looma&nbsp;Float</span></a>
-          <nav>
+          <button className="lp-burger" aria-controls="lp-menu" aria-expanded={menu}
+                  aria-label={menu ? "Закрыть меню" : "Меню"}
+                  onClick={() => setMenu(!menu)}>
+            <i /><i /><i />
+          </button>
+          <nav id="lp-menu" onClick={() => setMenu(false)}>
             <a href="#deploy">Возможности</a>
             <a href="#demo">Демо</a>
             <a href="#how">Как устроено</a>
@@ -341,4 +359,20 @@ function Demo() {
       </div>
     </section>
   );
+}
+
+/** Фон для телефона.
+ *
+ *  Станок с покадровой отрисовкой телефон не тянет: пятнадцать нитей, двадцать
+ *  два импульса и по радиальному градиенту на каждый — это десятки тысяч
+ *  операций в секунду поверх и без того дорогого стекла. Здесь вместо него три
+ *  пятна, которые двигаются одним лишь transform, то есть целиком на
+ *  композиторе: браузер не перерисовывает ни пикселя, а только сдвигает уже
+ *  готовые слои.
+ *
+ *  Метафора при этом не теряется совсем: свет по-прежнему идёт сквозь тёмное
+ *  полотно, просто нитей не видно. Соврать формой хуже, чем упростить её.
+ */
+function Drift() {
+  return <div className="drift" aria-hidden="true"><i /><i /><i /></div>;
 }
