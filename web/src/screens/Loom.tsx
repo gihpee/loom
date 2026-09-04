@@ -236,19 +236,18 @@ export function Loom({ progress, highlight }: {
           yy = y;
         }
         const g = ctx.createRadialGradient(x, yy, 0, x, yy, 7);
-        g.addColorStop(0, "rgba(255, 150, 125, .9)");
-        g.addColorStop(1, "rgba(255, 150, 125, 0)");
+        g.addColorStop(0, "rgba(150, 244, 255, .85)");
+        g.addColorStop(1, "rgba(150, 244, 255, 0)");
         ctx.fillStyle = g;
         ctx.fillRect(x - 7, yy - 7, 14, 14);
       }
       ctx.globalCompositeOperation = "source-over";
     };
 
-    const glow = (x: number, y: number, r: number, a: number, warm = false) => {
-      const rgb = warm ? "255, 150, 125" : "150, 244, 255";
+    const glow = (x: number, y: number, r: number, a: number) => {
       const g = ctx.createRadialGradient(x, y, 0, x, y, r);
-      g.addColorStop(0, `rgba(${rgb}, ${a})`);
-      g.addColorStop(1, `rgba(${rgb}, 0)`);
+      g.addColorStop(0, `rgba(150, 244, 255, ${a})`);
+      g.addColorStop(1, "rgba(150, 244, 255, 0)");
       ctx.fillStyle = g;
       ctx.fillRect(x - r, y - r, r * 2, r * 2);
     };
@@ -292,16 +291,16 @@ export function Loom({ progress, highlight }: {
         ctx.strokeStyle = `rgba(124, 240, 255, ${.5 * hold})`;
         ctx.lineWidth = 1.4;
         ctx.stroke();
-        glow(sx, sy, 17, .45 * hold);           // натяжение в точке съёма: полотно
+        glow(sx, sy, 17, .45 * hold);           // натяжение в точке съёма
 
         if (age < p.lead) {
           const [hx, hy] = at(reach);
-          glow(hx, hy, 13, .85, true);          // головка бежит по нити: уто́к
+          glow(hx, hy, 13, .85);                // головка бежит по нити
         } else if (age < done) {
           // Дальше головка — это челнок: идёт ровно по кромке клипа. Часть её
           // уже закрыта сотканным, наружу светит та, что ещё впереди.
           const e = ease((age - p.lead) / p.sweep);
-          glow(tx + (p.right - p.left) * e, ty, 32, .5, true);
+          glow(tx + (p.right - p.left) * e, ty, 32, .5);
         }
       }
       ctx.globalCompositeOperation = "source-over";

@@ -12,16 +12,6 @@
   /* Приглушённый, а не неоновый. Дорогое свечение получается низкой
      насыщенностью и большим радиусом, а не яркостью: неон читается как
      предупреждение, а не как акцент. */
-  /* Второй акцент. У него есть работа, а не просто присутствие: бирюза — это
-     основа, сеть, которая стоит всегда; коралл — уто́к, то, что сквозь неё
-     проходит. Поэтому коралловым горит всё движущееся: импульсы на полотне,
-     челнок раскрытия, курсор живого ответа — и действие: нажатие тоже начинает
-     движение. Состояния им не окрашены никогда: чтобы кнопка не путалась с
-     «сломалось», красный уведён в малиновую сторону. */
-  --coral-core:   #ff7d63;
-  --coral-bright: #ffa48f;
-  --coral-dim:    rgba(255, 125, 99, .16);
-
   --teal-core:   #29c6de;
   --teal-bright: #7cf0ff;
   --teal-dim:    rgba(41, 198, 222, .14);
@@ -55,8 +45,8 @@
   --ok-soft:     #3ecf8e1f;
   --warn:        #e5b95c;
   --warn-soft:   #e5b95c1f;
-  --bad:         #ff4d86;
-  --bad-soft:    #ff4d861f;
+  --bad:         #f26d78;
+  --bad-soft:    #f26d781f;
 
   /* Шкала отступов — четыре шага, больше не нужно. */
   --s1: 4px; --s2: 8px; --s3: 12px; --s4: 16px; --s5: 24px; --s6: 32px;
@@ -169,8 +159,7 @@ button.btn {
 button.btn:hover:not(:disabled) { border-color: var(--text-mute); }
 button.btn:disabled { opacity: .4; cursor: not-allowed; }
 button.btn.primary {
-  background: var(--coral-core); border-color: var(--coral-core);
-  color: #2b0d05; font-weight: 600;
+  background: var(--accent); border-color: var(--accent); color: #04211f; font-weight: 600;
 }
 button.btn.primary:hover:not(:disabled) { filter: brightness(1.08); }
 button.btn.ghost { background: none; border-color: transparent; color: var(--text-dim); }
@@ -366,7 +355,7 @@ html { scroll-behavior: smooth; }
 .lp-nav a { color: var(--ink-60); text-decoration: none; font-size: 14px;
             transition: color .18s; }
 .lp-nav a:hover { color: var(--ink-100); }
-.lp-enter { color: var(--coral-core) !important; }
+.lp-enter { color: var(--teal-core) !important; }
 
 /* --------------------------------------------------------------- первый экран */
 .lp-hero { padding: 92px 0 54px; position: relative; }
@@ -382,22 +371,21 @@ html { scroll-behavior: smooth; }
 /* Две точки, на которые отзывается полотно. Подчёркивание живое: наведение
    что-то меняет на фоне, и связь должна быть заметна. */
 .lp-point { color: var(--ink-100); text-decoration: none; position: relative;
-            border-bottom: 1px solid var(--teal-dim);
-            transition: border-color .25s, color .25s; }
-.lp-point[data-lit="true"] { border-bottom-color: var(--coral-core);
-                             color: var(--coral-bright); }
+            border-bottom: 1px solid var(--teal-dim); transition: border-color .2s; }
+.lp-point[data-lit="true"] { border-bottom-color: var(--teal-bright);
+                             color: var(--teal-bright); }
 
 .lp-primary {
   display: inline-block; text-decoration: none; border-radius: 10px;
   padding: 13px 30px; font-weight: 600; font-size: 15px;
   font-family: var(--display);
-  background: linear-gradient(180deg, var(--coral-bright), var(--coral-core));
-  color: #2b0d05;
-  box-shadow: 0 0 0 0 rgba(255, 125, 99, .4), 0 10px 30px -14px rgba(255, 125, 99, .8);
+  background: linear-gradient(180deg, var(--teal-bright), var(--teal-core));
+  color: #03211d;
+  box-shadow: 0 0 0 0 rgba(41, 198, 222, .4), 0 10px 30px -14px rgba(41, 198, 222, .8);
   transition: transform .16s cubic-bezier(.2,.7,.2,1), box-shadow .2s;
 }
 .lp-primary:hover { transform: translateY(-2px);
-                    box-shadow: 0 0 34px -6px rgba(255, 164, 143, .55); }
+                    box-shadow: 0 0 34px -6px rgba(124, 240, 255, .55); }
 
 /* ------------------------------------------------------------------- разделы */
 .lp-section { padding: 44px 0; position: relative; scroll-margin-top: 78px; }
@@ -414,7 +402,7 @@ html { scroll-behavior: smooth; }
 }
 .lp-section::after, .lp-hero::after {
   width: 400px; height: 340px; right: 8%; bottom: 4%;
-  background: radial-gradient(closest-side, rgba(255, 125, 99, .2), transparent);
+  background: radial-gradient(closest-side, rgba(140, 120, 255, .17), transparent);
 }
 .lp-h2 { font-family: var(--display); font-size: clamp(26px, 3.4vw, 38px);
          font-weight: 600; letter-spacing: -.03em; margin-bottom: 14px; }
@@ -481,13 +469,13 @@ html { scroll-behavior: smooth; }
   color: var(--ink-100); font: inherit; font-size: 16px; line-height: 1.5; }
 .lp-demo textarea::placeholder { color: var(--text-mute); }
 .lp-ask { flex: 0 0 auto; width: 46px; height: 46px; border: 0; border-radius: 15px;
-  background: var(--coral-core); color: #2b0d05; font-size: 19px; cursor: pointer;
+  background: var(--teal-core); color: #04222a; font-size: 19px; cursor: pointer;
   display: grid; place-items: center;
   transition: transform .28s cubic-bezier(.22, 1, .36, 1), opacity .25s; }
 .lp-ask:disabled { opacity: .4; cursor: default; }
 .lp-ask:not(:disabled):hover { transform: translate3d(0, -2px, 0); }
 .lp-spin { width: 16px; height: 16px; border-radius: 50%;
-  border: 2px solid rgba(43, 13, 5, .3); border-top-color: #2b0d05;
+  border: 2px solid rgba(4, 34, 42, .3); border-top-color: #04222a;
   animation: spin .7s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 
@@ -498,7 +486,7 @@ html { scroll-behavior: smooth; }
 /* Курсор показывает, что поток ещё идёт: без него пауза между токенами
    неотличима от закончившегося ответа. */
 .lp-caret { display: inline-block; width: 8px; height: 1.05em; margin-left: 3px;
-            vertical-align: -2px; background: var(--coral-core); opacity: 0; }
+            vertical-align: -2px; background: var(--teal-bright); opacity: 0; }
 .lp-caret[data-on="true"] { opacity: 1; animation: blink 1s steps(2) infinite; }
 @keyframes blink { 50% { opacity: 0; } }
 
@@ -509,8 +497,6 @@ html { scroll-behavior: smooth; }
                font-weight: 600; letter-spacing: -.02em;
                font-variant-numeric: tabular-nums; }
 .lp-stats b { font-size: 13px; font-weight: 400; color: var(--ink-60); }
-/* Одна цифра выделена, а не все три: выделены все — не выделен никто. */
-.lp-stats .lead dd { color: var(--coral-bright); }
 
 /* ------------------------------------------------------------- финальный блок */
 .lp-final { padding: 60px 0 64px; }
@@ -539,7 +525,7 @@ html { scroll-behavior: smooth; }
 .signin-card h1 { font-size: 21px; font-weight: 700; margin: 0; }
 .signin-card label { display: grid; gap: 6px; font-size: 13px; color: var(--text-dim); }
 .signin-card button { padding: 11px; border-radius: var(--r1); border: none;
-  background: var(--coral-core); color: #2b0d05; font-weight: 600; cursor: pointer; }
+  background: var(--accent); color: #06101f; font-weight: 600; cursor: pointer; }
 .signin-card button:disabled { opacity: .5; cursor: not-allowed; }
 .signin-error { color: var(--bad); font-size: 13.5px; margin: 0; }
 .signin-fine { color: var(--text-mute); font-size: 12.5px; margin: 0; }
@@ -648,8 +634,8 @@ html { scroll-behavior: smooth; }
   left: calc(var(--progress) * 100%);
   width: 3px;
   background: linear-gradient(180deg, transparent,
-              var(--coral-core) 14%, #ffe4dc 50%, var(--coral-core) 86%, transparent);
-  box-shadow: 0 0 28px 6px rgba(255, 125, 99, .55);
+              var(--teal-bright) 14%, #eafcff 50%, var(--teal-bright) 86%, transparent);
+  box-shadow: 0 0 28px 6px rgba(124, 240, 255, .6);
   opacity: calc(var(--progress) * (1 - var(--progress)) * 4);
 }
 
@@ -738,7 +724,7 @@ html { scroll-behavior: smooth; }
   border-radius: inherit; pointer-events: none;
   background: linear-gradient(120deg,
               rgba(124, 240, 255, .6) 0%, rgba(124, 240, 255, 0) 36%,
-              rgba(0, 0, 0, 0) 64%, rgba(255, 140, 115, .5) 100%);
+              rgba(0, 0, 0, 0) 64%, rgba(150, 132, 255, .45) 100%);
   mix-blend-mode: screen;
   opacity: .09;
 }

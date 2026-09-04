@@ -331,7 +331,7 @@ function Demo() {
               : <p className="lp-answer">{answer}<span className="lp-caret" data-on={busy} /></p>}
             {stat.tokens > 0 && (
               <dl className="lp-stats">
-                <div className="lead"><dt>скорость</dt><dd>{stat.rate.toFixed(1)} <b>ток/с</b></dd></div>
+                <div><dt>скорость</dt><dd>{stat.rate.toFixed(1)} <b>ток/с</b></dd></div>
                 <div><dt>первый токен</dt><dd>{(stat.first / 1000).toFixed(2)} <b>с</b></dd></div>
                 <div><dt>выдано</dt><dd>{stat.tokens} <b>ток</b></dd></div>
               </dl>
