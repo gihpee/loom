@@ -288,3 +288,47 @@ def test_без_p2p_проброс_отказывает_внятно():
     forwarder = Forwarder(stub_for=None)
     with pytest.raises(ForwardRefused, match="прямого канала"):
         forwarder.open("t", mine=[], remote={1: "peer"}, ports={1: [free_port()]})
+
+
+def test_отказ_туннеля_называет_что_знает_dht(caplog):
+    """«Адреса нет» и «адрес есть, но не набрался» — разные поломки.
+
+    В сообщении lattica они неразличимы: `Failed to reconnect to peer` в обоих
+    случаях. Со стенда: на этом различии застрял весь разбор, потому что по
+    логу нельзя было понять, искать причину на своей стороне или на чужой.
+    """
+    import logging
+
+    from looma_agent.tasks.forward import Forwarder
+
+    def упрямый(_peer):
+        raise RuntimeError("RPC call failed")
+
+    вперёд = Forwarder(stub_for=упрямый,
+                       addresses_of=lambda _p: ["/ip4/203.0.113.7/tcp/47100"])
+    with caplog.at_level(logging.WARNING):
+        вперёд._carry(_закрытый_сокет(), "12D3KooWDee41w6D", 22600)
+    сказано = caplog.text
+    assert "203.0.113.7" in сказано, "адрес из DHT обязан попасть в сообщение"
+
+
+def test_отказ_без_адресов_так_и_говорит(caplog):
+    import logging
+
+    from looma_agent.tasks.forward import Forwarder
+
+    def упрямый(_peer):
+        raise RuntimeError("RPC call failed")
+
+    вперёд = Forwarder(stub_for=упрямый, addresses_of=lambda _p: [])
+    with caplog.at_level(logging.WARNING):
+        вперёд._carry(_закрытый_сокет(), "12D3KooWDee41w6D", 22600)
+    assert "НИ ОДНОГО адреса" in caplog.text
+
+
+def _закрытый_сокет():
+    import socket
+
+    один, другой = socket.socketpair()
+    другой.close()
+    return один

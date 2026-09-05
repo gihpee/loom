@@ -52,7 +52,11 @@ class Forwarder:
     """
 
     def __init__(self, *, stub_for: Optional[Callable[[str], object]] = None,
-                 allow_local: Optional[Callable[[List[int]], None]] = None) -> None:
+                 allow_local: Optional[Callable[[List[int]], None]] = None,
+                 addresses_of: Optional[Callable[[str], List[str]]] = None) -> None:
+        # Чем спросить, что DHT знает о соседе. Без этого отказ туннеля не
+        # отличить от ненайденного адреса, а это разные поломки.
+        self.addresses_of = addresses_of or (lambda _peer: [])
         # Как достать стаб соседа. None означает «p2p нет» — тогда пробрасывать
         # некуда, и мы говорим об этом сразу, а не молча слушаем впустую.
         self.stub_for = stub_for
@@ -202,14 +206,23 @@ class Forwarder:
                          name=f"forward-{port}", daemon=True).start()
 
     def _carry(self, client: socket.socket, peer_id: str, port: int) -> None:
-        remote = RemoteSide(self.stub_for(peer_id), uuid.uuid4().hex[:12], port)
         try:
+            # Внутри try, а не снаружи: получение стаба тоже отказывает — на
+            # узле без p2p, например. Снаружи такой отказ улетал в поток приёма
+            # незамеченным: ни строчки в логе, ни закрытого сокета, а Ray
+            # ждал ответа от соединения, которое никто уже не обслуживает.
+            remote = RemoteSide(self.stub_for(peer_id), uuid.uuid4().hex[:12], port)
             remote.open()
         except (TunnelRefused, Exception) as exc:
             # Отказ соседа — не наша поломка: Ray переоткроет соединение.
             # Но молчать нельзя, иначе «кластер не собрался» останется без
             # единого следа о том, почему.
-            logger.warning("туннель к %s:%d не открылся: %s", peer_id[:12], port, exc)
+            # Что именно не получилось: адреса нет вовсе или он есть, но не
+            # набирается. В сообщении lattica это неразличимо.
+            known = self.addresses_of(peer_id)
+            logger.warning("туннель к %s:%d не открылся: %s; DHT знает о нём %s",
+                           peer_id[:12], port, exc,
+                           ", ".join(known) if known else "НИ ОДНОГО адреса")
             try:
                 client.close()
             except OSError:

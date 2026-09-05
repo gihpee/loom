@@ -217,6 +217,10 @@ class AgentNode:
     symmetric_nat: bool = False
     reachable: bool = False
     in_network: bool = False
+    #: Адреса, по которым узел себя объявляет. Хранятся целиком, а не сводятся
+    #: к одному «доступен»: когда сосед не может дозвониться, первый вопрос —
+    #: куда именно он звонил, и без этого списка ответа нет нигде.
+    visible_addrs: List[str] = field(default_factory=list)
     direct_share: float = 0.0
     direct: int = 0
     relayed: int = 0
@@ -252,6 +256,7 @@ class AgentNode:
             "symmetric_nat": self.symmetric_nat,
             "reachable": self.reachable,
             "in_network": self.in_network,
+            "visible_addrs": list(self.visible_addrs),
             "direct": self.direct,
             "relayed": self.relayed,
             "direct_share": round(self.direct_share, 3),
@@ -1069,6 +1074,7 @@ class AgentHub:
         # «дозвонится ли он». Узел без DHT принимает входящие как ни в чём не
         # бывало и при этом не находит никого.
         node.in_network = bool(peer.in_network)
+        node.visible_addrs = list(peer.visible_addrs)
         node.direct = peer.direct
         node.relayed = peer.relayed
         node.direct_share = peer.direct_share

@@ -66,7 +66,8 @@ class TaskCommands:
         # Порты соседей, притворяющиеся местными. Нужны только тем задачам,
         # которые ходят по адресам, а не по рангам, — и они об этом просят.
         self.forward = Forwarder(stub_for=self._stub_for,
-                                 allow_local=self._allow_inbound)
+                                 allow_local=self._allow_inbound,
+                                 addresses_of=self._addresses_of)
         self.channel = channel_mod.TaskChannel(on_send=self._from_task,
                                               on_ready=self._task_ready,
                                               on_forward=self._task_forward)
@@ -350,6 +351,14 @@ class TaskCommands:
         endpoint = getattr(self._peer_node(), "tunnels", None)
         if endpoint is not None:
             endpoint.allow = lambda port: port in self.allowed_ports
+
+    def _addresses_of(self, peer_id: str) -> List[str]:
+        """Что DHT знает о соседе. Только для сообщения об ошибке, поэтому
+        молча пусто, если спросить негде: диагностика не имеет права ронять
+        то, что диагностирует."""
+        node = self._peer_node()
+        getter = getattr(node, "addresses_of", None)
+        return list(getter(peer_id)) if getter else []
 
     def _stub_for(self, peer_id: str):
         node = self._peer_node()

@@ -189,6 +189,16 @@ export function Nodes() {
               <Row k="дозвонимость" v={
                 current.symmetric_nat ? "symmetric NAT — только через реле"
                   : current.reachable ? "принимает входящие" : "только через реле"} />
+              {/* Адреса целиком, а не «доступен / нет». Когда сосед не может
+                  дозвониться, первый вопрос — куда именно он звонил. */}
+              <Row k="адреса" v={
+                (current.visible_addrs ?? []).length === 0
+                  ? "нет ни одного — до узла не дозвонится никто"
+                  : <div style={{ display: "grid", gap: 4 }}>
+                      {current.visible_addrs.map((a) => (
+                        <code key={a} style={{ fontSize: 11, wordBreak: "break-all" }}>{a}</code>
+                      ))}
+                    </div>} />
               <Row k="прямых / через оркестратор"
                    v={`${current.direct} / ${current.relayed}`} />
               {current.link_rtt_ms > 0 && <Row k="RTT" v={`${current.link_rtt_ms} ms`} />}

@@ -569,6 +569,20 @@ class PeerNode:
         except Exception:
             return []
 
+    def addresses_of(self, peer_id: str) -> List[str]:
+        """Адреса соседа, как их видит DHT прямо сейчас.
+
+        Нужно ровно для одного: отличить «адрес не нашёлся» от «адрес нашёлся,
+        но не набрался». В сообщении lattica оба случая выглядят одинаково —
+        `Failed to reconnect to peer`, — и весь разбор упирается в это.
+        """
+        if self._lattica is None:
+            return []
+        try:
+            return list(self._lattica.get_peer_addresses(peer_id) or [])
+        except Exception:
+            return []
+
     # ------------------------------------------------------------- messaging
     def warm(self, peer_id: str, addrs: Optional[List[str]] = None) -> bool:
         """Get the route to a peer ready before the first token needs it.
