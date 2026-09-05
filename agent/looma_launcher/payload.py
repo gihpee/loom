@@ -23,6 +23,7 @@ import logging
 import os
 import shutil
 import tarfile
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional
@@ -196,14 +197,51 @@ def _discard(*paths: Path) -> None:
             pass
 
 
+# Сколько каталог распаковки считается живым. Распаковка нескольких мегабайт
+# укладывается в секунды; всё, что старше, осталось от убитого процесса.
+STALE_STAGING_S = 3600
+
+
+def _sweep_stale(where: Path) -> None:
+    """Убрать брошенные каталоги распаковки — и только их.
+
+    С уникальным именем такой каталог больше не будет переиспользован, поэтому
+    убитый на полпути процесс оставлял бы мусор навсегда. Возраст здесь не
+    предосторожность, а условие: рядом может распаковываться СОСЕДНИЙ агент, и
+    снести его каталог значило бы вернуть ту самую ошибку, от которой уходим.
+    """
+    import time
+
+    try:
+        entries = list(where.iterdir())
+    except OSError:
+        return
+    for path in entries:
+        if not path.name.startswith(BUILDING_PREFIX) or not path.is_dir():
+            continue
+        try:
+            if time.time() - path.stat().st_mtime < STALE_STAGING_S:
+                continue
+        except OSError:
+            continue
+        logger.info("removing a leftover staging directory %s", path.name)
+        shutil.rmtree(path, ignore_errors=True)
+
+
 def _unpack(archive: Path, version: str) -> Payload:
     """Into a staging directory, then into place with a rename.
 
     Same reason as everywhere else in this codebase: a half-unpacked payload
     that something tries to run is a failure that looks nothing like its cause.
     """
-    staging = agents_dir() / f"{BUILDING_PREFIX}{version}-{os.getpid()}"
-    shutil.rmtree(staging, ignore_errors=True)
+    # uuid, НЕ pid — ровно по той же причине, по которой он уже стоит в имени
+    # файла при скачивании (looma_agent/update.py): том бывает общим со вторым
+    # агентом на этой же машине, а в своих контейнерах оба — процесс номер 7.
+    # Совпавшее имя означало, что оба распаковываются в один каталог и чужая
+    # уборка стирает наполовину распакованное. Наружу это выходило как «the
+    # release archive holds no agent» — то есть обвинением исправного архива.
+    staging = agents_dir() / f"{BUILDING_PREFIX}{version}-{uuid.uuid4().hex[:12]}"
+    _sweep_stale(agents_dir())
     staging.mkdir(parents=True)
     try:
         with tarfile.open(archive, "r:*") as tar:

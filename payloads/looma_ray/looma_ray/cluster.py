@@ -210,6 +210,20 @@ def _occupied(port: int) -> bool:
         return probe.connect_ex(("127.0.0.1", port)) == 0
 
 
+def _said(stdout, stderr) -> str:
+    """Последнее, что сказал `ray start`. Годится и для завершившегося, и для
+    снятого по таймауту: у TimeoutExpired те же поля, просто заполнены не до
+    конца."""
+    def текст(value) -> str:
+        if not value:
+            return ""
+        return value.decode("utf-8", "replace") if isinstance(value, bytes) else value
+
+    said = (текст(stderr) + "\n" + текст(stdout)).strip().splitlines()
+    said = [line for line in said if line.strip()]
+    return " / ".join(said[-4:]) if said else "и ничего не сказал"
+
+
 def _run_start(argv: List[str], *, rank: int, retries: int,
                timeout_s: float = START_TIMEOUT_S) -> None:
     """Запустить `ray start`, повторяя, пока голова не примет.
@@ -242,14 +256,17 @@ def _run_start(argv: List[str], *, rank: int, retries: int,
         try:
             result = subprocess.run(argv, capture_output=True, text=True,
                                     timeout=timeout_s)
-        except subprocess.TimeoutExpired:
-            last = (f"не ответил за {timeout_s:.0f}с — порт головы открыт, "
-                    "но кластер за ним ещё не собран")
+        except subprocess.TimeoutExpired as slow:
+            # То, что он успел сказать, — единственное, что вообще известно о
+            # зависании. Выбрасывать это и подставлять свою догадку о причине
+            # (так было в первой версии) значит оставить человека без всякого
+            # следа: вывод не льётся наружу, пока процесс жив, а он живёт до
+            # самого таймаута.
+            last = f"не ответил за {timeout_s:.0f}с; {_said(slow.stdout, slow.stderr)}"
         else:
             if result.returncode == 0:
                 return
-            detail = (result.stderr or result.stdout or "").strip().splitlines()
-            last = " / ".join(detail[-4:] or ["вывода не было"])
+            last = _said(result.stdout, result.stderr)
         if attempt < retries:
             logger.warning("ранг %d: голова ещё не принимает (попытка %d из %d): %s",
                            rank, attempt + 1, retries + 1, last[:200])

@@ -90,3 +90,61 @@ def test_срок_попытки_передаётся_в_subprocess(monkeypatch)
     monkeypatch.setattr(sp, "run", capture)
     cluster._run_start(["ray", "start"], rank=1, retries=0, timeout_s=42)
     assert видели.get("timeout") == 42
+
+
+def test_зависший_ray_доносит_свои_слова(monkeypatch):
+    """Единственный след того, чем он был занят.
+
+    Вывод не льётся наружу, пока процесс жив, а живёт он до самого таймаута.
+    Первая версия этой ветки выбрасывала вывод и подставляла догадку о причине
+    («порт головы открыт») — догадка оказалась ещё и неверной: порт был закрыт,
+    соединение отвергалось. Человек остался без единого следа.
+    """
+    import subprocess as sp
+
+    from looma_ray import cluster
+
+    monkeypatch.setattr(cluster, "JOIN_RETRY_S", 0.01)
+
+    def hangs(*_a, **_k):
+        raise sp.TimeoutExpired(
+            cmd=["ray", "start"], timeout=60,
+            output="подняли дашборд\n", stderr="RuntimeError: version mismatch\n")
+
+    monkeypatch.setattr(sp, "run", hangs)
+    with pytest.raises(cluster.ClusterRefused) as отказ:
+        cluster._run_start(["ray", "start"], rank=0, retries=0, timeout_s=60)
+    сказано = str(отказ.value)
+    assert "version mismatch" in сказано, "слова ray обязаны дойти"
+    assert "подняли дашборд" in сказано
+
+
+def test_молчаливое_зависание_так_и_называется(monkeypatch):
+    """Пустой вывод — тоже сведение, и врать про него нельзя."""
+    import subprocess as sp
+
+    from looma_ray import cluster
+
+    def hangs(*_a, **_k):
+        raise sp.TimeoutExpired(cmd=["ray", "start"], timeout=60)
+
+    monkeypatch.setattr(sp, "run", hangs)
+    with pytest.raises(cluster.ClusterRefused) as отказ:
+        cluster._run_start(["ray", "start"], rank=0, retries=0, timeout_s=60)
+    assert "и ничего не сказал" in str(отказ.value)
+
+
+def test_байтовый_вывод_тоже_доносится(monkeypatch):
+    """text=True не гарантирован для полей TimeoutExpired во всех версиях."""
+    import subprocess as sp
+
+    from looma_ray import cluster
+
+    def hangs(*_a, **_k):
+        raise sp.TimeoutExpired(cmd=["ray", "start"], timeout=60,
+                                stderr=b"GCS \xd0\xbd\xd0\xb5 \xd0\xb2\xd1\x81\xd1\x82\xd0\xb0\xd0\xbb\n")
+
+    monkeypatch.setattr(sp, "run", hangs)
+    with pytest.raises(cluster.ClusterRefused) as отказ:
+        cluster._run_start(["ray", "start"], rank=0, retries=0, timeout_s=60)
+    assert "GCS не встал" in str(отказ.value)

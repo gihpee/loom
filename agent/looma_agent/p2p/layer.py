@@ -71,12 +71,24 @@ class PeerLayer:
         # give its port back instantly.
         self._port = port
         self._key_dir = key_dir
+        self._sampler: Optional[threading.Thread] = None
 
     # ------------------------------------------------------------------ setup
     def on_rendezvous(self, addrs: List[str], relays: Optional[List[str]] = None) -> None:
-        if self.node is not None or not _enabled():
+        """Адреса точки встречи из ответа на регистрацию.
+
+        Зовётся при КАЖДОЙ регистрации, а не только при первой: узел, не
+        вошедший в сеть с первого раза, получает здесь второй шанс. Раньше
+        отсюда молча выходили, если p2p-узел уже создан, — и узел, стартовавший
+        в неудачный момент, оставался вне сети до перезапуска процесса. Чинилось
+        это релизом на весь парк, а не перерегистрацией.
+        """
+        if not _enabled():
             return
         addrs = [a for a in (addrs or []) if a.strip()]
+        if self.node is not None:
+            self._rejoin(addrs, relays)
+            return
         if not addrs:
             logger.info("the orchestrator offers no rendezvous; messages go through it")
             return
@@ -87,6 +99,31 @@ class PeerLayer:
                 "directly: pip install 'looma-agent[p2p]'"
             )
             return
+        self._bring_up(addrs, relays)
+
+    def _rejoin(self, addrs: List[str], relays: Optional[List[str]]) -> None:
+        """Ещё раз войти в сеть — пересобрав узел.
+
+        Адреса точки встречи вшиваются в узел при сборке, поэтому «попробовать
+        снова» иначе не выражается. Делается это ТОЛЬКО когда узел ни с кем не
+        соединён: пересобирать работающий значит рвать живые туннели ради
+        задачи, которая уже решена.
+        """
+        if not addrs or self.node is None or self.node.connected_peers():
+            return
+        logger.info("p2p node is in the network with nobody; rebuilding it against %s",
+                    addrs[0])
+        try:
+            self.node.close()
+        except Exception:
+            logger.warning("the old p2p node did not close cleanly", exc_info=True)
+        # Сначала None: цикл выборки состояния смотрит на это поле и так
+        # завершается, не оставляя второго такого же рядом с новым.
+        self.node = None
+        self.identity = None
+        self._bring_up(addrs, relays)
+
+    def _bring_up(self, addrs: List[str], relays: Optional[List[str]]) -> None:
         # The rendezvous is a DHT entry point and nothing else. Pointing the
         # relay client at it leaves the node waiting for a reservation that
         # never comes (measured: 15s, zero peers). A real circuit-relay server
@@ -164,6 +201,9 @@ class PeerLayer:
             )
 
     def _start_sampler(self) -> None:
+        if self._sampler is not None and self._sampler.is_alive():
+            return          # пересборка узла не повод заводить вторую такую же
+
         def sample() -> None:
             while self.node is not None:
                 try:
@@ -179,7 +219,9 @@ class PeerLayer:
                     logger.debug("sampling the p2p state failed", exc_info=True)
                 time.sleep(SAMPLE_INTERVAL_S)
 
-        threading.Thread(target=sample, name="looma-p2p-sampler", daemon=True).start()
+        self._sampler = threading.Thread(target=sample, name="looma-p2p-sampler",
+                                         daemon=True)
+        self._sampler.start()
 
     # ----------------------------------------------------------------- report
     def status(self) -> agent_pb2.PeerStatus:
