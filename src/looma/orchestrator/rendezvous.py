@@ -28,6 +28,7 @@ host in the system that needs one.
 
 from __future__ import annotations
 
+import ipaddress
 import logging
 import os
 from typing import List, Optional
@@ -193,9 +194,10 @@ class RendezvousNode:
         return self._lattica.peer_id() if self._lattica is not None else ""
 
     def _announced_addrs(self) -> List[str]:
+        kind = host_proto(self.public_host)
         return [
-            f"/ip4/{self.public_host}/tcp/{self.port}",
-            f"/ip4/{self.public_host}/udp/{self.port}/quic-v1",
+            f"/{kind}/{self.public_host}/tcp/{self.port}",
+            f"/{kind}/{self.public_host}/udp/{self.port}/quic-v1",
         ]
 
     def multiaddrs(self) -> List[str]:
@@ -208,6 +210,25 @@ class RendezvousNode:
         if self._lattica is None or not self.public_host:
             return []
         return [f"{addr}/p2p/{self.peer_id}" for addr in self._announced_addrs()]
+
+
+def host_proto(host: str) -> str:
+    """Каким протоколом объявлять этот хост: имени нужен /dns4, адресу — /ip4.
+
+    Не косметика. Мультиадрес `/ip4/<имя>` невалиден: после /ip4 обязан идти
+    literal IPv4, и разобрать такое нельзя. Работник получает адрес точки
+    встречи, не может его набрать, остаётся вне DHT — и дальше не находит
+    соседей по peer id. Со стенда: реле объявлялось как /dns4 и работало,
+    точка встречи как /ip4 с доменом — и не работала никогда, а выглядело это
+    как «Ray не собирает кластер».
+
+    Та же развилка есть в relay/relay.mjs; здесь она повторена, потому что
+    сервисы разные и общего кода у них нет.
+    """
+    try:
+        return "ip6" if ipaddress.ip_address(host).version == 6 else "ip4"
+    except ValueError:
+        return "dns4"
 
 
 def host_of(address: str) -> str:

@@ -146,3 +146,43 @@ def test_the_relay_hands_its_address_over_without_a_human(monkeypatch, tmp_path)
     monkeypatch.setenv("LOOMA_P2P_RELAY", "/ip4/198.51.100.9/tcp/47200/p2p/12D3KooWOther")
     assert relay_addrs() == ["/ip4/198.51.100.9/tcp/47200/p2p/12D3KooWOther"]
 
+
+
+# --------------------------------------------------- имя против адреса
+# Со стенда: узлы не находили друг друга, Ray не собирал кластер, и искать
+# причину пошли в Ray, в порты и в файрвол. Она была здесь.
+def test_домен_объявляется_как_dns4_а_не_ip4():
+    """`/ip4/<имя>` — невалидный мультиадрес: после /ip4 обязан идти literal
+    IPv4. Работник получает такой адрес, не может его набрать, остаётся вне
+    DHT — и дальше не находит соседей по peer id. Снаружи это выглядит как
+    «кластер не собирается», и до настоящей причины идти три слоя."""
+    from looma.orchestrator.rendezvous import host_proto
+
+    assert host_proto("loomafloat.ru") == "dns4"
+    assert host_proto("looma.example.com") == "dns4"
+
+
+def test_адрес_объявляется_как_ip4():
+    from looma.orchestrator.rendezvous import host_proto
+
+    assert host_proto("203.0.113.7") == "ip4"
+    assert host_proto("2001:db8::1") == "ip6"
+
+
+def test_объявленные_адреса_домена_можно_набрать():
+    """Проверяется целиком то, что уезжает работнику."""
+    from looma.orchestrator.rendezvous import RendezvousNode
+
+    node = RendezvousNode(public_host="loomafloat.ru", port=47100)
+    addrs = node._announced_addrs()
+    assert addrs == ["/dns4/loomafloat.ru/tcp/47100",
+                     "/dns4/loomafloat.ru/udp/47100/quic-v1"]
+    for addr in addrs:
+        assert not addr.startswith("/ip4/"), "имя под /ip4 не разбирается"
+
+
+def test_объявленные_адреса_ip_остаются_ip4():
+    from looma.orchestrator.rendezvous import RendezvousNode
+
+    node = RendezvousNode(public_host="203.0.113.7", port=47100)
+    assert node._announced_addrs()[0] == "/ip4/203.0.113.7/tcp/47100"
