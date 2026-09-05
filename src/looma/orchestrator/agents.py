@@ -216,6 +216,7 @@ class AgentNode:
     peer_id: str = ""
     symmetric_nat: bool = False
     reachable: bool = False
+    in_network: bool = False
     direct_share: float = 0.0
     direct: int = 0
     relayed: int = 0
@@ -250,6 +251,7 @@ class AgentNode:
             "peer_id": self.peer_id,
             "symmetric_nat": self.symmetric_nat,
             "reachable": self.reachable,
+            "in_network": self.in_network,
             "direct": self.direct,
             "relayed": self.relayed,
             "direct_share": round(self.direct_share, 3),
@@ -1063,6 +1065,10 @@ class AgentHub:
         # Адрес без /p2p-circuit значит, что до узла можно дозвониться прямо;
         # circuit — это тот же путь через реле под другим именем.
         node.reachable = any("/p2p-circuit" not in a for a in peer.visible_addrs)
+        # Разные вопросы: reachable — «дозвонятся ли до него», in_network —
+        # «дозвонится ли он». Узел без DHT принимает входящие как ни в чём не
+        # бывало и при этом не находит никого.
+        node.in_network = bool(peer.in_network)
         node.direct = peer.direct
         node.relayed = peer.relayed
         node.direct_share = peer.direct_share

@@ -7,6 +7,10 @@ import {
 
 function linkBadge(n: Node) {
   if (!n.peer_id) return <Badge tone="dim">нет p2p</Badge>;
+  // Раньше всего остального: узел вне сети не найдёт никого, и остальные
+  // подписи про него в этот момент вводят в заблуждение — он и «принимает
+  // входящие», и не может позвонить сам.
+  if (!n.in_network) return <Badge tone="bad">вне сети</Badge>;
   if (n.symmetric_nat) return <Badge tone="warn">symmetric NAT</Badge>;
   // Только про входящие соединения — и ни слова про реле, которого может и не
   // быть. Прежняя надпись «relay» читалась как «идёт через реле» и спорила с
@@ -31,7 +35,13 @@ export function Nodes() {
         n.node_id.toLowerCase().includes(q) || n.gpu_name.toLowerCase().includes(q));
     }
     if (only === "idle") items = items.filter((n) => n.tasks_running === 0);
-    if (only === "problem") items = items.filter((n) => !n.accepts_tasks || n.update_error);
+    // Узел вне сети берёт задачи и выглядит здоровым, но в группе из двух
+    // машин бесполезен: соседа он не найдёт. Это проблема, и искать её будут
+    // здесь, а не в логе того, кто пытался до него дозвониться.
+    if (only === "problem") {
+      items = items.filter((n) => !n.accepts_tasks || n.update_error
+                                  || (n.peer_id && !n.in_network));
+    }
     return [...items].sort((a, b) => a.node_id.localeCompare(b.node_id));
   }, [nodes.data, query, only]);
 
@@ -171,6 +181,11 @@ export function Nodes() {
             <div className="card">
               <Row k="peer id" v={current.peer_id
                 ? <code>{current.peer_id.slice(0, 20)}…</code> : "p2p выключен"} />
+              {/* Два разных вопроса, и путать их было дорого: первый — найдёт
+                  ли этот узел соседа, второй — дозвонятся ли до него самого. */}
+              <Row k="в сети узлов" v={current.in_network
+                ? "да — видит точку встречи"
+                : "НЕТ: соседей не найдёт, нужен перезапуск агента"} />
               <Row k="дозвонимость" v={
                 current.symmetric_nat ? "symmetric NAT — только через реле"
                   : current.reachable ? "принимает входящие" : "только через реле"} />

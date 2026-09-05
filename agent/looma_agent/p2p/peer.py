@@ -241,6 +241,16 @@ def behind_container_nat() -> bool:
     return bool(ips) and all(ip.startswith(_DOCKER_POOL) for ip in ips)
 
 
+def peer_id_of(addr: str) -> str:
+    """Идентификатор пира из мультиадреса — то, что стоит после последнего /p2p/.
+
+    Последнего, а не первого: в адресе через реле их два, и нужен тот, до кого
+    едем, а не тот, через кого.
+    """
+    parts = addr.split("/p2p/")
+    return parts[-1].split("/")[0].strip() if len(parts) > 1 else ""
+
+
 def _local_ips() -> List[str]:
     """Non-loopback IPv4 addresses of this host, best effort."""
     found: List[str] = []
@@ -337,14 +347,31 @@ class PeerNode:
             )
             return identity
 
+    def in_network(self) -> bool:
+        """Связан ли узел С ТОЧКОЙ ВСТРЕЧИ — а не «хоть с кем-нибудь».
+
+        Разница решающая. Реле — тоже пир, и соединение с ним есть почти
+        всегда: за резервацией узел идёт туда первым делом. Считая его за вход
+        в сеть, узел без точки встречи выглядит здоровым — а соседей найти не
+        может, потому что адрес по peer id ищется через DHT, вход в который
+        даёт именно точка встречи.
+
+        Со стенда это стоило дня разбирательств: предупреждения при старте нет,
+        связь с соседом не открывается, и ничто не связывает одно с другим.
+        """
+        if not self.bootstraps:
+            return True
+        wanted = {peer_id_of(addr) for addr in self.bootstraps} - {""}
+        if not wanted:
+            return True
+        return bool(wanted & set(self.connected_peers()))
+
     def _await_join(self) -> bool:
         """Block until this node is part of the network, or give up.
 
         `get_all_peers()` lists ESTABLISHED connections, so it is not a
         readiness signal for a specific peer — bootstrapping does not connect
-        two workers to each other, and each is resolved on first use. It is a
-        perfectly good signal for "am I in the network at all", which is what
-        has to be true before any resolution can succeed.
+        two workers to each other, and each is resolved on first use.
         """
         if not self.bootstraps:
             return True
@@ -352,7 +379,7 @@ class PeerNode:
 
         deadline = time.monotonic() + self.JOIN_TIMEOUT_S
         while time.monotonic() < deadline:
-            if self.connected_peers():
+            if self.in_network():
                 return True
             time.sleep(0.1)
         return False

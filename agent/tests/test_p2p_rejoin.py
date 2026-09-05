@@ -27,6 +27,9 @@ class ПоддельныйУзел:
     def connected_peers(self):
         return list(self.peers)
 
+    def in_network(self):
+        return bool(self.peers)
+
     def close(self):
         self.closed = True
 
@@ -101,3 +104,65 @@ def test_первый_подъём_как_прежде(monkeypatch):
 
     assert слой_.node is not None
     assert сделан["options"]["relay_servers"] == ["/relay"]
+
+
+# ------------------------------------------------ «в сети» значит «с точкой встречи»
+def сеть(bootstraps, connected):
+    """PeerNode без Lattica: проверяется только правило, а не стек."""
+    from looma_agent.p2p.peer import PeerNode
+
+    node = PeerNode.__new__(PeerNode)
+    node.bootstraps = list(bootstraps)
+    node.connected_peers = lambda: list(connected)
+    return node
+
+
+def test_одно_реле_не_считается_сетью():
+    """Со стенда, и это стоило дня.
+
+    За резервацией узел идёт к реле первым делом, поэтому соединение с ним
+    есть почти всегда. Считая его входом в сеть, узел без точки встречи
+    выглядит здоровым — предупреждения при старте нет, — а соседей найти не
+    может: адрес по peer id ищется через DHT, вход в который даёт именно
+    точка встречи.
+    """
+    узел = сеть(["/dns4/looma.example/tcp/47100/p2p/ТОЧКА"], connected=["РЕЛЕ"])
+    assert not узел.in_network()
+
+
+def test_связь_с_точкой_встречи_и_есть_сеть():
+    узел = сеть(["/dns4/looma.example/tcp/47100/p2p/ТОЧКА"],
+                connected=["РЕЛЕ", "ТОЧКА"])
+    assert узел.in_network()
+
+
+def test_без_точки_встречи_вопрос_не_стоит():
+    """Некуда входить — значит и жаловаться не на что."""
+    assert сеть([], connected=[]).in_network()
+
+
+def test_адрес_без_идентификатора_не_ломает_проверку():
+    """Такой адрес набрать нельзя, но и отказывать из-за него нельзя."""
+    assert сеть(["/ip4/1.2.3.4/tcp/47100"], connected=[]).in_network()
+
+
+# ---------------------------------------------- то же самое видно снаружи
+def test_состояние_сети_уходит_в_телеметрию(monkeypatch):
+    """Без этого поля вопрос «состоит ли узел в DHT» не имел ответа нигде.
+
+    Значок «принимает» отвечает на обратный вопрос — дозвонятся ли ДО него, —
+    а предупреждение в логе видно только тому, у кого есть доступ к машине.
+    Разбирательство сводилось к чтению лога того, кто пытался позвонить.
+    """
+    слой_, _ = слой(monkeypatch, узел=ПоддельныйУзел(["ТОЧКА"]))
+    assert слой_.status().in_network is True
+
+    слой_, _ = слой(monkeypatch, узел=ПоддельныйУзел([]))
+    assert слой_.status().in_network is False
+
+
+def test_без_p2p_узла_состояние_ложно(monkeypatch):
+    """Узла нет — значит и в сети его нет; врать положительным ответом нельзя."""
+    слой_, _ = слой(monkeypatch)
+    слой_.node = None
+    assert слой_.status().in_network is False

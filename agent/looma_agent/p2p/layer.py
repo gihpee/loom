@@ -109,10 +109,9 @@ class PeerLayer:
         соединён: пересобирать работающий значит рвать живые туннели ради
         задачи, которая уже решена.
         """
-        if not addrs or self.node is None or self.node.connected_peers():
+        if not addrs or self.node is None or self.node.in_network():
             return
-        logger.info("p2p node is in the network with nobody; rebuilding it against %s",
-                    addrs[0])
+        logger.info("p2p node lost its rendezvous; rebuilding it against %s", addrs[0])
         try:
             self.node.close()
         except Exception:
@@ -249,6 +248,10 @@ class PeerLayer:
             visible_addrs=self._visible or (identity.visible_addrs if identity else []),
             link_rtt_ms=stats["link_rtt_ms"],
             relay_rtt_ms=self._relay_rtt_ms or stats["relay_rtt_ms"],
+            # Спрашивается каждый раз, а не берётся со старта: связь с точкой
+            # встречи теряется при её перезапуске, и снимок годовой давности
+            # здесь ровно так же бесполезен, как и по достижимости.
+            in_network=bool(self.node and self.node.in_network()),
         )
 
     def identity_message(self):

@@ -110,3 +110,31 @@ def test_разные_узлы_за_симметричным_nat_всё_ещё_�
     a = node("nv3-a", symmetric_nat=True)
     b = node("nv3-b", symmetric_nat=True)
     assert pairs_needing_relay([a, b]) == [("nv3-a", "nv3-b")]
+
+
+# ------------------------------------------- «в сети» отдельно от «доступен»
+def test_состояние_сети_отдаётся_наружу():
+    """Два разных вопроса, и путать их дорого.
+
+    `reachable` — дозвонятся ли ДО узла. `in_network` — дозвонится ли он сам,
+    то есть видит ли точку встречи, через которую ищутся адреса по peer id.
+    Узел без DHT принимает входящие как ни в чём не бывало и молча не находит
+    никого; пока это не было видно снаружи, разбирательство сводилось к чтению
+    лога того, кто пытался позвонить.
+    """
+    from looma.orchestrator.agents import AgentNode
+
+    вне = AgentNode(node_id="a", peer_id="p", reachable=True, in_network=False)
+    assert вне.as_dict()["reachable"] is True
+    assert вне.as_dict()["in_network"] is False
+
+    внутри = AgentNode(node_id="b", peer_id="p", reachable=False, in_network=True)
+    assert внутри.as_dict()["in_network"] is True
+
+
+def test_по_умолчанию_узел_считается_вне_сети():
+    """Пока узел не сказал обратного, обещать связь нельзя: старые агенты
+    поля не шлют, и молчание не должно выглядеть как «всё хорошо»."""
+    from looma.orchestrator.agents import AgentNode
+
+    assert AgentNode(node_id="a").as_dict()["in_network"] is False
