@@ -273,3 +273,4 @@ def test_голова_не_повторяет(monkeypatch):
     with pytest.raises(cluster.ClusterRefused, match="ранга 0"):
         cluster._run_start(["ray", "start", "--head"], rank=0, retries=0)
     assert len(attempts) == 1
+

@@ -229,6 +229,24 @@ input:-webkit-autofill:focus, textarea:-webkit-autofill, select:-webkit-autofill
 }
 input::placeholder, textarea::placeholder, select::placeholder { color: var(--text-mute); }
 input.mono, textarea.mono { font-family: var(--mono); font-size: 12.5px; }
+/* Список узлов с переключением по клику. Заменяет <select multiple>, где выбор
+   несмежных строк требует ctrl или cmd, а простой клик молча берёт диапазон. */
+.picklist {
+  display: grid; gap: 2px; padding: 4px; max-height: 148px; overflow-y: auto;
+  border: 1px solid var(--line); border-radius: var(--r1); background: var(--bg);
+}
+.pickrow {
+  display: flex; align-items: center; gap: var(--s2);
+  padding: 6px 8px; border-radius: 5px; cursor: pointer;
+  font-size: 13px; transition: background .12s;
+}
+.pickrow:hover { background: var(--raised); }
+.pickrow[data-on="true"] { background: var(--accent-soft); }
+.pickrow input { width: auto; margin: 0; accent-color: var(--accent); cursor: pointer; }
+.pickrow span { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pickrow b { font-weight: 400; font-size: 12px; color: var(--text-mute);
+             font-variant-numeric: tabular-nums; }
+
 select[multiple] { padding: 4px; }
 select[multiple] option { padding: 5px 7px; border-radius: 4px; }
 

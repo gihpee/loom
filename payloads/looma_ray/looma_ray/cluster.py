@@ -31,6 +31,13 @@ JOIN_WAIT_S = float(os.environ.get("LOOMA_RAY_JOIN_WAIT_S", "900"))
 # Голова занимает свой порт задолго до того, как становится готова принимать.
 JOIN_ATTEMPTS = int(os.environ.get("LOOMA_RAY_JOIN_ATTEMPTS", "5"))
 JOIN_RETRY_S = float(os.environ.get("LOOMA_RAY_JOIN_RETRY_S", "15"))
+# Сколько ждать ОДНУ попытку `ray start`. Отдельно от бюджета всех попыток:
+# раньше здесь стояло 600 секунд при бюджете примерно в 75 — одна попытка
+# съедала весь срок, и повтора не случалось ни разу.
+START_TIMEOUT_S = float(os.environ.get("LOOMA_RAY_START_TIMEOUT_S", "60"))
+# Голове срок длиннее: повторов у неё нет, ждать ей некого, а подняться на
+# занятой машине она может и не за минуту.
+HEAD_START_TIMEOUT_S = float(os.environ.get("LOOMA_RAY_HEAD_START_TIMEOUT_S", "300"))
 
 
 # Взводится, когда задачу снимают. Ожидания смотрят на него, иначе SIGTERM во
@@ -152,9 +159,14 @@ def start_node(rank: int, size: int, *, gpus: Optional[int] = None,
             "попытки. Снимите старую группу — или, если это чужой процесс, "
             "сдвиньте окно через LOOMA_RAY_PORT_BASE")
 
+    # «Пробую», а не «подключаюсь»: строка пишется ДО запуска. Прежняя
+    # формулировка обещала состоявшееся подключение, и по ней невозможно было
+    # отличить успех от зависания — в логе они выглядели одинаково.
     logger.info("ранг %d/%d: %s", rank, size,
-                "поднимаю голову" if rank == 0 else f"подключаюсь к {address}")
-    _run_start(argv, rank=rank, retries=0 if rank == 0 else JOIN_ATTEMPTS)
+                "поднимаю голову" if rank == 0 else f"пробую подключиться к {address}")
+    _run_start(argv, rank=rank,
+               retries=0 if rank == 0 else JOIN_ATTEMPTS,
+               timeout_s=HEAD_START_TIMEOUT_S if rank == 0 else START_TIMEOUT_S)
     return address
 
 
@@ -198,7 +210,8 @@ def _occupied(port: int) -> bool:
         return probe.connect_ex(("127.0.0.1", port)) == 0
 
 
-def _run_start(argv: List[str], *, rank: int, retries: int) -> None:
+def _run_start(argv: List[str], *, rank: int, retries: int,
+               timeout_s: float = START_TIMEOUT_S) -> None:
     """Запустить `ray start`, повторяя, пока голова не примет.
 
     Повтор нужен именно неголовным рангам. Открытый порт головы не значит, что
@@ -206,16 +219,37 @@ def _run_start(argv: List[str], *, rank: int, retries: int) -> None:
     десятки — и присоединение в этом промежутке падает по таймауту raylet'а.
     Снаружи «занимает порт» и «готова» неотличимы, поэтому вместо угадывания
     здесь просто пробуют ещё раз.
+
+    Зависание — такая же неудачная попытка, как ненулевой код возврата, и
+    считается ею. Раньше `subprocess.run(timeout=...)` бросал TimeoutExpired
+    мимо всего этого: исключение пролетало и проверку кода, и повторы, и
+    осмысленный отказ, а наружу уходил стек вызовов из subprocess.py.
+
+    Причём зависание здесь — не редкий случай, а основной. Между машинами порт
+    головы держит агент, подставляя туда туннель. Такой слушатель принимает
+    соединение мгновенно, ещё до того, как на том конце что-то появится, и
+    «соединение отвергнуто» — сигнал, на котором построен быстрый провал, — не
+    приходит никогда. Ray ждёт ответа, которого нет, пока его не снимут.
+
+    Убирать за оборванной попыткой здесь нечем: `ray stop` снял бы и соседние
+    ранги того же пользователя (см. stop_node). Если попытка успела занять
+    порт, следующая честно скажет об этом своим сообщением.
     """
     last = ""
     for attempt in range(retries + 1):
         if STOP.is_set():
             raise Stopped("сборку кластера прервали")
-        result = subprocess.run(argv, capture_output=True, text=True, timeout=600)
-        if result.returncode == 0:
-            return
-        detail = (result.stderr or result.stdout or "").strip().splitlines()
-        last = " / ".join(detail[-4:] or ["вывода не было"])
+        try:
+            result = subprocess.run(argv, capture_output=True, text=True,
+                                    timeout=timeout_s)
+        except subprocess.TimeoutExpired:
+            last = (f"не ответил за {timeout_s:.0f}с — порт головы открыт, "
+                    "но кластер за ним ещё не собран")
+        else:
+            if result.returncode == 0:
+                return
+            detail = (result.stderr or result.stdout or "").strip().splitlines()
+            last = " / ".join(detail[-4:] or ["вывода не было"])
         if attempt < retries:
             logger.warning("ранг %d: голова ещё не принимает (попытка %d из %d): %s",
                            rank, attempt + 1, retries + 1, last[:200])

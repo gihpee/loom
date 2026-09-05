@@ -278,15 +278,30 @@ export function Ray() {
                      // обещала «самые свободные» и вводила в заблуждение ровно
                      // тогда, когда на неё полагаешься.
                      : "ничего не выбрано — возьмёт тех, кто легче сходится с соседями"}>
-              <select multiple size={4} value={picked}
-                      onChange={(e) => setPicked(
-                        Array.from(e.target.selectedOptions, (o) => o.value))}>
-                {free.map((n) => (
-                  <option key={n.node_id} value={n.node_id}>
-                    {n.node_id} · {n.gpus_free}/{n.gpus_total} GPU
-                  </option>
-                ))}
-              </select>
+              {/* Не <select multiple>: в нём простой клик заменяет выбор,
+                  shift-клик берёт диапазон, а несмежные узлы требуют ctrl или
+                  cmd. Человек, выбирающий две машины из пяти, получает все
+                  четыре между ними — и это поведение браузера, а не ошибка,
+                  которую можно исправить. Здесь клик переключает один узел, и
+                  клавиши не нужны вовсе. */}
+              <div className="picklist">
+                {free.map((n) => {
+                  const on = picked.includes(n.node_id);
+                  return (
+                    <label key={n.node_id} className="pickrow" data-on={on}>
+                      <input type="checkbox" checked={on}
+                             onChange={() => setPicked(on
+                               ? picked.filter((x) => x !== n.node_id)
+                               // В конец, а не по порядку списка: порядок
+                               // выбора и есть порядок рангов, и первым
+                               // отмеченный становится нулевым.
+                               : [...picked, n.node_id])} />
+                      <span>{n.node_id}</span>
+                      <b>{n.gpus_free}/{n.gpus_total} GPU</b>
+                    </label>
+                  );
+                })}
+              </div>
             </Field>
             <Field label={picked.length ? "рангов на узле" : "узлов"}
                    hint={picked.length > 1
