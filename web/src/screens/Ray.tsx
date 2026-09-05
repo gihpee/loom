@@ -190,6 +190,13 @@ function Cluster({ group, nodes, onStop, onForget }: {
   );
 }
 
+/** «1 ранг», «2 ранга», «5 рангов». Мелочь, но текст с «2 рангов» читается как
+ *  недоделка и заставляет усомниться в остальном. */
+function рангов(n: number) {
+  const хвост = n % 100 > 4 && n % 100 < 20 ? 0 : n % 10;
+  return `${n} ${хвост === 1 ? "ранг" : хвост > 1 && хвост < 5 ? "ранга" : "рангов"}`;
+}
+
 export function Ray() {
   const groups = usePoll<{ groups: Group[] }>("/admin/groups", 6000);
   const tasks = usePoll<{ tasks: Task[] }>("/admin/tasks", 6000);
@@ -197,7 +204,7 @@ export function Ray() {
   const action = useAction(groups.refresh);
   const toast = useToast();
 
-  const [node, setNode] = useState("");
+  const [picked, setPicked] = useState<string[]>([]);
   const [size, setSize] = useState("1");
   const [label, setLabel] = useState("");
   const [version, setVersion] = useState("");
@@ -229,9 +236,11 @@ export function Ray() {
   const launch = () => action.run(async () => {
     await send("/admin/ray", "POST", {
       // Узел, названный дважды, получает два ранга. Это не трюк, а способ
-      // собрать кластер там, где сеть между рангами не нужна вовсе.
-      node_ids: node ? Array(count).fill(node) : [],
-      size: node ? undefined : count,
+      // собрать кластер там, где сеть между рангами не нужна вовсе: выбрав
+      // одну машину и поставив два ранга, получаешь два ранга на ней, а выбрав
+      // две машины — по рангу на каждой.
+      node_ids: picked.flatMap((n) => Array(count).fill(n)),
+      size: picked.length ? undefined : count,
       script: script || undefined,
       label: label || undefined,
       ray_version: version || undefined,
@@ -257,11 +266,21 @@ export function Ray() {
       <section>
         <h2>Поднять кластер</h2>
         <div className="card" style={{ display: "grid", gap: 14 }}>
-          <div style={{ display: "grid", gap: 12,
+          <div style={{ display: "grid", gap: 12, alignItems: "start",
                         gridTemplateColumns: "repeat(auto-fit, minmax(190px, 1fr))" }}>
-            <Field label="узел" hint={free.length ? "" : "нет узлов, берущих работу"}>
-              <select value={node} onChange={(e) => setNode(e.target.value)}>
-                <option value="">выбрать самые свободные</option>
+            <Field label="узлы"
+                   hint={!free.length
+                     ? "нет узлов, берущих работу"
+                     : picked.length
+                     ? `выбрано ${picked.length} из ${free.length}`
+                     // Честно про порядок: сортировка идёт по связности, и лишь
+                     // при равенстве — по свободной памяти. Прежняя подпись
+                     // обещала «самые свободные» и вводила в заблуждение ровно
+                     // тогда, когда на неё полагаешься.
+                     : "ничего не выбрано — возьмёт тех, кто легче сходится с соседями"}>
+              <select multiple size={4} value={picked}
+                      onChange={(e) => setPicked(
+                        Array.from(e.target.selectedOptions, (o) => o.value))}>
                 {free.map((n) => (
                   <option key={n.node_id} value={n.node_id}>
                     {n.node_id} · {n.gpus_free}/{n.gpus_total} GPU
@@ -269,9 +288,14 @@ export function Ray() {
                 ))}
               </select>
             </Field>
-            <Field label={node ? "рангов на узле" : "узлов"}
-                   hint={node ? "все на одной машине" : `доступно ${free.length}`}>
-              <input type="number" min={1} max={node ? 8 : Math.max(1, free.length)}
+            <Field label={picked.length ? "рангов на узле" : "узлов"}
+                   hint={picked.length > 1
+                     ? `по столько на каждом из ${picked.length}`
+                     : picked.length
+                     ? "все на одной машине"
+                     : `доступно ${free.length}`}>
+              <input type="number" min={1}
+                     max={picked.length ? 8 : Math.max(1, free.length)}
                      value={size} onChange={(e) => setSize(e.target.value)} />
             </Field>
             <Field label="метка" hint="чтобы найти его потом">
@@ -295,9 +319,13 @@ export function Ray() {
               поднять кластер
             </Button>
             <span className="sub" style={{ margin: 0 }}>
-              {node && count > 1
+              {picked.length === 1 && count > 1
                 ? "все ранги на одном узле: разговаривают по локалхосту, "
                   + "сеть между ними не участвует вовсе"
+                : picked.length > 1
+                ? `${рангов(picked.length * count)} на ${picked.length} узлах, `
+                  + "выбранных вручную: порядок по связности не применяется. "
+                  + `Ранг 0 — ${picked[0]}: скрипт запускается там`
                 : awkward.length > 0
                 ? `${awkward.length} из ${free.length} узлов за симметричным NAT: `
                   + "с ними кластер пойдёт через реле"
